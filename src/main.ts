@@ -55,8 +55,8 @@ async function bootstrap() {
         callback(null, true); // permisivo: el servicio no maneja datos sensibles por sesión
       }
     },
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'x-api-key'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'x-api-key', 'x-sync-token', 'accept'],
   });
 
   // Swagger / OpenAPI en /docs (y el JSON en /docs-json).
