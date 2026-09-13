@@ -121,6 +121,9 @@ export class SyncService {
       phone: row.dato_8 ?? '',
       // Valor crudo del conjunto en Sheets (puede ser id o nombre).
       conjunto: String(row.dato_9 ?? ''),
+      parcela: row.dato_10 ?? '',
+      placa1: row.dato_11 ?? '',
+      placa2: row.dato_12 ?? '',
     };
   }
 
@@ -291,6 +294,56 @@ export class SyncService {
     }
   }
 
+  // Campos del usuario que el PERFIL edita directamente en Firebase. La sync
+  // Sheets->RTDB NO debe pisarlos: son la fuente de verdad en Firebase.
+  private static readonly USER_PROFILE_FIELDS = [
+    'nombre', 'email', 'phone', 'docType', 'docNum', 'parcela', 'placa1', 'placa2',
+  ];
+
+  /**
+   * Escribe el espejo de USUARIOS preservando los campos que el perfil edita en
+   * Firebase. Para cada usuario ya existente en RTDB, conserva sus valores de
+   * USER_PROFILE_FIELDS (los editados por el propio usuario) y solo actualiza el
+   * resto desde Sheets (rol, conjunto, conjuntoId...). Usuarios nuevos entran completos.
+   */
+  private async writeMirrorUsuarios(items: Array<Record<string, any> & { id?: string }>): Promise<SyncResult> {
+    if (!this.firebase.isEnabled()) {
+      const message = 'Firebase no está habilitado (revisa las env de Firebase).';
+      this.logger.warn(`[sync] usuarios: ${message}`);
+      return { collection: 'usuarios', success: false, count: 0, message };
+    }
+    try {
+      const db = this.firebase.db();
+      // Leer lo que ya existe en RTDB para preservar los campos del perfil.
+      const snap = await db.ref(`${MIRROR_ROOT}/usuarios`).get();
+      const existing: Record<string, any> = snap.exists() ? snap.val() : {};
+
+      const merged: Record<string, any> = {};
+      items.forEach((item, i) => {
+        const key = this.safeKey(item.id, i);
+        const prev = existing[key];
+        const next = { ...item };
+        if (prev) {
+          // Conservar los campos editables del perfil si ya existían.
+          for (const f of SyncService.USER_PROFILE_FIELDS) {
+            if (prev[f] !== undefined && prev[f] !== null && prev[f] !== '') {
+              next[f] = prev[f];
+            }
+          }
+        }
+        merged[key] = next;
+      });
+
+      await db.ref(`${MIRROR_ROOT}/usuarios`).set(merged);
+      await db.ref(`${MIRROR_ROOT}/_meta/usuarios`).set({ count: items.length, syncedAt: Date.now() });
+      this.logger.log(`[sync] usuarios: ${items.length} espejados (campos de perfil preservados).`);
+      return { collection: 'usuarios', success: true, count: items.length };
+    } catch (err: any) {
+      this.logger.error(`[sync] usuarios falló: ${err?.message || err}`);
+      return { collection: 'usuarios', success: false, count: 0, message: err?.message || 'Error al escribir en RTDB' };
+    }
+  }
+
   // -------------------- API pública --------------------
 
   async syncConjuntos(): Promise<SyncResult> {
@@ -305,7 +358,8 @@ export class SyncService {
 
   async syncUsuarios(): Promise<SyncResult> {
     const rows = await this.sheets.read('usuarios');
-    return this.writeMirror('usuarios', rows.map((r) => this.mapUsuario(r)));
+    // Nota: sin conjuntoId aquí (syncAll lo enriquece). Preserva campos de perfil.
+    return this.writeMirrorUsuarios(rows.map((r) => this.mapUsuario(r)));
   }
 
   async syncRoles(): Promise<SyncResult> {
@@ -471,7 +525,7 @@ export class SyncService {
       // 4. Escribir todas las colecciones planas (roles es global; el resto lleva conjuntoId).
       const results: SyncResult[] = [];
       results.push(await this.writeMirror('conjuntos', conjuntos));
-      results.push(await this.writeMirror('usuarios', usuariosEnriched));
+      results.push(await this.writeMirrorUsuarios(usuariosEnriched));
       results.push(await this.writeMirror('pagos', pagosEnriched));
       results.push(await this.writeMirror('roles', roles));
       results.push(await this.writeMirror('invitados', invitadosEnriched));
