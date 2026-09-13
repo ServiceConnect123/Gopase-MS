@@ -1,0 +1,15 @@
+{
+	"folders": [
+		{
+			"path": "../epaycoapi/epayco-api"
+		},
+		{
+			"path": "../goPase"
+		},
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+	}
+}

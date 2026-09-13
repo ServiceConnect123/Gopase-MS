@@ -1,0 +1,26 @@
+# Levanta wspsend-ms y epayco-api juntos en local.
+# Uso:
+#   docker compose up -d --build
+# Cada servicio toma su propio archivo .env.
+services:
+  wspsend-ms:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wspsend-ms
+    ports:
+      - "3001:3001"
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  epayco-api:
+    build:
+      context: ../epaycoapi/epayco-api
+      dockerfile: Dockerfile
+    container_name: epayco-api
+    ports:
+      - "3000:3000"
+    env_file:
+      - ../epaycoapi/epayco-api/.env
+    restart: unless-stopped

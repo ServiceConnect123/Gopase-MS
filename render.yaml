@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: wspsend-ms
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    region: oregon
+    plan: free
+    envVars:
+      - key: PORT
+        value: 3001
+      - key: NODE_ENV
+        value: production
+      - key: SCRIPT_URL
+        sync: false
+      - key: CRON_EXPRESSION
+        value: "*/5 * * * *"
+      - key: RUN_ON_STARTUP
+        value: "true"
+      - key: APP_APPROVAL_PATH
+        value: https://www.gopasehome.site/app/payments
+      - key: PENDING_STATUS
+        value: Pendiente
+      - key: WHATSAPP_SESSION_SHEET
+        value: wsp_session
+      - key: SHEETS_TIMEOUT_MS
+        value: "40000"
+      - key: SHEETS_MAX_RETRIES
+        value: "2"
+      - key: WHATSAPP_MESSAGE_DELAY_MS
+        value: "4000"
