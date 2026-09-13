@@ -3,3 +3,8 @@ dist/
 .env
 *.log
 .DS_Store
+
+# Credenciales de Firebase / service accounts (NUNCA commitear)
+*firebase-adminsdk*.json
+*service-account*.json
+serviceAccount*.json
