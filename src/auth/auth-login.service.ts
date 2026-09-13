@@ -110,7 +110,11 @@ export class AuthLoginService {
       if (!resp.ok) {
         // Errores típicos: EMAIL_NOT_FOUND, INVALID_PASSWORD, INVALID_LOGIN_CREDENTIALS.
         const code = data?.error?.message || 'INVALID_CREDENTIALS';
-        this.logger.debug(`Login fallido para ${user}: ${code}`);
+        // Diagnóstico SIN exponer la contraseña: email construido, código de
+        // Firebase y longitud de la clave descifrada.
+        this.logger.warn(
+          `[login] rechazado email=${email} fbCode=${code} passLen=${password.length}`,
+        );
         return { success: false, message: 'Credenciales incorrectas' };
       }
       uid = data.localId;
