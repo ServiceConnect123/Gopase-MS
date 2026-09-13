@@ -476,7 +476,8 @@ export class SyncService {
 
   async syncAcuerdos(): Promise<SyncResult> {
     const rows = await this.sheets.read('acuerdos');
-    return this.writeMirror('acuerdos', rows.map((r) => this.mapAcuerdo(r)));
+    // Protegido: el CRUD de acuerdos ocurre en el backend.
+    return this.writeMirrorProtected('acuerdos', rows.map((r) => this.mapAcuerdo(r)));
   }
 
   async syncZonas(): Promise<SyncResult> {
@@ -641,7 +642,7 @@ export class SyncService {
       results.push(await this.writeMirror('invitados', invitadosEnriched));
       results.push(await this.writeMirrorProtected('eventos', eventosEnriched));
       results.push(await this.writeMirror('citofonia', citofoniaEnriched));
-      results.push(await this.writeMirror('acuerdos', acuerdosEnriched));
+      results.push(await this.writeMirrorProtected('acuerdos', acuerdosEnriched));
       results.push(await this.writeMirrorProtected('zonas_comunes', zonasEnriched));
       results.push(await this.writeMirrorProtected('reservas', reservasEnriched));
       results.push(await this.writeMirrorProtected('reportes', reportesEnriched));
