@@ -22,6 +22,7 @@ const VALID_COLLECTIONS: SyncCollection[] = [
   'acuerdos',
   'zonas_comunes',
   'reservas',
+  'reportes',
 ];
 
 /**
