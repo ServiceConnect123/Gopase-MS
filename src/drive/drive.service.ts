@@ -46,40 +46,37 @@ export class DriveService {
     const payload = JSON.stringify(body);
     const headers = { 'Content-Type': 'text/plain;charset=utf-8' };
     try {
-      // Intento 1: seguir el redirect automáticamente.
+      // 1. POST inicial SIN seguir el redirect. Apps Script responde 302 a una
+      //    URL de script.googleusercontent.com/macros/echo con el resultado.
       const res = await fetch(this.scriptUrl, {
-        method: 'POST',
-        redirect: 'follow',
-        headers,
-        body: payload,
-        signal: controller.signal,
-      });
-      const text = await res.text();
-      const parsed = this.tryParseJson(text);
-      if (parsed !== null) return parsed as T;
-
-      // Vino HTML (redirect perdió el POST). Intento 2: redirect manual + re-POST.
-      const manual = await fetch(this.scriptUrl, {
         method: 'POST',
         redirect: 'manual',
         headers,
         body: payload,
         signal: controller.signal,
       });
-      const location = manual.headers.get('location');
-      if (location) {
-        const finalRes = await fetch(location, {
-          method: 'POST',
-          redirect: 'follow',
-          headers,
-          body: payload,
-          signal: controller.signal,
-        });
-        const finalText = await finalRes.text();
-        const finalParsed = this.tryParseJson(finalText);
-        if (finalParsed !== null) return finalParsed as T;
+
+      // Si no hubo redirect y ya trae JSON, úsalo.
+      if (res.status >= 200 && res.status < 300) {
+        const direct = this.tryParseJson(await res.text());
+        if (direct !== null) return direct as T;
       }
-      throw new Error(`Apps Script devolvió una respuesta no-JSON: ${text.substring(0, 100)}`);
+
+      // 2. Seguir la Location con GET (sin body). Re-POSTear da 405 + HTML.
+      const location = res.headers.get('location');
+      if (!location) {
+        throw new Error(`Apps Script no devolvió Location (status ${res.status}).`);
+      }
+      const finalRes = await fetch(location, {
+        method: 'GET',
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      const finalText = await finalRes.text();
+      const finalParsed = this.tryParseJson(finalText);
+      if (finalParsed !== null) return finalParsed as T;
+
+      throw new Error(`Apps Script devolvió una respuesta no-JSON: ${finalText.substring(0, 100)}`);
     } finally {
       clearTimeout(timeout);
     }
