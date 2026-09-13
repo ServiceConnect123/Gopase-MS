@@ -71,6 +71,7 @@ async function bootstrap() {
     .addTag('notifications', 'Recordatorios de cobro y envío de recibos')
     .addTag('whatsapp', 'Estado y gestión de la sesión de WhatsApp (QR, relogin)')
     .addTag('sync', 'Sincronización Sheets -> Realtime Database (migración)')
+    .addTag('auth', 'Migración de usuarios de Sheets a Firebase Auth')
     // Header opcional que protege los endpoints de sincronización.
     .addApiKey(
       { type: 'apiKey', name: 'x-sync-token', in: 'header' },

@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { NotificationsModule } from './notifications/notifications.module';
 import { SyncModule } from './sync/sync.module';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
@@ -10,6 +11,7 @@ import { SyncModule } from './sync/sync.module';
     ScheduleModule.forRoot(),
     NotificationsModule,
     SyncModule,
+    AuthModule,
   ],
 })
 export class AppModule {}

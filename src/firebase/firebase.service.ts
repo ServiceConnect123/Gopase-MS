@@ -11,6 +11,7 @@ import {
   type ServiceAccount,
 } from 'firebase-admin/app';
 import { getDatabase, type Database } from 'firebase-admin/database';
+import { getAuth, type Auth } from 'firebase-admin/auth';
 
 /**
  * Inicializa firebase-admin y expone el Realtime Database del backend.
@@ -112,5 +113,13 @@ export class FirebaseService implements OnModuleInit {
       throw new Error('Firebase Admin no inicializado (revisa las env de Firebase).');
     }
     return getDatabase(this.app);
+  }
+
+  /** Referencia a Firebase Auth. Lanza si Firebase no está inicializado. */
+  auth(): Auth {
+    if (!this.app) {
+      throw new Error('Firebase Admin no inicializado (revisa las env de Firebase).');
+    }
+    return getAuth(this.app);
   }
 }
