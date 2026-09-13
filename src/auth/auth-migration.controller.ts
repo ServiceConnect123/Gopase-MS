@@ -23,6 +23,14 @@ class LoginDto {
   password?: string;
 }
 
+class SetPasswordDto {
+  @ApiProperty({ example: 'root', description: 'Nombre de usuario (uid).' })
+  username: string;
+
+  @ApiProperty({ description: 'Nueva contraseña (mínimo 6 caracteres).' })
+  newPassword: string;
+}
+
 /**
  * Endpoints para migrar usuarios de Sheets a Firebase Auth (estrategia A1).
  * Protección opcional por header `x-sync-token` (reusa SYNC_TOKEN).
@@ -58,6 +66,20 @@ export class AuthMigrationController {
   @Post('login')
   async login(@Body() body: LoginDto) {
     return this.loginService.login(body?.username, body?.passwordEnc, body?.password);
+  }
+
+  @ApiOperation({
+    summary: 'Cambia la contraseña de un usuario (sin correo)',
+    description:
+      'Actualiza la contraseña directamente vía firebase-admin (los emails son ' +
+      'sintéticos, no hay recuperación por correo). Limpia el claim mustChangePassword. ' +
+      'Protegido por x-sync-token.',
+  })
+  @ApiSecurity('sync-token')
+  @Post('set-password')
+  async setPassword(@Headers('x-sync-token') token: string | undefined, @Body() body: SetPasswordDto) {
+    this.assertAuthorized(token);
+    return this.loginService.setPassword(body?.username, body?.newPassword);
   }
 
   @ApiOperation({

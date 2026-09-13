@@ -123,7 +123,48 @@ export class AuthLoginService {
       return { success: false, message: 'Error de conexión con el servicio de autenticación.' };
     }
 
-    // 2. Leer perfil y claims con firebase-admin (uid = username).
+    return this.buildUserResponse(uid, email);
+  }
+
+  /**
+   * Cambia la contraseña de un usuario directamente (vía firebase-admin, sin
+   * correo). Útil porque los emails son sintéticos y el flujo de "recuperar por
+   * correo" no aplica. Al cambiarla, limpia el claim mustChangePassword.
+   */
+  async setPassword(username: string, newPassword: string): Promise<{ success: boolean; message?: string }> {
+    const user = (username || '').toString().trim();
+    if (!user) return { success: false, message: 'Usuario requerido' };
+    if (!newPassword || newPassword.length < 6) {
+      return { success: false, message: 'La contraseña debe tener al menos 6 caracteres.' };
+    }
+    if (!this.firebase.isEnabled()) {
+      return { success: false, message: 'Servicio de autenticación no disponible.' };
+    }
+
+    try {
+      const auth = this.firebase.auth();
+      // uid = username. Actualiza la contraseña.
+      await auth.updateUser(user, { password: newPassword });
+      // Quitar la marca de cambio obligatorio (preservando el resto de claims).
+      const record = await auth.getUser(user);
+      const claims = { ...(record.customClaims || {}) } as Record<string, any>;
+      if (claims.mustChangePassword) {
+        delete claims.mustChangePassword;
+        await auth.setCustomUserClaims(user, claims);
+      }
+      return { success: true, message: 'Contraseña actualizada.' };
+    } catch (err: any) {
+      this.logger.warn(`[set-password] ${user} falló: ${err?.message}`);
+      const notFound = /no user record|user-not-found/i.test(err?.message || '');
+      return {
+        success: false,
+        message: notFound ? 'El usuario no existe.' : (err?.message || 'No se pudo actualizar la contraseña.'),
+      };
+    }
+  }
+
+  /** Arma la respuesta de usuario (perfil + claims + nombre del conjunto). */
+  private async buildUserResponse(uid: string, email: string): Promise<LoginResult> {
     try {
       const record = await this.firebase.auth().getUser(uid);
       const claims = (record.customClaims || {}) as Record<string, any>;
