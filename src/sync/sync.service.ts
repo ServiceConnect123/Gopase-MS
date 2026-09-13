@@ -124,6 +124,7 @@ export class SyncService {
       parcela: row.dato_10 ?? '',
       placa1: row.dato_11 ?? '',
       placa2: row.dato_12 ?? '',
+      fechaIngreso: row.dato_13 ?? '',
     };
   }
 

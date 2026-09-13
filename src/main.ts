@@ -74,6 +74,7 @@ async function bootstrap() {
     .addTag('auth', 'Migración de usuarios de Sheets a Firebase Auth')
     .addTag('home', 'Dashboard de la pantalla Home (data ya calculada)')
     .addTag('profile', 'Perfil de usuario contra Firebase (RTDB + Auth)')
+    .addTag('payments', 'Lecturas y cálculos de Pagos (data ya calculada, RTDB)')
     // Header opcional que protege los endpoints de sincronización.
     .addApiKey(
       { type: 'apiKey', name: 'x-sync-token', in: 'header' },
