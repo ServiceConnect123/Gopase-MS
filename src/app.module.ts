@@ -14,6 +14,7 @@ import { ZonesModule } from './zones/zones.module';
 import { ReservationsModule } from './reservations/reservations.module';
 import { RolesModule } from './roles/roles.module';
 import { ReportsModule } from './reports/reports.module';
+import { EventsModule } from './events/events.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { ReportsModule } from './reports/reports.module';
     ReservationsModule,
     RolesModule,
     ReportsModule,
+    EventsModule,
   ],
 })
 export class AppModule {}
