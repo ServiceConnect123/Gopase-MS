@@ -96,7 +96,26 @@ export class SyncService {
       docType: row.dato_6 ?? '',
       docNum: row.dato_7 ?? '',
       phone: row.dato_8 ?? '',
+      // Valor crudo del conjunto en Sheets (puede ser id o nombre).
       conjunto: row.dato_9 ?? '',
+    };
+  }
+
+  /**
+   * Índice para resolver el conjunto de un usuario a su id, sin importar si en
+   * Sheets se guardó por id o por nombre. Mapea id->id y nombre(normalizado)->id.
+   */
+  private buildConjuntoIndex(conjuntos: Array<{ id: string; nombre: string }>) {
+    const byKey = new Map<string, string>();
+    const norm = (s: string) => (s || '').trim().toLowerCase();
+    for (const c of conjuntos) {
+      if (c.id) byKey.set(norm(c.id), c.id);
+      if (c.nombre) byKey.set(norm(c.nombre), c.id);
+    }
+    return {
+      resolve(raw: string): string {
+        return byKey.get(norm(raw)) ?? '';
+      },
     };
   }
 
@@ -143,16 +162,133 @@ export class SyncService {
     return this.writeMirror('usuarios', rows.map((r) => this.mapUsuario(r)));
   }
 
-  /** Sincroniza las tres colecciones. No lanza: devuelve resultado por colección. */
+  /**
+   * Sincroniza las tres colecciones RESOLVIENDO las relaciones entre ellas:
+   *  - a cada usuario le agrega `conjuntoId` (resuelto desde su conjunto en Sheets).
+   *  - a cada pago le agrega `usuarioId` y `conjuntoId` (vía su usuario).
+   *  - además escribe un árbol anidado en `mirror/tree`:
+   *      conjuntoId -> { ...conjunto, usuarios: { userId -> { ...usuario, pagos: { pagoId -> pago } } } }
+   *
+   * Lee las tres hojas juntas porque las referencias cruzadas lo requieren.
+   * No lanza: devuelve el resultado por colección.
+   */
   async syncAll(): Promise<{ success: boolean; results: SyncResult[] }> {
-    const results: SyncResult[] = [];
-    for (const fn of [
-      () => this.syncConjuntos(),
-      () => this.syncPagos(),
-      () => this.syncUsuarios(),
-    ]) {
-      results.push(await fn());
+    if (!this.firebase.isEnabled()) {
+      const message = 'Firebase no está habilitado (revisa las env de Firebase).';
+      this.logger.warn(`[sync] syncAll: ${message}`);
+      return {
+        success: false,
+        results: (['conjuntos', 'pagos', 'usuarios'] as SyncCollection[]).map((c) => ({
+          collection: c,
+          success: false,
+          count: 0,
+          message,
+        })),
+      };
     }
-    return { success: results.every((r) => r.success), results };
+
+    try {
+      // 1. Leer las tres hojas.
+      const [conjRows, pagoRows, userRows] = await Promise.all([
+        this.sheets.read('propiedades'),
+        this.sheets.read('pagos'),
+        this.sheets.read('usuarios'),
+      ]);
+
+      const conjuntos = conjRows.map((r) => this.mapConjunto(r));
+      const pagos = pagoRows.map((r) => this.mapPago(r));
+      const usuarios = userRows.map((r) => this.mapUsuario(r));
+
+      // 2. Índices de resolución.
+      const conjIndex = this.buildConjuntoIndex(conjuntos);
+
+      // 3. Enriquecer usuarios con conjuntoId.
+      const usuariosEnriched = usuarios.map((u) => ({
+        ...u,
+        conjuntoId: conjIndex.resolve(u.conjunto),
+      }));
+
+      // usuarioId -> conjuntoId (para resolver el conjunto de cada pago).
+      const userToConjunto = new Map<string, string>();
+      usuariosEnriched.forEach((u) => userToConjunto.set(u.id, u.conjuntoId));
+
+      // 4. Enriquecer pagos con usuarioId y conjuntoId.
+      const pagosEnriched = pagos.map((p) => ({
+        ...p,
+        usuarioId: p.usuario,
+        conjuntoId: userToConjunto.get(p.usuario) ?? '',
+      }));
+
+      // 5. Escribir colecciones planas (enriquecidas).
+      const results: SyncResult[] = [];
+      results.push(await this.writeMirror('conjuntos', conjuntos));
+      results.push(await this.writeMirror('pagos', pagosEnriched));
+      results.push(await this.writeMirror('usuarios', usuariosEnriched));
+
+      // 6. Construir y escribir el árbol anidado conjunto -> usuarios -> pagos.
+      await this.writeTree(conjuntos, usuariosEnriched, pagosEnriched);
+
+      return { success: results.every((r) => r.success), results };
+    } catch (err: any) {
+      this.logger.error(`[sync] syncAll falló: ${err?.message || err}`);
+      return {
+        success: false,
+        results: (['conjuntos', 'pagos', 'usuarios'] as SyncCollection[]).map((c) => ({
+          collection: c,
+          success: false,
+          count: 0,
+          message: err?.message || 'Error en syncAll',
+        })),
+      };
+    }
+  }
+
+  /**
+   * Escribe el árbol relacional en `mirror/tree`:
+   *   conjuntoId -> { ...conjunto, usuarios: { userId -> { ...usuario, pagos: { pagoId -> pago } } } }
+   * Los usuarios/pagos sin conjunto resuelto quedan bajo la clave "_sin_conjunto".
+   */
+  private async writeTree(
+    conjuntos: Array<{ id: string; nombre?: string }>,
+    usuarios: Array<{ id: string; conjuntoId: string } & Record<string, any>>,
+    pagos: Array<{ id: string; usuarioId: string } & Record<string, any>>,
+  ): Promise<void> {
+    const UNASSIGNED = '_sin_conjunto';
+
+    // Agrupar pagos por usuarioId.
+    const pagosPorUsuario = new Map<string, Record<string, any>>();
+    pagos.forEach((p, i) => {
+      const uid = this.safeKey(p.usuarioId, i);
+      if (!pagosPorUsuario.has(uid)) pagosPorUsuario.set(uid, {});
+      pagosPorUsuario.get(uid)![this.safeKey(p.id, i)] = p;
+    });
+
+    // Base del árbol: cada conjunto con su nodo de usuarios vacío.
+    const tree: Record<string, any> = {};
+    conjuntos.forEach((c, i) => {
+      tree[this.safeKey(c.id, i)] = { ...c, usuarios: {} };
+    });
+    // Bucket para usuarios sin conjunto resuelto.
+    tree[UNASSIGNED] = { id: UNASSIGNED, nombre: 'Sin conjunto', usuarios: {} };
+
+    // Colocar cada usuario (con sus pagos) bajo su conjunto.
+    usuarios.forEach((u, i) => {
+      const cid = u.conjuntoId ? this.safeKey(u.conjuntoId, i) : UNASSIGNED;
+      const bucket = tree[cid] ?? tree[UNASSIGNED];
+      const uid = this.safeKey(u.id, i);
+      bucket.usuarios[uid] = {
+        ...u,
+        pagos: pagosPorUsuario.get(uid) ?? {},
+      };
+    });
+
+    // No dejar el bucket "_sin_conjunto" si quedó vacío.
+    if (Object.keys(tree[UNASSIGNED].usuarios).length === 0) {
+      delete tree[UNASSIGNED];
+    }
+
+    const db = this.firebase.db();
+    await db.ref(`${MIRROR_ROOT}/tree`).set(tree);
+    this.logger.log('[sync] tree: árbol conjunto->usuarios->pagos escrito.');
   }
 }
