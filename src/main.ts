@@ -89,6 +89,7 @@ async function bootstrap() {
     .addTag('reports', 'CRUD de reportes (RTDB)')
     .addTag('events', 'CRUD de eventos (RTDB)')
     .addTag('agreements', 'CRUD de acuerdos (RTDB) + suscripciones push de afectados')
+    .addTag('guests', 'CRUD de invitados/vigilantes (RTDB)')
     // Header opcional que protege los endpoints de sincronización.
     .addApiKey(
       { type: 'apiKey', name: 'x-sync-token', in: 'header' },
