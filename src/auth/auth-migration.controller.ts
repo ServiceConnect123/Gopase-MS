@@ -6,9 +6,22 @@ import {
   Query,
   UnauthorizedException,
 } from '@nestjs/common';
-import { ApiOperation, ApiQuery, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import { ApiOperation, ApiProperty, ApiPropertyOptional, ApiQuery, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import { Body } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AuthMigrationService } from './auth-migration.service';
+import { AuthLoginService } from './auth-login.service';
+
+class LoginDto {
+  @ApiProperty({ example: 'wilmerhernandez', description: 'Nombre de usuario.' })
+  username: string;
+
+  @ApiPropertyOptional({ description: 'Contraseña cifrada con el esquema XOR del frontend (encriptarAES).' })
+  passwordEnc?: string;
+
+  @ApiPropertyOptional({ description: 'Contraseña en claro (solo pruebas; preferir passwordEnc).' })
+  password?: string;
+}
 
 /**
  * Endpoints para migrar usuarios de Sheets a Firebase Auth (estrategia A1).
@@ -19,6 +32,7 @@ import { AuthMigrationService } from './auth-migration.service';
 export class AuthMigrationController {
   constructor(
     private readonly migration: AuthMigrationService,
+    private readonly loginService: AuthLoginService,
     private readonly config: ConfigService,
   ) {}
 
@@ -33,6 +47,17 @@ export class AuthMigrationController {
   @Get('status')
   status() {
     return { ok: true };
+  }
+
+  @ApiOperation({
+    summary: 'Login contra Firebase Auth',
+    description:
+      'Valida usuario + contraseña (cifrada XOR en passwordEnc) contra Firebase ' +
+      'Auth y devuelve el usuario con sus claims (rol, conjuntoId, mustChangePassword), sin la contraseña.',
+  })
+  @Post('login')
+  async login(@Body() body: LoginDto) {
+    return this.loginService.login(body?.username, body?.passwordEnc, body?.password);
   }
 
   @ApiOperation({
