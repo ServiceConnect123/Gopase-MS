@@ -101,7 +101,8 @@ export class AuthMigrationService {
       }
       summary.total++;
 
-      const password = recoverPassword((row as any).dato_3);
+      const storedRaw = String((row as any).dato_3 ?? '');
+      const password = recoverPassword(storedRaw);
       const nombre = String((row as any).dato_4 ?? '').trim();
       const rol = String((row as any).dato_5 ?? '').trim();
       const conjuntoId = resolveConjunto((row as any).dato_9);
@@ -110,10 +111,15 @@ export class AuthMigrationService {
       // Firebase exige password de al menos 6 caracteres.
       if (!password || password.length < 6) {
         summary.skipped++;
+        // Diagnóstico SIN exponer la contraseña: forma del valor guardado y del
+        // resultado del descifrado, para entender por qué se omitió.
+        const diag =
+          `storedLen=${storedRaw.length} tieneDosPuntos=${storedRaw.includes(':')} ` +
+          `descifradoLen=${password.length}`;
         summary.results.push({
           username,
           action: 'skipped',
-          message: 'Contraseña ausente o menor a 6 caracteres (Firebase la rechaza).',
+          message: `Contraseña ausente o menor a 6 caracteres (Firebase la rechaza). [${diag}]`,
         });
         continue;
       }
