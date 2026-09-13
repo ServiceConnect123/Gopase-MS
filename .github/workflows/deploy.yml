@@ -1,7 +1,8 @@
-name: CD - Build & Deploy (QA / Prod)
+name: CD - Build, Push & Deploy (QA / Prod)
 
-# Despliegue continuo, en dos fases separadas (jobs):
-#   build   -> construye y publica la imagen en Docker Hub
+# Despliegue continuo en tres fases separadas (jobs):
+#   build   -> construye la imagen y la exporta como artefacto (.tar)
+#   push    -> descarga el artefacto y publica la imagen en Docker Hub
 #   deploy  -> dispara el deploy en Render y espera a que quede "live"
 #
 #   - push a rama `qa`   -> imagen :qa      -> deploy servicio Render QA
@@ -13,7 +14,7 @@ name: CD - Build & Deploy (QA / Prod)
 # │ NO van en este archivo. Se guardan en el GitHub Environment "DOCKERHUB_USERNAME": │
 # │   https://github.com/ServiceConnect123/Gopase-MS/settings/environments      │
 # │   (repo -> Settings -> Environments -> DOCKERHUB_USERNAME -> Add secret)     │
-# │   Cada job declara `environment: DOCKERHUB_USERNAME` para poder leerlos.     │
+# │   Los jobs que los usan declaran `environment: DOCKERHUB_USERNAME`.          │
 # │                                                                             │
 # │ Para ROTARLAS: genera el valor nuevo (Docker Hub / Render) y edítalo en esa │
 # │ misma página. No hay que tocar este YAML: se leen por nombre en runtime.    │
@@ -37,48 +38,106 @@ concurrency:
 
 jobs:
   # ==========================================================================
-  # FASE 1: BUILD - construye y publica la imagen en Docker Hub
+  # FASE 1: BUILD - construye la imagen y la exporta como artefacto (.tar)
+  # No publica nada; solo compila y deja la imagen lista para la fase push.
   # ==========================================================================
   build:
-    name: Build & Push
+    name: Build image
     runs-on: ubuntu-latest
     environment: DOCKERHUB_USERNAME
     outputs:
       app_env: ${{ steps.env.outputs.app_env }}
       image_tag: ${{ steps.env.outputs.image_tag }}
+      image_ref: ${{ steps.env.outputs.image_ref }}
+      image_ref_sha: ${{ steps.env.outputs.image_ref_sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      # Falla temprano y con mensaje claro si faltan credenciales de build.
-      - name: Check required secrets
+      - name: Check Docker Hub username
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          missing=""
-          [ -z "$DOCKERHUB_USERNAME" ] && missing="$missing DOCKERHUB_USERNAME"
-          [ -z "$DOCKERHUB_TOKEN" ] && missing="$missing DOCKERHUB_TOKEN"
-          if [ -n "$missing" ]; then
-            echo "::error::Faltan secrets en el environment DOCKERHUB_USERNAME:$missing"
+          if [ -z "$DOCKERHUB_USERNAME" ]; then
+            echo "::error::Falta el secret DOCKERHUB_USERNAME en el environment DOCKERHUB_USERNAME."
             exit 1
           fi
-          echo "Secrets de build presentes."
+          echo "Username presente."
 
-      # Determina entorno y tag de imagen según la rama.
+      # Determina entorno, tag y las referencias completas de la imagen.
       - name: Resolve environment
         id: env
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           if [ "${{ github.ref_name }}" = "main" ]; then
-            echo "app_env=production" >> "$GITHUB_OUTPUT"
-            echo "image_tag=latest" >> "$GITHUB_OUTPUT"
+            APP_ENV=production
+            IMAGE_TAG=latest
           else
-            echo "app_env=qa" >> "$GITHUB_OUTPUT"
-            echo "image_tag=qa" >> "$GITHUB_OUTPUT"
+            APP_ENV=qa
+            IMAGE_TAG=qa
           fi
+          IMAGE_REF="$DOCKERHUB_USERNAME/wspsend-ms:$IMAGE_TAG"
+          IMAGE_REF_SHA="$DOCKERHUB_USERNAME/wspsend-ms:$APP_ENV-${{ github.sha }}"
+          {
+            echo "app_env=$APP_ENV"
+            echo "image_tag=$IMAGE_TAG"
+            echo "image_ref=$IMAGE_REF"
+            echo "image_ref_sha=$IMAGE_REF_SHA"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3.11.1
+
+      # Construye la imagen SIN push y la exporta a un tar local.
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          build-args: |
+            APP_ENV=${{ steps.env.outputs.app_env }}
+          tags: |
+            ${{ steps.env.outputs.image_ref }}
+            ${{ steps.env.outputs.image_ref_sha }}
+          outputs: type=docker,dest=/tmp/image.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/image.tar
+          retention-days: 1
+
+  # ==========================================================================
+  # FASE 2: PUSH - descarga la imagen construida y la publica en Docker Hub
+  # ==========================================================================
+  push:
+    name: Push to Docker Hub
+    runs-on: ubuntu-latest
+    environment: DOCKERHUB_USERNAME
+    needs: build
+    steps:
+      - name: Check Docker Hub token
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::Falta el secret DOCKERHUB_TOKEN en el environment DOCKERHUB_USERNAME."
+            exit 1
+          fi
+          echo "Token presente."
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load image into Docker
+        run: docker load --input /tmp/image.tar
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3.4.0
@@ -86,31 +145,28 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          build-args: |
-            APP_ENV=${{ steps.env.outputs.app_env }}
-          # Publicamos el tag del entorno y además el SHA para trazabilidad.
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/wspsend-ms:${{ steps.env.outputs.image_tag }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/wspsend-ms:${{ steps.env.outputs.app_env }}-${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Push image tags
+        env:
+          IMAGE_REF: ${{ needs.build.outputs.image_ref }}
+          IMAGE_REF_SHA: ${{ needs.build.outputs.image_ref_sha }}
+        run: |
+          set -euo pipefail
+          echo "Publicando $IMAGE_REF ..."
+          docker push "$IMAGE_REF"
+          echo "Publicando $IMAGE_REF_SHA ..."
+          docker push "$IMAGE_REF_SHA"
+          echo "✅ Imagen publicada en Docker Hub."
 
   # ==========================================================================
-  # FASE 2: DEPLOY - dispara Render y espera a que quede "live"
-  # Solo corre si la fase build terminó bien (needs: build).
+  # FASE 3: DEPLOY - dispara Render y espera a que quede "live"
+  # Solo corre si push terminó bien (needs: push).
   # ==========================================================================
   deploy:
     name: Deploy to Render
     runs-on: ubuntu-latest
     environment: DOCKERHUB_USERNAME
-    needs: build
+    needs: [build, push]
     steps:
-      # Resuelve el service id de Render según la rama y valida que exista.
       - name: Resolve Render service
         id: svc
         run: |
@@ -137,7 +193,7 @@ jobs:
           SERVICE_ID: ${{ steps.svc.outputs.service_id }}
         run: |
           set -euo pipefail
-          echo "🚀 Disparando deploy en Render para servicio '$SERVICE_ID' (imagen ${{ needs.build.outputs.image_tag }}) ..."
+          echo "🚀 Disparando deploy en Render para servicio '$SERVICE_ID' (imagen ${{ needs.build.outputs.image_ref }}) ..."
 
           # Capturamos body y HTTP status por separado para mostrar el error
           # real de la API en vez de reventar al parsear JSON vacío.
