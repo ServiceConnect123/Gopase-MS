@@ -85,6 +85,7 @@ async function bootstrap() {
     .addTag('properties', 'CRUD de propiedades/conjuntos (RTDB, sin claves sensibles)')
     .addTag('zones', 'CRUD de zonas comunes (RTDB)')
     .addTag('reservations', 'CRUD de reservas de zonas comunes (RTDB)')
+    .addTag('roles', 'CRUD de roles global (RTDB)')
     // Header opcional que protege los endpoints de sincronización.
     .addApiKey(
       { type: 'apiKey', name: 'x-sync-token', in: 'header' },

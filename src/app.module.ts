@@ -12,6 +12,7 @@ import { UsersModule } from './users/users.module';
 import { PropertiesModule } from './properties/properties.module';
 import { ZonesModule } from './zones/zones.module';
 import { ReservationsModule } from './reservations/reservations.module';
+import { RolesModule } from './roles/roles.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { ReservationsModule } from './reservations/reservations.module';
     PropertiesModule,
     ZonesModule,
     ReservationsModule,
+    RolesModule,
   ],
 })
 export class AppModule {}
