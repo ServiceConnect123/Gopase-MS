@@ -58,8 +58,8 @@ export class SyncService {
   // Se omiten claves sensibles (mercadoPagoKey, geminiKey, llaveBreB) del espejo.
   private mapConjunto(row: any) {
     return {
-      id: row.dato_1 ?? '',
-      nombre: row.dato_2 ?? '',
+      id: String(row.dato_1 ?? ''),
+      nombre: String(row.dato_2 ?? ''),
       direccion: row.dato_3 ?? '',
       tipo: row.dato_4 ?? '',
       descripcion: row.dato_5 ?? '',
@@ -73,8 +73,8 @@ export class SyncService {
   // dato_5=fecha, dato_6=estado, dato_7=referencia
   private mapPago(row: any) {
     return {
-      id: row.dato_1 ?? '',
-      usuario: row.dato_2 ?? '',
+      id: String(row.dato_1 ?? ''),
+      usuario: String(row.dato_2 ?? ''),
       concepto: row.dato_3 ?? '',
       valor: row.dato_4 ?? '',
       fecha: row.dato_5 ?? '',
@@ -87,8 +87,8 @@ export class SyncService {
   // dato_4=nombre, dato_5=rol, dato_6=docType, dato_7=docNum, dato_8=phone, dato_9=conjunto
   private mapUsuario(row: any) {
     return {
-      id: row.dato_1 ?? '',
-      usuario: row.dato_1 ?? '',
+      id: String(row.dato_1 ?? ''),
+      usuario: String(row.dato_1 ?? ''),
       email: row.dato_2 ?? '',
       // password (dato_3) NO se copia al espejo.
       nombre: row.dato_4 ?? '',
@@ -97,7 +97,7 @@ export class SyncService {
       docNum: row.dato_7 ?? '',
       phone: row.dato_8 ?? '',
       // Valor crudo del conjunto en Sheets (puede ser id o nombre).
-      conjunto: row.dato_9 ?? '',
+      conjunto: String(row.dato_9 ?? ''),
     };
   }
 
@@ -105,15 +105,18 @@ export class SyncService {
    * Índice para resolver el conjunto de un usuario a su id, sin importar si en
    * Sheets se guardó por id o por nombre. Mapea id->id y nombre(normalizado)->id.
    */
-  private buildConjuntoIndex(conjuntos: Array<{ id: string; nombre: string }>) {
+  private buildConjuntoIndex(conjuntos: Array<{ id: unknown; nombre?: unknown }>) {
     const byKey = new Map<string, string>();
-    const norm = (s: string) => (s || '').trim().toLowerCase();
+    // Fuerza a string antes de normalizar: los valores de Sheets pueden venir
+    // como number (ej. un id numérico) y number.trim() no existe.
+    const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
     for (const c of conjuntos) {
-      if (c.id) byKey.set(norm(c.id), c.id);
-      if (c.nombre) byKey.set(norm(c.nombre), c.id);
+      const id = String(c.id ?? '');
+      if (id) byKey.set(norm(id), id);
+      if (c.nombre != null && String(c.nombre) !== '') byKey.set(norm(c.nombre), id);
     }
     return {
-      resolve(raw: string): string {
+      resolve(raw: unknown): string {
         return byKey.get(norm(raw)) ?? '';
       },
     };
