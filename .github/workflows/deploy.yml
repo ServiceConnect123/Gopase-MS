@@ -78,6 +78,17 @@ jobs:
             echo "service_id=${{ secrets.RENDER_SERVICE_ID_QA }}" >> "$GITHUB_OUTPUT"
           fi
 
+      # Verifica que el service id de Render exista para la rama actual.
+      - name: Check Render service id
+        env:
+          SERVICE_ID: ${{ steps.env.outputs.service_id }}
+        run: |
+          if [ -z "$SERVICE_ID" ]; then
+            echo "::error::Falta el secret RENDER_SERVICE_ID_${{ github.ref_name == 'main' && 'PROD' || 'QA' }} en el environment DOCKERHUB_USERNAME."
+            exit 1
+          fi
+          echo "Service id presente."
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3.11.1
 
@@ -108,13 +119,26 @@ jobs:
           SERVICE_ID: ${{ steps.env.outputs.service_id }}
         run: |
           set -euo pipefail
-          echo "Disparando deploy en Render para $SERVICE_ID ..."
-          DEPLOY_ID=$(curl -sS --fail -X POST \
+          echo "Disparando deploy en Render para servicio '$SERVICE_ID' ..."
+
+          # Capturamos body y HTTP status por separado para poder mostrar el
+          # error real de la API en vez de reventar al parsear JSON vacío.
+          RESP=$(curl -sS -w '\n%{http_code}' -X POST \
             "https://api.render.com/v1/services/$SERVICE_ID/deploys" \
             -H "Authorization: Bearer $RENDER_API_KEY" \
             -H "Content-Type: application/json" \
-            -d '{"clearCache":"do_not_clear"}' \
-            | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
+            -d '{"clearCache":"do_not_clear"}')
+          HTTP_CODE=$(printf '%s' "$RESP" | tail -n1)
+          BODY=$(printf '%s' "$RESP" | sed '$d')
+
+          if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "202" ]; then
+            echo "::error::Render respondió HTTP $HTTP_CODE al crear el deploy."
+            echo "Respuesta: $BODY"
+            echo "Verifica RENDER_API_KEY y que el service id '$SERVICE_ID' sea correcto."
+            exit 1
+          fi
+
+          DEPLOY_ID=$(printf '%s' "$BODY" | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
           echo "Deploy creado: $DEPLOY_ID"
 
           # Poll hasta que el deploy termine (live) o falle.
