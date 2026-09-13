@@ -345,6 +345,60 @@ export class SyncService {
     }
   }
 
+  /**
+   * Escribe el espejo de una colección PROTEGIENDO los registros escritos por
+   * Firebase (backend). Se usa para `pagos` y `reservas`, cuyas escrituras ahora
+   * ocurren en el backend (Fase 2):
+   *   - Registros existentes en RTDB con `_fbWrite === true` se conservan tal cual
+   *     (no se pisan con lo que venga de Sheets).
+   *   - Registros que existen en RTDB pero NO vienen de Sheets (creados solo por
+   *     Firebase) se conservan.
+   *   - El resto se sincroniza normalmente desde Sheets.
+   */
+  private async writeMirrorProtected<T extends { id?: string }>(
+    collection: SyncCollection,
+    items: T[],
+  ): Promise<SyncResult> {
+    if (!this.firebase.isEnabled()) {
+      const message = 'Firebase no está habilitado (revisa las env de Firebase).';
+      this.logger.warn(`[sync] ${collection}: ${message}`);
+      return { collection, success: false, count: 0, message };
+    }
+    try {
+      const db = this.firebase.db();
+      const snap = await db.ref(`${MIRROR_ROOT}/${collection}`).get();
+      const existing: Record<string, any> = snap.exists() ? snap.val() : {};
+
+      const merged: Record<string, any> = {};
+      const fromSheetKeys = new Set<string>();
+
+      // 1. Registros que vienen de Sheets.
+      items.forEach((item, i) => {
+        const key = this.safeKey(item.id, i);
+        fromSheetKeys.add(key);
+        const prev = existing[key];
+        // Si el registro fue escrito/tocado por Firebase, se conserva el de RTDB.
+        merged[key] = prev && prev._fbWrite ? prev : item;
+      });
+
+      // 2. Registros que solo existen en RTDB (creados por el backend, no en Sheets).
+      Object.keys(existing).forEach((key) => {
+        if (!fromSheetKeys.has(key)) merged[key] = existing[key];
+      });
+
+      await db.ref(`${MIRROR_ROOT}/${collection}`).set(merged);
+      await db.ref(`${MIRROR_ROOT}/_meta/${collection}`).set({
+        count: Object.keys(merged).length,
+        syncedAt: Date.now(),
+      });
+      this.logger.log(`[sync] ${collection}: ${Object.keys(merged).length} registros (escrituras de Firebase preservadas).`);
+      return { collection, success: true, count: Object.keys(merged).length };
+    } catch (err: any) {
+      this.logger.error(`[sync] ${collection} falló: ${err?.message || err}`);
+      return { collection, success: false, count: 0, message: err?.message || 'Error al escribir en RTDB' };
+    }
+  }
+
   // -------------------- API pública --------------------
 
   async syncConjuntos(): Promise<SyncResult> {
@@ -354,7 +408,8 @@ export class SyncService {
 
   async syncPagos(): Promise<SyncResult> {
     const rows = await this.sheets.read('pagos');
-    return this.writeMirror('pagos', rows.map((r) => this.mapPago(r)));
+    // Protegido: las escrituras de pagos ocurren en el backend (Fase 2).
+    return this.writeMirrorProtected('pagos', rows.map((r) => this.mapPago(r)));
   }
 
   async syncUsuarios(): Promise<SyncResult> {
@@ -395,7 +450,8 @@ export class SyncService {
 
   async syncReservas(): Promise<SyncResult> {
     const rows = await this.sheets.read('reservas');
-    return this.writeMirror('reservas', rows.map((r) => this.mapReserva(r)));
+    // Protegido: las reservas se actualizan desde el backend (aprobación de pagos).
+    return this.writeMirrorProtected('reservas', rows.map((r) => this.mapReserva(r)));
   }
 
   /** Ejecuta la sincronización de una colección puntual por nombre. */
@@ -527,14 +583,14 @@ export class SyncService {
       const results: SyncResult[] = [];
       results.push(await this.writeMirror('conjuntos', conjuntos));
       results.push(await this.writeMirrorUsuarios(usuariosEnriched));
-      results.push(await this.writeMirror('pagos', pagosEnriched));
+      results.push(await this.writeMirrorProtected('pagos', pagosEnriched));
       results.push(await this.writeMirror('roles', roles));
       results.push(await this.writeMirror('invitados', invitadosEnriched));
       results.push(await this.writeMirror('eventos', eventosEnriched));
       results.push(await this.writeMirror('citofonia', citofoniaEnriched));
       results.push(await this.writeMirror('acuerdos', acuerdosEnriched));
       results.push(await this.writeMirror('zonas_comunes', zonasEnriched));
-      results.push(await this.writeMirror('reservas', reservasEnriched));
+      results.push(await this.writeMirrorProtected('reservas', reservasEnriched));
 
       // 5. Árbol anidado conjunto -> usuarios -> pagos (vista de referencia).
       await this.writeTree(conjuntos, usuariosEnriched, pagosEnriched);

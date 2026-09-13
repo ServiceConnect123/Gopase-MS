@@ -7,6 +7,7 @@ import { AuthModule } from './auth/auth.module';
 import { HomeModule } from './home/home.module';
 import { ProfileModule } from './profile/profile.module';
 import { PaymentsModule } from './payments/payments.module';
+import { DriveModule } from './drive/drive.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { PaymentsModule } from './payments/payments.module';
     HomeModule,
     ProfileModule,
     PaymentsModule,
+    DriveModule,
   ],
 })
 export class AppModule {}

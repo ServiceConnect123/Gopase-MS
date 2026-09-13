@@ -122,4 +122,33 @@ export class FirebaseService implements OnModuleInit {
     }
     return getAuth(this.app);
   }
+
+  /**
+   * Devuelve las credenciales de la service account (project_id, client_email,
+   * private_key) para reutilizarlas con otras APIs de Google (p. ej. Drive).
+   * Lee de FIREBASE_SERVICE_ACCOUNT (JSON) o de los campos sueltos. Devuelve
+   * null si no hay credenciales por variable de entorno.
+   */
+  getServiceAccount(): { projectId: string; clientEmail: string; privateKey: string } | null {
+    const saJson = this.config.get<string>('FIREBASE_SERVICE_ACCOUNT', '');
+    if (saJson) {
+      try {
+        const parsed = JSON.parse(saJson);
+        return {
+          projectId: parsed.project_id || '',
+          clientEmail: parsed.client_email || '',
+          privateKey: String(parsed.private_key || '').replace(/\\n/g, '\n'),
+        };
+      } catch {
+        // cae a los campos sueltos
+      }
+    }
+    const projectId = this.config.get<string>('FIREBASE_PROJECT_ID', '');
+    const clientEmail = this.config.get<string>('FIREBASE_CLIENT_EMAIL', '');
+    const privateKey = this.config.get<string>('FIREBASE_PRIVATE_KEY', '').replace(/\\n/g, '\n');
+    if (projectId && clientEmail && privateKey) {
+      return { projectId, clientEmail, privateKey };
+    }
+    return null;
+  }
 }

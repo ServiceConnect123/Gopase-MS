@@ -235,4 +235,119 @@ export class PaymentsService {
     }
     return debtors;
   }
+
+  // ==================== ESCRITURAS (Fase 2, a RTDB) ====================
+
+  private safeKey(raw: unknown, fallbackIndex = 0): string {
+    const s = (raw == null ? '' : String(raw)).trim();
+    if (!s) return `row_${fallbackIndex}`;
+    return s.replace(/[.#$/\[\]]/g, '_');
+  }
+
+  /** Crea uno o varios pagos (uno por mes) en mirror/pagos. Devuelve los ids creados. */
+  async createPayments(input: {
+    usuario: string;
+    montoPerMonth: string | number;
+    meses: string[];
+    year: number;
+    estado: string;
+    referencia: string;
+    conjunto?: string;
+    conjuntoId?: string;
+  }): Promise<{ success: boolean; ids: string[]; pagos: Pago[] }> {
+    const db = this.firebase.db();
+    const hoy = new Date().toISOString().split('T')[0];
+    const ids: string[] = [];
+    const pagos: Pago[] = [];
+    const updates: Record<string, any> = {};
+
+    for (const mes of input.meses) {
+      const id = Date.now().toString() + Math.random().toString().slice(2, 5);
+      const pago: any = {
+        id,
+        usuario: input.usuario,
+        usuarioId: input.usuario,
+        concepto: `Administración ${mes} ${input.year}`,
+        valor: String(input.montoPerMonth),
+        fecha: hoy,
+        estado: input.estado,
+        referencia: input.referencia,
+        conjunto: input.conjunto || '',
+        conjuntoId: input.conjuntoId || '',
+        // Marca de escritura por Firebase: la sync Sheets->RTDB no debe pisarlo.
+        _fbWrite: true,
+      };
+      updates[`mirror/pagos/${this.safeKey(id)}`] = pago;
+      ids.push(id);
+      pagos.push(pago);
+    }
+
+    await db.ref().update(updates);
+    return { success: true, ids, pagos };
+  }
+
+  /** Actualiza un pago existente (merge de campos) en mirror/pagos. */
+  async updatePayment(id: string, changes: Partial<Pago>): Promise<{ success: boolean; message?: string }> {
+    if (!id) return { success: false, message: 'ID de pago requerido' };
+    const db = this.firebase.db();
+    const ref = db.ref(`mirror/pagos/${this.safeKey(id)}`);
+    const snap = await ref.get();
+    if (!snap.exists()) return { success: false, message: 'El pago no existe.' };
+    const patch: Record<string, any> = { _fbWrite: true };
+    ['usuario', 'concepto', 'valor', 'fecha', 'estado', 'referencia'].forEach((f) => {
+      if ((changes as any)[f] !== undefined) patch[f] = String((changes as any)[f]);
+    });
+    await ref.update(patch);
+    return { success: true };
+  }
+
+  /** Elimina un pago de mirror/pagos. */
+  async deletePayment(id: string): Promise<{ success: boolean; message?: string }> {
+    if (!id) return { success: false, message: 'ID de pago requerido' };
+    await this.firebase.db().ref(`mirror/pagos/${this.safeKey(id)}`).remove();
+    return { success: true };
+  }
+
+  /**
+   * Aprueba/rechaza un pago. Actualiza su estado y, si su referencia contiene
+   * "RESERVA:<id>", pone la reserva vinculada en Activa (Confirmado) o Cancelada
+   * (Rechazado).
+   */
+  async reviewPayment(input: {
+    id: string;
+    estado: 'Confirmado' | 'Rechazado';
+    valor?: string | number;
+    referencia?: string;
+  }): Promise<{ success: boolean; message?: string; reservaMsg?: string }> {
+    const db = this.firebase.db();
+    const ref = db.ref(`mirror/pagos/${this.safeKey(input.id)}`);
+    const snap = await ref.get();
+    if (!snap.exists()) return { success: false, message: 'El pago no existe.' };
+    const pago = snap.val();
+
+    const patch: Record<string, any> = { estado: input.estado, _fbWrite: true };
+    if (input.valor !== undefined) patch.valor = String(input.valor);
+    await ref.update(patch);
+
+    // Vínculo con reserva.
+    const referencia = String(input.referencia ?? pago.referencia ?? '');
+    const match = referencia.match(/RESERVA:\s*([^\s|]+)/);
+    let reservaMsg = '';
+    if (match) {
+      const reservaId = match[1].trim();
+      try {
+        const rRef = db.ref(`mirror/reservas/${this.safeKey(reservaId)}`);
+        const rSnap = await rRef.get();
+        if (rSnap.exists()) {
+          await rRef.update({ estado: input.estado === 'Confirmado' ? 'Activa' : 'Cancelada', _fbWrite: true });
+          reservaMsg = input.estado === 'Confirmado' ? ' La reserva quedó activa.' : ' La reserva fue cancelada.';
+        } else {
+          reservaMsg = ` (No se encontró la reserva ${reservaId}.)`;
+        }
+      } catch {
+        reservaMsg = ' (Error actualizando la reserva vinculada.)';
+      }
+    }
+    return { success: true, reservaMsg };
+  }
 }
