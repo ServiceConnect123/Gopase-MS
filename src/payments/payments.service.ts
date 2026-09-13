@@ -209,6 +209,25 @@ export class PaymentsService {
     return this.filterPagosByYear(pagosAll, year).filter((p) => p.usuario === username);
   }
 
+  /**
+   * Pagos crudos del conjunto en el año (vista admin, lista de pagos). Filtra a
+   * los pagos de usuarios del conjunto (salvo superAdmin, que ve todos). Se lee
+   * de mirror/pagos, por lo que refleja de inmediato las escrituras del backend.
+   */
+  async getPaymentsList(conjunto: string, year: number, isSuperAdmin = false): Promise<Pago[]> {
+    const [pagosAll, usuarios] = await Promise.all([
+      this.readCollection<Pago>('pagos'),
+      this.readCollection<Usuario>('usuarios'),
+    ]);
+    const pagos = this.filterPagosByYear(pagosAll, year);
+    if (isSuperAdmin || !conjunto) return pagos;
+
+    const usuariosDelConjunto = new Set(
+      usuarios.filter((u) => (u.conjunto || '') === conjunto).map((u) => u.usuario),
+    );
+    return pagos.filter((p) => usuariosDelConjunto.has(p.usuario));
+  }
+
   /** Deudores de un mes (sin pago confirmado) con teléfono, para recordatorios. */
   async getDebtors(conjunto: string, month: string, year: number, onlyWithPhone = true): Promise<Debtor[]> {
     const [pagosAll, usuarios] = await Promise.all([

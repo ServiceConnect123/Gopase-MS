@@ -41,6 +41,24 @@ export class PaymentsController {
     return { success: true, data };
   }
 
+  @ApiOperation({ summary: 'Pagos crudos del conjunto en el año (vista admin, lista de pagos)' })
+  @ApiQuery({ name: 'conjunto', required: false })
+  @ApiQuery({ name: 'year', required: false, type: Number })
+  @ApiQuery({ name: 'superAdmin', required: false, type: Boolean })
+  @Get('list')
+  async list(
+    @Query('conjunto') conjunto?: string,
+    @Query('year') year?: string,
+    @Query('superAdmin') superAdmin?: string,
+  ) {
+    const data = await this.payments.getPaymentsList(
+      conjunto || '',
+      year ? parseInt(year, 10) : new Date().getFullYear(),
+      superAdmin === 'true',
+    );
+    return { success: true, data };
+  }
+
   @ApiOperation({ summary: 'Pagos de un propietario (su propia vista)' })
   @ApiQuery({ name: 'username', required: true })
   @ApiQuery({ name: 'year', required: false, type: Number })
