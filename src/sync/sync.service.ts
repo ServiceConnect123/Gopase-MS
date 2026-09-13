@@ -25,7 +25,8 @@ export type SyncCollection =
   | 'citofonia'
   | 'acuerdos'
   | 'zonas_comunes'
-  | 'reservas';
+  | 'reservas'
+  | 'reportes';
 
 const ALL_COLLECTIONS: SyncCollection[] = [
   'conjuntos',
@@ -38,6 +39,7 @@ const ALL_COLLECTIONS: SyncCollection[] = [
   'acuerdos',
   'zonas_comunes',
   'reservas',
+  'reportes',
 ];
 
 export interface SyncResult {
@@ -245,6 +247,23 @@ export class SyncService {
       pagoId: String(row.dato_10 ?? ''),
       comprobanteUrl: row.dato_11 ?? '',
       fechaAprobacion: row.dato_12 ?? '',
+    };
+  }
+
+  // reportes (Hoja de reportes): dato_1=id, dato_2=titulo, dato_3=fecha,
+  // dato_4=autor(username), dato_5=descripcion, dato_6=conjunto, dato_7=tipo,
+  // dato_8=ubicacion, dato_9=estado
+  private mapReporte(row: any) {
+    return {
+      id: String(row.dato_1 ?? ''),
+      titulo: row.dato_2 ?? '',
+      fecha: row.dato_3 ?? '',
+      usuario: String(row.dato_4 ?? ''), // autor (username)
+      descripcion: row.dato_5 ?? '',
+      conjunto: String(row.dato_6 ?? ''),
+      tipo: row.dato_7 ?? '',
+      ubicacion: row.dato_8 ?? '',
+      estado: row.dato_9 ?? '',
     };
   }
 
@@ -471,6 +490,12 @@ export class SyncService {
     return this.writeMirrorProtected('reservas', rows.map((r) => this.mapReserva(r)));
   }
 
+  async syncReportes(): Promise<SyncResult> {
+    const rows = await this.sheets.read('reportes');
+    // Protegido: el CRUD de reportes ocurre en el backend.
+    return this.writeMirrorProtected('reportes', rows.map((r) => this.mapReporte(r)));
+  }
+
   /** Ejecuta la sincronización de una colección puntual por nombre. */
   async syncOne(collection: SyncCollection): Promise<SyncResult> {
     switch (collection) {
@@ -484,6 +509,7 @@ export class SyncService {
       case 'acuerdos': return this.syncAcuerdos();
       case 'zonas_comunes': return this.syncZonas();
       case 'reservas': return this.syncReservas();
+      case 'reportes': return this.syncReportes();
     }
   }
 
@@ -511,7 +537,7 @@ export class SyncService {
       // 1. Leer todas las hojas en paralelo.
       const [
         conjRows, userRows, pagoRows, rolRows, invRows,
-        eventoRows, citoRows, acuerdoRows, zonaRows, reservaRows,
+        eventoRows, citoRows, acuerdoRows, zonaRows, reservaRows, reporteRows,
       ] = await Promise.all([
         this.sheets.read('propiedades'),
         this.sheets.read('usuarios'),
@@ -523,6 +549,7 @@ export class SyncService {
         this.sheets.read('acuerdos'),
         this.sheets.read('zonas_comunes'),
         this.sheets.read('reservas'),
+        this.sheets.read('reportes'),
       ]);
 
       const conjuntos = conjRows.map((r) => this.mapConjunto(r));
@@ -535,6 +562,7 @@ export class SyncService {
       const acuerdos = acuerdoRows.map((r) => this.mapAcuerdo(r));
       const zonas = zonaRows.map((r) => this.mapZona(r));
       const reservas = reservaRows.map((r) => this.mapReserva(r));
+      const reportes = reporteRows.map((r) => this.mapReporte(r));
 
       // 2. Índices de resolución.
       const conjIndex = this.buildConjuntoIndex(conjuntos);
@@ -596,6 +624,13 @@ export class SyncService {
         conjuntoId: conjIndex.resolve(r.conjunto) || conjuntoDeUsuario(r.usuario),
       }));
 
+      // reportes: conjunto (dato_6, id/nombre) + autor(username) para referencias.
+      const reportesEnriched = reportes.map((r) => ({
+        ...r,
+        usuarioId: r.usuario,
+        conjuntoId: conjIndex.resolve(r.conjunto) || conjuntoDeUsuario(r.usuario),
+      }));
+
       // 4. Escribir todas las colecciones planas (roles es global; el resto lleva conjuntoId).
       const results: SyncResult[] = [];
       results.push(await this.writeMirrorProtected('conjuntos', conjuntos));
@@ -608,6 +643,7 @@ export class SyncService {
       results.push(await this.writeMirror('acuerdos', acuerdosEnriched));
       results.push(await this.writeMirrorProtected('zonas_comunes', zonasEnriched));
       results.push(await this.writeMirrorProtected('reservas', reservasEnriched));
+      results.push(await this.writeMirrorProtected('reportes', reportesEnriched));
 
       // 5. Árbol anidado conjunto -> usuarios -> pagos (vista de referencia).
       await this.writeTree(conjuntos, usuariosEnriched, pagosEnriched);
