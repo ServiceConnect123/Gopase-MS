@@ -34,25 +34,62 @@ export class DriveService {
     }
   }
 
-  /** POST al Apps Script con timeout. Sigue el redirect 302 de Google. */
+  /**
+   * POST al Apps Script con timeout. Maneja el redirect 302 POST->GET de Google
+   * Apps Script: si al seguir el redirect vuelve HTML (el body del POST se
+   * pierde en la conversión a GET), reintenta con redirect manual y re-POST
+   * directo a la URL de Location. Misma estrategia que el antiguo proxy Vercel.
+   */
   private async postToScript<T = any>(body: Record<string, unknown>): Promise<T> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const payload = JSON.stringify(body);
+    const headers = { 'Content-Type': 'text/plain;charset=utf-8' };
     try {
+      // Intento 1: seguir el redirect automáticamente.
       const res = await fetch(this.scriptUrl, {
         method: 'POST',
         redirect: 'follow',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(body),
+        headers,
+        body: payload,
         signal: controller.signal,
       });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`HTTP ${res.status}: ${text.substring(0, 120)}`);
+      const text = await res.text();
+      const parsed = this.tryParseJson(text);
+      if (parsed !== null) return parsed as T;
+
+      // Vino HTML (redirect perdió el POST). Intento 2: redirect manual + re-POST.
+      const manual = await fetch(this.scriptUrl, {
+        method: 'POST',
+        redirect: 'manual',
+        headers,
+        body: payload,
+        signal: controller.signal,
+      });
+      const location = manual.headers.get('location');
+      if (location) {
+        const finalRes = await fetch(location, {
+          method: 'POST',
+          redirect: 'follow',
+          headers,
+          body: payload,
+          signal: controller.signal,
+        });
+        const finalText = await finalRes.text();
+        const finalParsed = this.tryParseJson(finalText);
+        if (finalParsed !== null) return finalParsed as T;
       }
-      return (await res.json()) as T;
+      throw new Error(`Apps Script devolvió una respuesta no-JSON: ${text.substring(0, 100)}`);
     } finally {
       clearTimeout(timeout);
+    }
+  }
+
+  private tryParseJson(text: string): any | null {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
     }
   }
 
