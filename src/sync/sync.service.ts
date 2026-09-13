@@ -320,9 +320,17 @@ export class SyncService {
       const existing: Record<string, any> = snap.exists() ? snap.val() : {};
 
       const merged: Record<string, any> = {};
+      const fromSheetKeys = new Set<string>();
       items.forEach((item, i) => {
         const key = this.safeKey(item.id, i);
+        fromSheetKeys.add(key);
         const prev = existing[key];
+        // Si el usuario fue creado/editado por el backend (_fbWrite), Firebase es
+        // la fuente de verdad: se conserva íntegro y no se pisa desde Sheets.
+        if (prev && prev._fbWrite) {
+          merged[key] = prev;
+          return;
+        }
         const next = { ...item };
         if (prev) {
           // Conservar los campos editables del perfil si ya existían.
@@ -335,10 +343,16 @@ export class SyncService {
         merged[key] = next;
       });
 
+      // Usuarios que existen solo en RTDB (creados por el backend, no en Sheets):
+      // preservarlos para no borrarlos en cada sync.
+      Object.keys(existing).forEach((key) => {
+        if (!fromSheetKeys.has(key)) merged[key] = existing[key];
+      });
+
       await db.ref(`${MIRROR_ROOT}/usuarios`).set(merged);
-      await db.ref(`${MIRROR_ROOT}/_meta/usuarios`).set({ count: items.length, syncedAt: Date.now() });
-      this.logger.log(`[sync] usuarios: ${items.length} espejados (campos de perfil preservados).`);
-      return { collection: 'usuarios', success: true, count: items.length };
+      await db.ref(`${MIRROR_ROOT}/_meta/usuarios`).set({ count: Object.keys(merged).length, syncedAt: Date.now() });
+      this.logger.log(`[sync] usuarios: ${Object.keys(merged).length} espejados (perfil + escrituras de Firebase preservados).`);
+      return { collection: 'usuarios', success: true, count: Object.keys(merged).length };
     } catch (err: any) {
       this.logger.error(`[sync] usuarios falló: ${err?.message || err}`);
       return { collection: 'usuarios', success: false, count: 0, message: err?.message || 'Error al escribir en RTDB' };

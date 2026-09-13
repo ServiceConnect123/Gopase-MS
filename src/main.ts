@@ -81,6 +81,7 @@ async function bootstrap() {
     .addTag('home', 'Dashboard de la pantalla Home (data ya calculada)')
     .addTag('profile', 'Perfil de usuario contra Firebase (RTDB + Auth)')
     .addTag('payments', 'Lecturas y cálculos de Pagos (data ya calculada, RTDB)')
+    .addTag('users', 'CRUD de usuarios contra Firebase (RTDB + Auth)')
     // Header opcional que protege los endpoints de sincronización.
     .addApiKey(
       { type: 'apiKey', name: 'x-sync-token', in: 'header' },

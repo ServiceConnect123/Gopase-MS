@@ -8,6 +8,7 @@ import { HomeModule } from './home/home.module';
 import { ProfileModule } from './profile/profile.module';
 import { PaymentsModule } from './payments/payments.module';
 import { DriveModule } from './drive/drive.module';
+import { UsersModule } from './users/users.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { DriveModule } from './drive/drive.module';
     ProfileModule,
     PaymentsModule,
     DriveModule,
+    UsersModule,
   ],
 })
 export class AppModule {}
