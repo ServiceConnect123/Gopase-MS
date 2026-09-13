@@ -1,11 +1,14 @@
 import { Controller, Get, Header, Post } from '@nestjs/common';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { WhatsappService } from './whatsapp.service';
 
+@ApiTags('whatsapp')
 @Controller('whatsapp')
 export class WhatsappController {
   constructor(private readonly whatsapp: WhatsappService) {}
 
   /** Estado de la conexión de WhatsApp. */
+  @ApiOperation({ summary: 'Estado de la conexión de WhatsApp' })
   @Get('status')
   status() {
     return {
@@ -15,6 +18,7 @@ export class WhatsappController {
   }
 
   /** Devuelve el QR actual en JSON (string crudo + PNG en base64). */
+  @ApiOperation({ summary: 'QR actual en JSON (string + PNG base64)' })
   @Get('qr')
   async qr() {
     const data = await this.whatsapp.getQr();
@@ -30,6 +34,7 @@ export class WhatsappController {
   }
 
   /** Página HTML sencilla para escanear el QR desde el navegador. */
+  @ApiOperation({ summary: 'Página HTML para escanear el QR' })
   @Get('qr/view')
   @Header('Content-Type', 'text/html; charset=utf-8')
   async qrView() {
@@ -60,6 +65,10 @@ export class WhatsappController {
    * Cierra la sesión actual, limpia las credenciales y genera un QR nuevo
    * para vincular OTRO número de WhatsApp. Luego abre /whatsapp/qr/view.
    */
+  @ApiOperation({
+    summary: 'Reinicia la sesión y genera un QR nuevo',
+    description: 'Cierra la sesión actual, limpia credenciales y genera un QR para vincular otro número.',
+  })
   @Post('relogin')
   async relogin() {
     await this.whatsapp.relogin();

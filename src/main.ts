@@ -1,5 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 
 /**
@@ -58,8 +59,33 @@ async function bootstrap() {
     allowedHeaders: ['Content-Type', 'x-api-key'],
   });
 
+  // Swagger / OpenAPI en /docs (y el JSON en /docs-json).
+  const swaggerConfig = new DocumentBuilder()
+    .setTitle('wspsend-ms API')
+    .setDescription(
+      'Microservicio de goPase: notificaciones por WhatsApp (recordatorios de ' +
+        'pago, recibos), gestión de la sesión de WhatsApp y sincronización ' +
+        'Google Sheets -> Realtime Database.',
+    )
+    .setVersion('1.0')
+    .addTag('notifications', 'Recordatorios de cobro y envío de recibos')
+    .addTag('whatsapp', 'Estado y gestión de la sesión de WhatsApp (QR, relogin)')
+    .addTag('sync', 'Sincronización Sheets -> Realtime Database (migración)')
+    // Header opcional que protege los endpoints de sincronización.
+    .addApiKey(
+      { type: 'apiKey', name: 'x-sync-token', in: 'header' },
+      'sync-token',
+    )
+    .build();
+  const document = SwaggerModule.createDocument(app, swaggerConfig);
+  SwaggerModule.setup('docs', app, document, {
+    customSiteTitle: 'wspsend-ms API Docs',
+    swaggerOptions: { persistAuthorization: true },
+  });
+
   const port = process.env.PORT || 3001;
   await app.listen(port);
   Logger.log(`wspsend-ms escuchando en el puerto ${port}`, 'Bootstrap');
+  Logger.log(`Swagger disponible en /docs`, 'Bootstrap');
 }
 bootstrap();

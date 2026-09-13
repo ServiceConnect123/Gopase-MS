@@ -22,6 +22,7 @@
     "@nestjs/core": "^10.4.15",
     "@nestjs/platform-express": "^10.4.15",
     "@nestjs/schedule": "^4.1.2",
+    "@nestjs/swagger": "^8.1.1",
     "@whiskeysockets/baileys": "^6.7.9",
     "firebase-admin": "^14.4.0",
     "pino": "^9.5.0",
