@@ -15,7 +15,30 @@ import { FirebaseService } from '../firebase/firebase.service';
  * - Idempotente: reescribe la colección completa en cada corrida.
  * - No lanza si falta Firebase: registra y devuelve un resultado.
  */
-export type SyncCollection = 'conjuntos' | 'pagos' | 'usuarios';
+export type SyncCollection =
+  | 'conjuntos'
+  | 'pagos'
+  | 'usuarios'
+  | 'roles'
+  | 'invitados'
+  | 'eventos'
+  | 'citofonia'
+  | 'acuerdos'
+  | 'zonas_comunes'
+  | 'reservas';
+
+const ALL_COLLECTIONS: SyncCollection[] = [
+  'conjuntos',
+  'usuarios',
+  'pagos',
+  'roles',
+  'invitados',
+  'eventos',
+  'citofonia',
+  'acuerdos',
+  'zonas_comunes',
+  'reservas',
+];
 
 export interface SyncResult {
   collection: SyncCollection;
@@ -101,6 +124,126 @@ export class SyncService {
     };
   }
 
+  // roles (Hoja 4) GLOBAL: dato_1=id, dato_2=name, dato_3=permissions(JSON string)
+  private mapRol(row: any) {
+    let permisos: any = row.dato_3 ?? '';
+    if (typeof permisos === 'string' && permisos.trim()) {
+      try {
+        permisos = JSON.parse(permisos);
+      } catch {
+        // Si no es JSON válido, se deja el string tal cual.
+      }
+    }
+    return {
+      id: String(row.dato_1 ?? ''),
+      nombre: String(row.dato_2 ?? ''),
+      permisos,
+    };
+  }
+
+  // vigilantes/invitados (Hoja 6): dato_1=id, dato_2=nombre, dato_3=placa,
+  // dato_4=fecha, dato_5=propietario(username), dato_6=parcela, dato_7=estado,
+  // dato_8=horaIngreso, dato_9=nota. El conjunto se resuelve vía el propietario.
+  private mapInvitado(row: any) {
+    return {
+      id: String(row.dato_1 ?? ''),
+      nombre: row.dato_2 ?? '',
+      placa: row.dato_3 ?? '',
+      fecha: row.dato_4 ?? '',
+      propietario: String(row.dato_5 ?? ''), // username del anfitrión
+      parcela: row.dato_6 ?? '',
+      estado: row.dato_7 ?? '',
+      horaIngreso: row.dato_8 ?? '',
+      nota: row.dato_9 ?? '',
+    };
+  }
+
+  // eventos (Hoja 7): dato_1=id, dato_2=titulo, dato_3=descripcion, dato_4=fecha,
+  // dato_5=hora, dato_6=lugar, dato_7=conjunto(NOMBRE), dato_8=creador
+  private mapEvento(row: any) {
+    return {
+      id: String(row.dato_1 ?? ''),
+      titulo: row.dato_2 ?? '',
+      descripcion: row.dato_3 ?? '',
+      fecha: row.dato_4 ?? '',
+      hora: row.dato_5 ?? '',
+      lugar: row.dato_6 ?? '',
+      conjunto: String(row.dato_7 ?? ''), // nombre del conjunto
+      creador: String(row.dato_8 ?? ''),
+    };
+  }
+
+  // citofonia (Hoja 8) multipropósito: dato_1=id, dato_2=usuario(username),
+  // dato_3=payload/valor, dato_4=origen/conjunto(según tipo), dato_5=tipo, dato_6=timestamp.
+  // NOTA: si tipo='subscription', dato_3 son credenciales Web Push (sensibles) que
+  // NO se copian al espejo. Solo se espejan las notificaciones.
+  private mapCitofonia(row: any) {
+    const tipo = String(row.dato_5 ?? '');
+    return {
+      id: String(row.dato_1 ?? ''),
+      usuario: String(row.dato_2 ?? ''),
+      // Para 'subscription' NO copiamos el payload (endpoint/keys push).
+      mensaje: tipo === 'subscription' ? '' : (row.dato_3 ?? ''),
+      origen: row.dato_4 ?? '',
+      tipo,
+      timestamp: row.dato_6 ?? '',
+    };
+  }
+
+  // acuerdos (Hoja 9): dato_1=id, dato_2=usuario(username), dato_3=tipo,
+  // dato_4=descripcion, dato_5=monto, dato_6=fechaInicio, dato_7=fechaFin,
+  // dato_8=estado, dato_9=aplicaA, dato_10=createdBy, dato_11=createdAt
+  private mapAcuerdo(row: any) {
+    return {
+      id: String(row.dato_1 ?? ''),
+      usuario: String(row.dato_2 ?? ''),
+      tipo: row.dato_3 ?? '',
+      descripcion: row.dato_4 ?? '',
+      monto: row.dato_5 ?? '',
+      fechaInicio: row.dato_6 ?? '',
+      fechaFin: row.dato_7 ?? '',
+      estado: row.dato_8 ?? '',
+      aplicaA: String(row.dato_9 ?? ''),
+      createdBy: String(row.dato_10 ?? ''),
+      createdAt: row.dato_11 ?? '',
+    };
+  }
+
+  // zonas_comunes (Hoja 13): dato_1=id, dato_2=conjunto, dato_3=nombre,
+  // dato_4=esPago, dato_5=precioHora, dato_6=horaApertura, dato_7=horaCierre, dato_8=activo
+  private mapZona(row: any) {
+    return {
+      id: String(row.dato_1 ?? ''),
+      conjunto: String(row.dato_2 ?? ''), // id o nombre del conjunto
+      nombre: row.dato_3 ?? '',
+      esPago: row.dato_4 ?? '',
+      precioHora: row.dato_5 ?? '',
+      horaApertura: row.dato_6 ?? '',
+      horaCierre: row.dato_7 ?? '',
+      activo: row.dato_8 ?? '',
+    };
+  }
+
+  // reservas (Hoja 14): dato_1=id, dato_2=conjunto, dato_3=zonaId, dato_4=zonaNombre,
+  // dato_5=usuario, dato_6=fecha, dato_7=horas, dato_8=costo, dato_9=estado,
+  // dato_10=pagoId, dato_11=comprobanteUrl, dato_12=fechaAprobacion
+  private mapReserva(row: any) {
+    return {
+      id: String(row.dato_1 ?? ''),
+      conjunto: String(row.dato_2 ?? ''), // id o nombre del conjunto
+      zonaId: String(row.dato_3 ?? ''),
+      zonaNombre: row.dato_4 ?? '',
+      usuario: String(row.dato_5 ?? ''),
+      fecha: row.dato_6 ?? '',
+      horas: row.dato_7 ?? '',
+      costo: row.dato_8 ?? '',
+      estado: row.dato_9 ?? '',
+      pagoId: String(row.dato_10 ?? ''),
+      comprobanteUrl: row.dato_11 ?? '',
+      fechaAprobacion: row.dato_12 ?? '',
+    };
+  }
+
   /**
    * Índice para resolver el conjunto de un usuario a su id, sin importar si en
    * Sheets se guardó por id o por nombre. Mapea id->id y nombre(normalizado)->id.
@@ -165,8 +308,59 @@ export class SyncService {
     return this.writeMirror('usuarios', rows.map((r) => this.mapUsuario(r)));
   }
 
+  async syncRoles(): Promise<SyncResult> {
+    const rows = await this.sheets.read('roles');
+    return this.writeMirror('roles', rows.map((r) => this.mapRol(r)));
+  }
+
+  async syncInvitados(): Promise<SyncResult> {
+    const rows = await this.sheets.read('vigilantes');
+    return this.writeMirror('invitados', rows.map((r) => this.mapInvitado(r)));
+  }
+
+  async syncEventos(): Promise<SyncResult> {
+    const rows = await this.sheets.read('eventos');
+    return this.writeMirror('eventos', rows.map((r) => this.mapEvento(r)));
+  }
+
+  async syncCitofonia(): Promise<SyncResult> {
+    const rows = await this.sheets.read('citofonia');
+    return this.writeMirror('citofonia', rows.map((r) => this.mapCitofonia(r)));
+  }
+
+  async syncAcuerdos(): Promise<SyncResult> {
+    const rows = await this.sheets.read('acuerdos');
+    return this.writeMirror('acuerdos', rows.map((r) => this.mapAcuerdo(r)));
+  }
+
+  async syncZonas(): Promise<SyncResult> {
+    const rows = await this.sheets.read('zonas_comunes');
+    return this.writeMirror('zonas_comunes', rows.map((r) => this.mapZona(r)));
+  }
+
+  async syncReservas(): Promise<SyncResult> {
+    const rows = await this.sheets.read('reservas');
+    return this.writeMirror('reservas', rows.map((r) => this.mapReserva(r)));
+  }
+
+  /** Ejecuta la sincronización de una colección puntual por nombre. */
+  async syncOne(collection: SyncCollection): Promise<SyncResult> {
+    switch (collection) {
+      case 'conjuntos': return this.syncConjuntos();
+      case 'pagos': return this.syncPagos();
+      case 'usuarios': return this.syncUsuarios();
+      case 'roles': return this.syncRoles();
+      case 'invitados': return this.syncInvitados();
+      case 'eventos': return this.syncEventos();
+      case 'citofonia': return this.syncCitofonia();
+      case 'acuerdos': return this.syncAcuerdos();
+      case 'zonas_comunes': return this.syncZonas();
+      case 'reservas': return this.syncReservas();
+    }
+  }
+
   /**
-   * Sincroniza las tres colecciones RESOLVIENDO las relaciones entre ellas:
+   * Sincroniza TODAS las colecciones RESOLVIENDO las relaciones entre ellas:
    *  - a cada usuario le agrega `conjuntoId` (resuelto desde su conjunto en Sheets).
    *  - a cada pago le agrega `usuarioId` y `conjuntoId` (vía su usuario).
    *  - además escribe un árbol anidado en `mirror/tree`:
@@ -181,54 +375,113 @@ export class SyncService {
       this.logger.warn(`[sync] syncAll: ${message}`);
       return {
         success: false,
-        results: (['conjuntos', 'pagos', 'usuarios'] as SyncCollection[]).map((c) => ({
-          collection: c,
-          success: false,
-          count: 0,
-          message,
-        })),
+        results: ALL_COLLECTIONS.map((c) => ({ collection: c, success: false, count: 0, message })),
       };
     }
 
     try {
-      // 1. Leer las tres hojas.
-      const [conjRows, pagoRows, userRows] = await Promise.all([
+      // 1. Leer todas las hojas en paralelo.
+      const [
+        conjRows, userRows, pagoRows, rolRows, invRows,
+        eventoRows, citoRows, acuerdoRows, zonaRows, reservaRows,
+      ] = await Promise.all([
         this.sheets.read('propiedades'),
-        this.sheets.read('pagos'),
         this.sheets.read('usuarios'),
+        this.sheets.read('pagos'),
+        this.sheets.read('roles'),
+        this.sheets.read('vigilantes'),
+        this.sheets.read('eventos'),
+        this.sheets.read('citofonia'),
+        this.sheets.read('acuerdos'),
+        this.sheets.read('zonas_comunes'),
+        this.sheets.read('reservas'),
       ]);
 
       const conjuntos = conjRows.map((r) => this.mapConjunto(r));
-      const pagos = pagoRows.map((r) => this.mapPago(r));
       const usuarios = userRows.map((r) => this.mapUsuario(r));
+      const pagos = pagoRows.map((r) => this.mapPago(r));
+      const roles = rolRows.map((r) => this.mapRol(r));
+      const invitados = invRows.map((r) => this.mapInvitado(r));
+      const eventos = eventoRows.map((r) => this.mapEvento(r));
+      const citofonia = citoRows.map((r) => this.mapCitofonia(r));
+      const acuerdos = acuerdoRows.map((r) => this.mapAcuerdo(r));
+      const zonas = zonaRows.map((r) => this.mapZona(r));
+      const reservas = reservaRows.map((r) => this.mapReserva(r));
 
       // 2. Índices de resolución.
       const conjIndex = this.buildConjuntoIndex(conjuntos);
 
-      // 3. Enriquecer usuarios con conjuntoId.
+      // usuario(username) -> conjuntoId. Necesario para las entidades que solo
+      // referencian al usuario (invitados, acuerdos, citofonia, pagos).
       const usuariosEnriched = usuarios.map((u) => ({
         ...u,
         conjuntoId: conjIndex.resolve(u.conjunto),
       }));
-
-      // usuarioId -> conjuntoId (para resolver el conjunto de cada pago).
       const userToConjunto = new Map<string, string>();
       usuariosEnriched.forEach((u) => userToConjunto.set(u.id, u.conjuntoId));
+      const conjuntoDeUsuario = (username: string) => userToConjunto.get(username) ?? '';
 
-      // 4. Enriquecer pagos con usuarioId y conjuntoId.
+      // 3. Enriquecer cada colección con conjuntoId (por usuario, nombre o id).
       const pagosEnriched = pagos.map((p) => ({
         ...p,
         usuarioId: p.usuario,
-        conjuntoId: userToConjunto.get(p.usuario) ?? '',
+        conjuntoId: conjuntoDeUsuario(p.usuario),
       }));
 
-      // 5. Escribir colecciones planas (enriquecidas).
+      // invitados: el conjunto se resuelve vía el propietario (username).
+      const invitadosEnriched = invitados.map((g) => ({
+        ...g,
+        usuarioId: g.propietario,
+        conjuntoId: conjuntoDeUsuario(g.propietario),
+      }));
+
+      // eventos: dato_7 guarda el NOMBRE del conjunto -> resolver a id.
+      const eventosEnriched = eventos.map((e) => ({
+        ...e,
+        conjuntoId: conjIndex.resolve(e.conjunto),
+      }));
+
+      // citofonia: el conjunto se resuelve vía el usuario destinatario.
+      const citofoniaEnriched = citofonia.map((c) => ({
+        ...c,
+        usuarioId: c.usuario,
+        conjuntoId: conjuntoDeUsuario(c.usuario),
+      }));
+
+      // acuerdos: conjunto vía el usuario (si aplica a 'todos', queda sin conjunto).
+      const acuerdosEnriched = acuerdos.map((a) => ({
+        ...a,
+        usuarioId: a.usuario,
+        conjuntoId: conjuntoDeUsuario(a.usuario),
+      }));
+
+      // zonas: dato_2 puede ser id o nombre del conjunto -> resolver a id.
+      const zonasEnriched = zonas.map((z) => ({
+        ...z,
+        conjuntoId: conjIndex.resolve(z.conjunto),
+      }));
+
+      // reservas: dato_2 conjunto (id/nombre) + usuario para referencias.
+      const reservasEnriched = reservas.map((r) => ({
+        ...r,
+        usuarioId: r.usuario,
+        conjuntoId: conjIndex.resolve(r.conjunto) || conjuntoDeUsuario(r.usuario),
+      }));
+
+      // 4. Escribir todas las colecciones planas (roles es global; el resto lleva conjuntoId).
       const results: SyncResult[] = [];
       results.push(await this.writeMirror('conjuntos', conjuntos));
-      results.push(await this.writeMirror('pagos', pagosEnriched));
       results.push(await this.writeMirror('usuarios', usuariosEnriched));
+      results.push(await this.writeMirror('pagos', pagosEnriched));
+      results.push(await this.writeMirror('roles', roles));
+      results.push(await this.writeMirror('invitados', invitadosEnriched));
+      results.push(await this.writeMirror('eventos', eventosEnriched));
+      results.push(await this.writeMirror('citofonia', citofoniaEnriched));
+      results.push(await this.writeMirror('acuerdos', acuerdosEnriched));
+      results.push(await this.writeMirror('zonas_comunes', zonasEnriched));
+      results.push(await this.writeMirror('reservas', reservasEnriched));
 
-      // 6. Construir y escribir el árbol anidado conjunto -> usuarios -> pagos.
+      // 5. Árbol anidado conjunto -> usuarios -> pagos (vista de referencia).
       await this.writeTree(conjuntos, usuariosEnriched, pagosEnriched);
 
       return { success: results.every((r) => r.success), results };
@@ -236,7 +489,7 @@ export class SyncService {
       this.logger.error(`[sync] syncAll falló: ${err?.message || err}`);
       return {
         success: false,
-        results: (['conjuntos', 'pagos', 'usuarios'] as SyncCollection[]).map((c) => ({
+        results: ALL_COLLECTIONS.map((c) => ({
           collection: c,
           success: false,
           count: 0,

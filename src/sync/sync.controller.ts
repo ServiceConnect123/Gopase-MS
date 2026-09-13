@@ -11,7 +11,18 @@ import { ApiOperation, ApiParam, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { SyncService, SyncCollection } from './sync.service';
 
-const VALID_COLLECTIONS: SyncCollection[] = ['conjuntos', 'pagos', 'usuarios'];
+const VALID_COLLECTIONS: SyncCollection[] = [
+  'conjuntos',
+  'usuarios',
+  'pagos',
+  'roles',
+  'invitados',
+  'eventos',
+  'citofonia',
+  'acuerdos',
+  'zonas_comunes',
+  'reservas',
+];
 
 /**
  * Endpoints para disparar la sincronización Sheets -> RTDB.
@@ -81,13 +92,6 @@ export class SyncController {
         `Colección inválida '${collection}'. Válidas: ${VALID_COLLECTIONS.join(', ')}`,
       );
     }
-    switch (collection as SyncCollection) {
-      case 'conjuntos':
-        return this.sync.syncConjuntos();
-      case 'pagos':
-        return this.sync.syncPagos();
-      case 'usuarios':
-        return this.sync.syncUsuarios();
-    }
+    return this.sync.syncOne(collection as SyncCollection);
   }
 }
