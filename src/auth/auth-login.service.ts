@@ -27,6 +27,8 @@ export interface LoginResult {
     nombre?: string;
     rol?: string;
     conjuntoId?: string;
+    /** Nombre del conjunto (la app lo usa como "complex"). */
+    conjunto?: string;
     mustChangePassword?: boolean;
   };
 }
@@ -51,6 +53,23 @@ export class AuthLoginService {
       .toLowerCase()
       .replace(/[^a-z0-9._-]/g, '_');
     return `${local}@${this.emailDomain}`;
+  }
+
+  /**
+   * Resuelve el nombre del conjunto a partir de su id, leyendo del espejo
+   * mirror/conjuntos del RTDB. Devuelve '' si no se encuentra (best-effort).
+   */
+  private async resolveConjuntoNombre(conjuntoId: string): Promise<string> {
+    if (!conjuntoId) return '';
+    try {
+      const snap = await this.firebase
+        .db()
+        .ref(`mirror/conjuntos/${conjuntoId}/nombre`)
+        .get();
+      return snap.exists() ? String(snap.val() || '') : '';
+    } catch {
+      return '';
+    }
   }
 
   /**
@@ -104,6 +123,9 @@ export class AuthLoginService {
     try {
       const record = await this.firebase.auth().getUser(uid);
       const claims = (record.customClaims || {}) as Record<string, any>;
+      const conjuntoId = claims.conjuntoId || '';
+      // Resolver el NOMBRE del conjunto (la app usa el nombre como "complex").
+      const conjuntoNombre = await this.resolveConjuntoNombre(conjuntoId);
       return {
         success: true,
         user: {
@@ -112,7 +134,8 @@ export class AuthLoginService {
           email: record.email || email,
           nombre: record.displayName || '',
           rol: claims.rol || '',
-          conjuntoId: claims.conjuntoId || '',
+          conjuntoId,
+          conjunto: conjuntoNombre,
           mustChangePassword: !!claims.mustChangePassword,
         },
       };
