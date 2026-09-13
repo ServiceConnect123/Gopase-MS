@@ -1,77 +1,64 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { google, drive_v3 } from 'googleapis';
-import { Readable } from 'stream';
-import { FirebaseService } from '../firebase/firebase.service';
+import { ConfigService } from '@nestjs/config';
 
 /**
- * Sube y elimina comprobantes en Google Drive usando la MISMA service account
- * de Firebase (FIREBASE_SERVICE_ACCOUNT). Reemplaza el flujo que hacía el
- * frontend contra Apps Script (action uploadImage/deleteImage).
+ * Sube y elimina comprobantes en Google Drive REENVIANDO la operación al Google
+ * Apps Script (mismo mecanismo que usaba el frontend). El Apps Script sube el
+ * archivo con DriveApp como dueño del script, que SÍ tiene cuota de Drive (a
+ * diferencia de una service account, que no tiene cuota propia).
  *
- * IMPORTANTE: para que la service account pueda escribir en la carpeta de cada
- * conjunto, esa carpeta de Drive debe estar COMPARTIDA con el email de la
- * service account (client_email) como Editor. Si no, Drive responde 404/403.
+ * El frontend sigue hablando solo con el backend (/drive/upload, /drive/delete);
+ * es el backend quien orquesta la llamada a Apps Script (server-side).
  *
- * Contrato replicado del Apps Script:
+ * Contrato hacia el frontend (igual que antes):
  *   - upload -> { success, fileUrl, directLink }
- *       fileUrl:    enlace de vista (webViewLink)
- *       directLink: enlace directo visualizable (uc?export=view&id=<fileId>)
  *   - delete -> { success, message }
+ *
+ * Apps Script (action 'uploadImage') responde:
+ *   { status:'success', fileId, fileUrl, directLink, folderId }
+ * Apps Script (action 'deleteImage') responde:
+ *   { status:'success', message, fileId }
  */
 @Injectable()
 export class DriveService {
   private readonly logger = new Logger(DriveService.name);
-  private drive: drive_v3.Drive | null = null;
+  private readonly scriptUrl: string;
+  private readonly timeoutMs: number;
 
-  constructor(private readonly firebase: FirebaseService) {}
-
-  /** Crea (una vez) el cliente de Drive con la service account de Firebase. */
-  private getDrive(): drive_v3.Drive | null {
-    if (this.drive) return this.drive;
-    const sa = this.firebase.getServiceAccount();
-    if (!sa || !sa.clientEmail || !sa.privateKey) {
-      this.logger.warn('Drive deshabilitado: sin credenciales de service account.');
-      return null;
+  constructor(private readonly config: ConfigService) {
+    this.scriptUrl = this.config.get<string>('SCRIPT_URL', '');
+    // Subir comprobantes puede tardar (imagen + cold start de Apps Script).
+    this.timeoutMs = Number(this.config.get<string>('DRIVE_TIMEOUT_MS', '45000'));
+    if (!this.scriptUrl) {
+      this.logger.warn('SCRIPT_URL no configurada: la subida de comprobantes a Drive quedará deshabilitada.');
     }
-    const auth = new google.auth.JWT({
-      email: sa.clientEmail,
-      key: sa.privateKey,
-      scopes: ['https://www.googleapis.com/auth/drive'],
-    });
-    this.drive = google.drive({ version: 'v3', auth });
-    return this.drive;
   }
 
-  /** Email de la service account, para instruir al usuario a compartir la carpeta. */
-  getServiceAccountEmail(): string {
-    return this.firebase.getServiceAccount()?.clientEmail || '';
-  }
-
-  /** Extrae el fileId de una URL de Drive (uc?id=, /d/<id>/, lh3, ...) o crudo. */
-  private extractFileId(raw: string): string {
-    const s = String(raw || '').trim();
-    if (!s) return '';
-    // uc?id=<id> o ?id=<id>
-    let m = s.match(/[?&]id=([a-zA-Z0-9_-]+)/);
-    if (m) return m[1];
-    // /d/<id>/
-    m = s.match(/\/d\/([a-zA-Z0-9_-]+)/);
-    if (m) return m[1];
-    // lh3.googleusercontent.com/d/<id>
-    m = s.match(/googleusercontent\.com\/d\/([a-zA-Z0-9_-]+)/);
-    if (m) return m[1];
-    // Si ya parece un id crudo.
-    if (/^[a-zA-Z0-9_-]{20,}$/.test(s)) return s;
-    return '';
-  }
-
-  private directLink(fileId: string): string {
-    return `https://drive.google.com/uc?export=view&id=${fileId}`;
+  /** POST al Apps Script con timeout. Sigue el redirect 302 de Google. */
+  private async postToScript<T = any>(body: Record<string, unknown>): Promise<T> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await fetch(this.scriptUrl, {
+        method: 'POST',
+        redirect: 'follow',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`HTTP ${res.status}: ${text.substring(0, 120)}`);
+      }
+      return (await res.json()) as T;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   /**
-   * Sube una imagen (base64, sin el prefijo data:) a la carpeta indicada.
-   * Devuelve el enlace de vista y el directo.
+   * Sube una imagen (base64) a Drive vía Apps Script. Devuelve el enlace de
+   * vista y el directo tal como los arma el script.
    */
   async uploadImage(
     base64Image: string,
@@ -79,70 +66,41 @@ export class DriveService {
     folderId?: string,
     mimeType = 'image/jpeg',
   ): Promise<{ success: boolean; fileUrl?: string; directLink?: string; message?: string }> {
-    const drive = this.getDrive();
-    if (!drive) return { success: false, message: 'Drive no configurado en el backend.' };
+    if (!this.scriptUrl) return { success: false, message: 'Drive no configurado en el backend (SCRIPT_URL).' };
     if (!base64Image) return { success: false, message: 'Imagen vacía.' };
 
+    // Aceptar tanto base64 puro como data URL (el script espera base64 puro).
+    const clean = base64Image.includes(',') ? base64Image.split(',').pop()! : base64Image;
+
     try {
-      // Aceptar tanto base64 puro como data URL.
-      const clean = base64Image.includes(',') ? base64Image.split(',').pop()! : base64Image;
-      const buffer = Buffer.from(clean, 'base64');
-      const stream = Readable.from(buffer);
-
-      const requestBody: drive_v3.Schema$File = { name: fileName };
-      if (folderId) requestBody.parents = [folderId];
-
-      const res = await drive.files.create({
-        requestBody,
-        media: { mimeType, body: stream },
-        fields: 'id, webViewLink',
-        supportsAllDrives: true,
+      const data = await this.postToScript<any>({
+        action: 'uploadImage',
+        image: clean,
+        fileName: fileName || `comprobante_${Date.now()}.jpg`,
+        folderId: folderId || '',
+        mimeType,
       });
-
-      const fileId = res.data.id || '';
-      if (!fileId) return { success: false, message: 'Drive no devolvió el id del archivo.' };
-
-      // Hacer el archivo visible por enlace (lectura pública), como el flujo previo.
-      try {
-        await drive.permissions.create({
-          fileId,
-          requestBody: { role: 'reader', type: 'anyone' },
-          supportsAllDrives: true,
-        });
-      } catch (permErr: any) {
-        this.logger.warn(`No se pudo hacer público ${fileId}: ${permErr?.message || permErr}`);
+      if (data?.status === 'success') {
+        return { success: true, fileUrl: data.fileUrl, directLink: data.directLink };
       }
-
-      return {
-        success: true,
-        fileUrl: res.data.webViewLink || this.directLink(fileId),
-        directLink: this.directLink(fileId),
-      };
+      return { success: false, message: data?.message || 'Apps Script no pudo subir la imagen.' };
     } catch (err: any) {
-      const msg = err?.errors?.[0]?.message || err?.message || 'Error subiendo a Drive';
-      this.logger.error(`uploadImage falló: ${msg}`);
-      return { success: false, message: msg };
+      this.logger.error(`uploadImage falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'Error subiendo a Drive' };
     }
   }
 
-  /** Elimina un comprobante de Drive por URL o fileId. */
+  /** Elimina un comprobante de Drive por URL o fileId, vía Apps Script. */
   async deleteImage(fileUrlOrId: string): Promise<{ success: boolean; message?: string }> {
     if (!fileUrlOrId) return { success: true, message: 'Sin comprobante que eliminar' };
-    const drive = this.getDrive();
-    if (!drive) return { success: false, message: 'Drive no configurado en el backend.' };
-
-    const fileId = this.extractFileId(fileUrlOrId);
-    if (!fileId) return { success: false, message: 'No se pudo extraer el id del archivo.' };
-
+    if (!this.scriptUrl) return { success: false, message: 'Drive no configurado en el backend (SCRIPT_URL).' };
     try {
-      await drive.files.delete({ fileId, supportsAllDrives: true });
-      return { success: true, message: 'Comprobante eliminado.' };
+      const data = await this.postToScript<any>({ action: 'deleteImage', fileUrl: fileUrlOrId });
+      // El Apps Script es idempotente: responde success aunque no exista.
+      return { success: data?.status === 'success', message: data?.message };
     } catch (err: any) {
-      // Si ya no existe, lo tratamos como éxito idempotente.
-      if (err?.code === 404) return { success: true, message: 'El comprobante ya no existía.' };
-      const msg = err?.errors?.[0]?.message || err?.message || 'Error eliminando de Drive';
-      this.logger.error(`deleteImage falló: ${msg}`);
-      return { success: false, message: msg };
+      this.logger.error(`deleteImage falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'Error eliminando de Drive' };
     }
   }
 }

@@ -1,22 +1,16 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Body, Controller, Post } from '@nestjs/common';
 import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { DriveService } from './drive.service';
 
 /**
- * Subida/eliminación de comprobantes en Google Drive desde el backend
- * (reemplaza el flujo del frontend contra Apps Script). Usa la service account
- * de Firebase. La carpeta del conjunto debe estar compartida con esa cuenta.
+ * Subida/eliminación de comprobantes en Google Drive desde el backend.
+ * El backend reenvía al Apps Script (que sube con DriveApp, con cuota del dueño
+ * del script). El frontend solo habla con estos endpoints, nunca con Apps Script.
  */
 @ApiTags('drive')
 @Controller('drive')
 export class DriveController {
   constructor(private readonly drive: DriveService) {}
-
-  @ApiOperation({ summary: 'Email de la service account (para compartir la carpeta de Drive)' })
-  @Get('service-account')
-  serviceAccount() {
-    return { success: true, email: this.drive.getServiceAccountEmail() };
-  }
 
   @ApiOperation({ summary: 'Subir comprobante (imagen base64) a Drive' })
   @ApiBody({
