@@ -139,3 +139,36 @@ En el dashboard de Render:
   reconecta sin QR antes de que corra el chequeo de arranque (hay 8s de margen).
 - Para forzar un re-login: vacía la hoja `wsp_session` (deja solo los
   encabezados) y reinicia el servicio para escanear un QR nuevo.
+
+## Despliegue continuo (GitHub Actions + Render)
+
+El workflow `.github/workflows/deploy.yml` construye y publica la imagen a
+Docker Hub y luego dispara el deploy del servicio de Render correspondiente:
+
+| Rama   | Imagen Docker Hub                | Servicio Render        |
+|--------|----------------------------------|------------------------|
+| `qa`   | `williams2022/wspsend-ms:qa`     | wspsend-ms-qa          |
+| `main` | `williams2022/wspsend-ms:latest` | wspsend-ms (prod)      |
+
+Cada build publica además un tag con el SHA (`<env>-<sha>`) para trazabilidad y
+rollback.
+
+### Secrets requeridos
+
+En GitHub: **Settings → Secrets and variables → Actions**:
+
+- `DOCKERHUB_USERNAME` — usuario de Docker Hub (ej. `williams2022`).
+- `DOCKERHUB_TOKEN` — access token de Docker Hub (Account → Security → New Access Token).
+- `RENDER_API_KEY` — API key de Render (Account Settings → API Keys).
+- `RENDER_SERVICE_ID_QA` — `srv-daj1f2h5efls73f8jh40`.
+- `RENDER_SERVICE_ID_PROD` — `srv-dacpm40ae00c73deqjhg`.
+
+### Requisito en Render
+
+Cada servicio debe estar configurado para desplegar **desde imagen de registro**
+(Docker Hub), no auto-build desde el repo, para que Actions sea la única fuente
+de la imagen y no haya doble build.
+
+Las variables de entorno se gestionan **manualmente** en el dashboard de cada
+servicio (Environment). El pipeline no crea ni modifica variables: solo publica
+la imagen y dispara el deploy. Por eso este repo no usa `render.yaml` (Blueprint).

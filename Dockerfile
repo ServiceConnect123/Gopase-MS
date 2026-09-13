@@ -23,6 +23,12 @@ RUN npm ci --only=production
 
 COPY --from=builder /app/dist ./dist
 
+# Entorno de la app (qa, main/prod, ...). Se pasa como build-arg desde el
+# Makefile/CI: `docker build --build-arg APP_ENV=qa`. Queda disponible en
+# runtime como APP_ENV para diferenciar la imagen y en logs/health.
+ARG APP_ENV=production
+ENV APP_ENV=${APP_ENV}
+
 ENV PORT=3001
 ENV NODE_ENV=production
 
