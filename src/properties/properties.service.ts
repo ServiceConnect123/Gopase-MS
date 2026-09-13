@@ -3,20 +3,21 @@ import { FirebaseService } from '../firebase/firebase.service';
 import { SheetsService } from '../sheets/sheets.service';
 
 /**
- * CRUD de propiedades (conjuntos) contra Firebase (RTDB mirror/conjuntos) y
- * lectura de las CLAVES SENSIBLES desde Sheets para uso interno del backend.
+ * CRUD de propiedades (conjuntos) contra Firebase (RTDB mirror/conjuntos).
+ * Los datos ya no viven en Sheets: incluidos los secretos.
  *
- * Las claves sensibles (mercadoPagoKey, geminiKey) NO se exponen al cliente:
- * - El listado GET /properties devuelve datos no sensibles + flags booleanos
- *   (hasMercadoPago/hasBreB) + llaveBreB (que es visible por diseño: el usuario
- *   la necesita para transferir).
- * - Las operaciones que requieren las claves (OCR con Gemini, preferencia de
- *   Mercado Pago) se resuelven en el backend leyendo la clave de Sheets.
+ * Estructura en RTDB:
+ *   mirror/conjuntos/{id}                -> datos no sensibles + llaveBreB (visible)
+ *                                           + config de notificaciones (adminUsuario, etc.)
+ *   mirror/conjuntos/{id}/_secrets       -> { mercadoPagoKey, geminiKey } (NO se exponen al cliente)
  *
- * Mapeo de propiedades (Hoja 5 / 'propiedades'):
- *   dato_1=id, dato_2=nombre, dato_3=direccion, dato_4=tipo, dato_5=descripcion,
- *   dato_6=mercadoPagoKey, dato_7=cuotaMonto, dato_8=moneda, dato_9=llaveBreB,
- *   dato_10=geminiKey, dato_11=driveFolderId
+ * - GET /properties (listPublic): datos no sensibles + llaveBreB + flags
+ *   hasMercadoPago/hasBreB/hasGemini. Nunca las claves.
+ * - OCR (Gemini) y Mercado Pago leen las claves con getSecretsByConjunto (RTDB).
+ * - La edición de configuración (superAdmin) escribe todo vía updateConfig.
+ *
+ * La migración inicial de secretos desde Sheets se hace una sola vez con
+ * migrateSecretsFromSheets().
  */
 export interface PropertyPublic {
   id: string;
@@ -45,6 +46,12 @@ export interface PropertySecrets {
 
 const MIRROR_CONJUNTOS = 'mirror/conjuntos';
 
+// Campos no sensibles del conjunto (registro normal).
+const BASIC_FIELDS = [
+  'nombre', 'direccion', 'tipo', 'descripcion', 'cuotaMonto', 'moneda', 'driveFolderId',
+  'llaveBreB', 'adminUsuario', 'adminNombre', 'adminWhatsapp', 'notifActivo',
+] as const;
+
 @Injectable()
 export class PropertiesService {
   private readonly logger = new Logger(PropertiesService.name);
@@ -58,86 +65,68 @@ export class PropertiesService {
     return String(raw ?? '').trim().replace(/[.#$/\[\]]/g, '_');
   }
 
-  /** Mapea una fila de Sheets 'propiedades' a los secretos + datos completos. */
-  private mapSheetRow(row: any): PropertySecrets & { direccion: string; tipo: string; descripcion: string; moneda: string } {
-    return {
-      id: String(row.dato_1 ?? ''),
-      nombre: String(row.dato_2 ?? ''),
-      direccion: row.dato_3 ?? '',
-      tipo: row.dato_4 ?? '',
-      descripcion: row.dato_5 ?? '',
-      mercadoPagoKey: String(row.dato_6 ?? ''),
-      cuotaMonto: String(row.dato_7 ?? ''),
-      moneda: row.dato_8 ?? 'COP',
-      llaveBreB: String(row.dato_9 ?? ''),
-      geminiKey: String(row.dato_10 ?? ''),
-      driveFolderId: String(row.dato_11 ?? ''),
-    };
-  }
-
   /**
-   * Lista pública de propiedades. Combina el espejo RTDB (mirror/conjuntos, sin
-   * claves) con los flags derivados de Sheets (si hay MP/Gemini configurados) y
-   * la llaveBreB (visible). No expone mercadoPagoKey ni geminiKey.
+   * Lista pública de propiedades desde RTDB. Deriva los flags de la presencia de
+   * las claves en el subnodo _secrets, pero NUNCA expone las claves.
    */
   async listPublic(): Promise<PropertyPublic[]> {
     if (!this.firebase.isEnabled()) throw new Error('Servicio no disponible.');
-
-    // Base: espejo RTDB (datos no sensibles).
     const snap = await this.firebase.db().ref(MIRROR_CONJUNTOS).get();
     const mirror: Record<string, any> = snap.exists() ? snap.val() : {};
 
-    // Secretos/flags desde Sheets (fuente de verdad de las claves).
-    let sheetById = new Map<string, ReturnType<PropertiesService['mapSheetRow']>>();
-    try {
-      const rows = await this.sheets.read('propiedades');
-      rows.forEach((r) => {
-        const m = this.mapSheetRow(r);
-        if (m.id) sheetById.set(m.id, m);
-      });
-    } catch (e: any) {
-      this.logger.warn(`No se pudieron leer flags de Sheets: ${e?.message}`);
-    }
-
-    const out: PropertyPublic[] = Object.values(mirror).map((c: any) => {
-      const s = sheetById.get(String(c.id));
+    return Object.values(mirror).map((c: any) => {
+      const secrets = c._secrets || {};
       return {
         id: String(c.id ?? ''),
         nombre: c.nombre ?? '',
         direccion: c.direccion ?? '',
         tipo: c.tipo ?? '',
         descripcion: c.descripcion ?? '',
-        cuotaMonto: c.cuotaMonto ?? s?.cuotaMonto ?? '',
+        cuotaMonto: c.cuotaMonto ?? '',
         moneda: c.moneda ?? 'COP',
-        driveFolderId: c.driveFolderId ?? s?.driveFolderId ?? '',
-        llaveBreB: s?.llaveBreB ?? c.llaveBreB ?? '',
-        hasMercadoPago: !!(s?.mercadoPagoKey),
-        hasBreB: !!(s?.llaveBreB ?? c.llaveBreB),
-        hasGemini: !!(s?.geminiKey),
+        driveFolderId: c.driveFolderId ?? '',
+        llaveBreB: c.llaveBreB ?? '',
+        hasMercadoPago: !!secrets.mercadoPagoKey,
+        hasBreB: !!c.llaveBreB,
+        hasGemini: !!secrets.geminiKey,
       };
     });
-    return out;
   }
 
-  /** Resuelve los secretos de un conjunto por nombre (o id) desde Sheets. Uso interno. */
+  /** Busca el nodo del conjunto por id o nombre. Devuelve {key, value} o null. */
+  private async findConjunto(conjunto: string): Promise<{ key: string; value: any } | null> {
+    const snap = await this.firebase.db().ref(MIRROR_CONJUNTOS).get();
+    if (!snap.exists()) return null;
+    const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
+    const target = norm(conjunto);
+    const all = snap.val() || {};
+    for (const key of Object.keys(all)) {
+      const v = all[key];
+      if (norm(v.id) === target || norm(v.nombre) === target) return { key, value: v };
+    }
+    return null;
+  }
+
+  /**
+   * Resuelve las claves sensibles de un conjunto (por id o nombre) desde RTDB.
+   * Uso interno del backend (OCR, Mercado Pago). Nunca se expone al cliente.
+   */
   async getSecretsByConjunto(conjunto: string): Promise<PropertySecrets | null> {
     const raw = String(conjunto || '').trim();
-    if (!raw) return null;
+    if (!raw || !this.firebase.isEnabled()) return null;
     try {
-      const rows = await this.sheets.read('propiedades');
-      const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
-      const found = rows
-        .map((r) => this.mapSheetRow(r))
-        .find((m) => norm(m.nombre) === norm(raw) || norm(m.id) === norm(raw));
+      const found = await this.findConjunto(raw);
       if (!found) return null;
+      const c = found.value;
+      const s = c._secrets || {};
       return {
-        id: found.id,
-        nombre: found.nombre,
-        mercadoPagoKey: found.mercadoPagoKey,
-        geminiKey: found.geminiKey,
-        llaveBreB: found.llaveBreB,
-        cuotaMonto: found.cuotaMonto,
-        driveFolderId: found.driveFolderId,
+        id: String(c.id ?? ''),
+        nombre: c.nombre ?? '',
+        mercadoPagoKey: String(s.mercadoPagoKey ?? ''),
+        geminiKey: String(s.geminiKey ?? ''),
+        llaveBreB: String(c.llaveBreB ?? ''),
+        cuotaMonto: String(c.cuotaMonto ?? ''),
+        driveFolderId: String(c.driveFolderId ?? ''),
       };
     } catch (e: any) {
       this.logger.warn(`getSecretsByConjunto(${raw}) falló: ${e?.message}`);
@@ -145,22 +134,34 @@ export class PropertiesService {
     }
   }
 
+  /**
+   * Configuración COMPLETA de un conjunto para la pantalla de edición
+   * (superAdmin). Incluye las claves sensibles. Este endpoint es administrativo.
+   */
+  async getConfig(id: string): Promise<any | null> {
+    if (!this.firebase.isEnabled()) return null;
+    const key = this.safeKey(id);
+    const snap = await this.firebase.db().ref(`${MIRROR_CONJUNTOS}/${key}`).get();
+    if (!snap.exists()) return null;
+    const c = snap.val();
+    const s = c._secrets || {};
+    const { _secrets, _fbWrite, ...rest } = c;
+    return {
+      ...rest,
+      mercadoPagoKey: s.mercadoPagoKey ?? '',
+      geminiKey: s.geminiKey ?? '',
+    };
+  }
+
   /** Crea una propiedad (datos no sensibles) en mirror/conjuntos. */
   async create(dto: any): Promise<{ success: boolean; message?: string; id?: string }> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
     const id = String(dto.id || Date.now().toString());
     const key = this.safeKey(id);
-    const record = {
-      id,
-      nombre: dto.nombre || '',
-      direccion: dto.direccion || '',
-      tipo: dto.tipo || '',
-      descripcion: dto.descripcion || '',
-      cuotaMonto: dto.cuotaMonto ?? '',
-      moneda: dto.moneda || 'COP',
-      driveFolderId: dto.driveFolderId || '',
-      _fbWrite: true,
-    };
+    const record: Record<string, any> = { id, _fbWrite: true };
+    BASIC_FIELDS.forEach((f) => {
+      record[f] = dto[f] ?? (f === 'moneda' ? 'COP' : '');
+    });
     try {
       await this.firebase.db().ref(`${MIRROR_CONJUNTOS}/${key}`).set(record);
       return { success: true, id, message: 'Propiedad creada.' };
@@ -170,7 +171,7 @@ export class PropertiesService {
     }
   }
 
-  /** Edita una propiedad (datos no sensibles) en mirror/conjuntos. */
+  /** Edita datos no sensibles de una propiedad en mirror/conjuntos. */
   async update(id: string, dto: any): Promise<{ success: boolean; message?: string }> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
     const key = this.safeKey(id);
@@ -192,6 +193,40 @@ export class PropertiesService {
     }
   }
 
+  /**
+   * Edita la CONFIGURACIÓN COMPLETA del conjunto (superAdmin): datos no sensibles
+   * + llaveBreB + config de notificaciones en el registro, y mercadoPagoKey /
+   * geminiKey en el subnodo _secrets. Todo en RTDB (ya no Sheets).
+   */
+  async updateConfig(id: string, dto: any): Promise<{ success: boolean; message?: string }> {
+    if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
+    const key = this.safeKey(id);
+    if (!key) return { success: false, message: 'ID requerido.' };
+    const ref = this.firebase.db().ref(`${MIRROR_CONJUNTOS}/${key}`);
+    const snap = await ref.get();
+    if (!snap.exists()) return { success: false, message: 'La propiedad no existe.' };
+
+    try {
+      const patch: Record<string, any> = { _fbWrite: true };
+      BASIC_FIELDS.forEach((f) => {
+        if (dto[f] !== undefined) patch[f] = dto[f];
+      });
+
+      // Secretos: solo se tocan si vienen en el DTO (permite no reenviarlos).
+      const prevSecrets = snap.val()._secrets || {};
+      const secrets: Record<string, any> = { ...prevSecrets };
+      if (dto.mercadoPagoKey !== undefined) secrets.mercadoPagoKey = String(dto.mercadoPagoKey);
+      if (dto.geminiKey !== undefined) secrets.geminiKey = String(dto.geminiKey);
+      patch._secrets = secrets;
+
+      await ref.update(patch);
+      return { success: true, message: 'Configuración actualizada.' };
+    } catch (err: any) {
+      this.logger.error(`[properties] updateConfig ${key} falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo actualizar la configuración.' };
+    }
+  }
+
   /** Elimina una propiedad de mirror/conjuntos. */
   async remove(id: string): Promise<{ success: boolean; message?: string }> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
@@ -203,6 +238,50 @@ export class PropertiesService {
     } catch (err: any) {
       this.logger.error(`[properties] delete ${key} falló: ${err?.message}`);
       return { success: false, message: err?.message || 'No se pudo eliminar la propiedad.' };
+    }
+  }
+
+  /**
+   * Migración one-time: lee los secretos y la config de notificaciones desde la
+   * hoja 'propiedades' de Sheets y los escribe en RTDB (registro + _secrets).
+   * Idempotente: se puede ejecutar varias veces. Solo escribe lo que encuentra.
+   *
+   * Mapeo Sheets: dato_1=id, dato_6=mercadoPagoKey, dato_9=llaveBreB,
+   * dato_10=geminiKey, dato_12=adminUsuario, dato_13=adminNombre,
+   * dato_14=adminWhatsapp, dato_15=notifActivo.
+   */
+  async migrateSecretsFromSheets(): Promise<{ success: boolean; migrated: number; message?: string }> {
+    if (!this.firebase.isEnabled()) return { success: false, migrated: 0, message: 'Servicio no disponible.' };
+    try {
+      const rows = await this.sheets.read('propiedades');
+      const db = this.firebase.db();
+      let migrated = 0;
+      for (const r of rows) {
+        const id = String((r as any).dato_1 ?? '').trim();
+        if (!id) continue;
+        const key = this.safeKey(id);
+        const ref = db.ref(`${MIRROR_CONJUNTOS}/${key}`);
+        const snap = await ref.get();
+        if (!snap.exists()) continue; // solo conjuntos ya espejados
+        const patch: Record<string, any> = {
+          llaveBreB: (r as any).dato_9 ?? '',
+          adminUsuario: (r as any).dato_12 ?? '',
+          adminNombre: (r as any).dato_13 ?? '',
+          adminWhatsapp: (r as any).dato_14 ?? '',
+          notifActivo: (r as any).dato_15 ?? 'true',
+          _secrets: {
+            mercadoPagoKey: String((r as any).dato_6 ?? ''),
+            geminiKey: String((r as any).dato_10 ?? ''),
+          },
+        };
+        await ref.update(patch);
+        migrated++;
+      }
+      this.logger.log(`[properties] migrateSecretsFromSheets: ${migrated} conjuntos migrados.`);
+      return { success: true, migrated };
+    } catch (e: any) {
+      this.logger.error(`migrateSecretsFromSheets falló: ${e?.message}`);
+      return { success: false, migrated: 0, message: e?.message };
     }
   }
 }
