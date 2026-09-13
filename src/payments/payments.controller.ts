@@ -181,4 +181,55 @@ export class PaymentsController {
   ) {
     return this.payments.reviewPayment(body);
   }
+
+  @ApiOperation({ summary: 'Analizar comprobante con IA (Gemini); la clave no sale al cliente' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        conjunto: { type: 'string' },
+        imageBase64: { type: 'string' },
+        soloExtraerMonto: { type: 'boolean' },
+      },
+      required: ['conjunto', 'imageBase64'],
+    },
+  })
+  @Post('analyze-receipt')
+  async analyzeReceipt(
+    @Body() body: { conjunto: string; imageBase64: string; soloExtraerMonto?: boolean },
+  ) {
+    return this.payments.analyzeReceipt(body);
+  }
+
+  @ApiOperation({ summary: 'Crear preferencia de Mercado Pago; la clave no sale al cliente' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        conjunto: { type: 'string' },
+        usuario: { type: 'string' },
+        nombre: { type: 'string' },
+        meses: { type: 'array', items: { type: 'string' } },
+        monto: { type: 'number' },
+        concepto: { type: 'string' },
+        preferredMethod: { type: 'string', example: 'nequi' },
+      },
+      required: ['conjunto', 'usuario'],
+    },
+  })
+  @Post('preference')
+  async preference(
+    @Body()
+    body: {
+      conjunto: string;
+      usuario: string;
+      nombre?: string;
+      meses?: string[];
+      monto?: number;
+      concepto?: string;
+      preferredMethod?: string;
+    },
+  ) {
+    return this.payments.createPreference(body);
+  }
 }

@@ -417,7 +417,8 @@ export class SyncService {
 
   async syncConjuntos(): Promise<SyncResult> {
     const rows = await this.sheets.read('propiedades');
-    return this.writeMirror('conjuntos', rows.map((r) => this.mapConjunto(r)));
+    // Protegido: el CRUD de propiedades (datos no sensibles) ocurre en el backend.
+    return this.writeMirrorProtected('conjuntos', rows.map((r) => this.mapConjunto(r)));
   }
 
   async syncPagos(): Promise<SyncResult> {
@@ -595,7 +596,7 @@ export class SyncService {
 
       // 4. Escribir todas las colecciones planas (roles es global; el resto lleva conjuntoId).
       const results: SyncResult[] = [];
-      results.push(await this.writeMirror('conjuntos', conjuntos));
+      results.push(await this.writeMirrorProtected('conjuntos', conjuntos));
       results.push(await this.writeMirrorUsuarios(usuariosEnriched));
       results.push(await this.writeMirrorProtected('pagos', pagosEnriched));
       results.push(await this.writeMirror('roles', roles));

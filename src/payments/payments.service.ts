@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
+import { PropertiesService } from '../properties/properties.service';
 
 /**
  * Lecturas y cálculos de la pantalla de Pagos, movidos del frontend al backend.
@@ -60,7 +61,10 @@ export interface Debtor {
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
 
-  constructor(private readonly firebase: FirebaseService) {}
+  constructor(
+    private readonly firebase: FirebaseService,
+    private readonly properties: PropertiesService,
+  ) {}
 
   private parseFechaIngreso(raw: any): { year: number; monthIndex: number } | null {
     const s = String(raw || '').trim();
@@ -368,5 +372,218 @@ export class PaymentsService {
       }
     }
     return { success: true, reservaMsg };
+  }
+
+  // ==================== OCR / Mercado Pago (claves en el backend) ====================
+
+  /**
+   * Analiza un comprobante con Gemini. La geminiKey se lee de Sheets (por
+   * conjunto) y NUNCA se expone al cliente.
+   * - soloExtraerMonto=true: devuelve { monto }.
+   * - soloExtraerMonto=false: devuelve el análisis forense completo.
+   */
+  async analyzeReceipt(input: {
+    conjunto: string;
+    imageBase64: string;
+    soloExtraerMonto?: boolean;
+  }): Promise<{ success: boolean; message?: string; monto?: number; analysis?: any }> {
+    if (!input.imageBase64) return { success: false, message: 'Imagen vacía.' };
+    const secrets = await this.properties.getSecretsByConjunto(input.conjunto);
+    const geminiKey = secrets?.geminiKey || '';
+    if (!geminiKey) return { success: false, message: 'El conjunto no tiene Gemini configurado.' };
+    const llaveBreB = secrets?.llaveBreB || '';
+    const image = input.imageBase64.includes(',') ? input.imageBase64.split(',').pop()! : input.imageBase64;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${geminiKey}`;
+
+    // Modo admin: solo extraer el monto.
+    if (input.soloExtraerMonto) {
+      try {
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { text: `Extrae SOLO el monto total pagado de este comprobante colombiano y responde únicamente con el número entero en pesos, sin puntos ni comas ni símbolos. En Colombia el punto separa miles y la coma decimales (ej: "60.000,00"=60000, "$120.000"=120000). Si no lo identificas, responde 0.` },
+                { inlineData: { mimeType: 'image/jpeg', data: image } },
+              ],
+            }],
+          }),
+        });
+        const r: any = await resp.json();
+        const t = (r?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
+        const monto = parseInt(String(t).replace(/\D/g, ''), 10) || 0;
+        return { success: true, monto };
+      } catch (e: any) {
+        return { success: false, message: e?.message || 'Error en OCR' };
+      }
+    }
+
+    // Modo propietario: análisis forense completo.
+    try {
+      const prompt = `Eres un perito forense digital especializado en detectar fraude en comprobantes de pago bancarios (Nequi, Daviplata, Bancolombia, transferencias Bre-B en Colombia). Analiza esta imagen con rigor y responde SOLO en JSON exacto (sin markdown, sin backticks):
+{"esComprobante": true/false, "esAutentico": true/false, "tipoAlteracion": "ninguna|edicion|generada_ia|sospechosa", "nivelRiesgo": "bajo|medio|alto", "destinatarioCorrecto": true/false, "monto": numero, "motivo": "texto"}
+
+Definiciones:
+1. esComprobante: true si la imagen es un comprobante/recibo de pago, transferencia bancaria o captura de transacción. false si es una foto normal, selfie, paisaje o documento no financiero.
+
+2. esAutentico: true SOLO si la imagen parece una captura de pantalla ORIGINAL, no editada ni generada. false si detectas CUALQUIER señal de manipulación.
+
+3. tipoAlteracion (clasifica el tipo de alteración detectada):
+   - "ninguna": captura original sin señales de manipulación.
+   - "edicion": la imagen fue EDITADA (Photoshop/apps de edición). Señales: números o texto con tipografía, tamaño, grosor o alineación distinta al resto; montos/fechas/nombres que se ven "pegados" o con fondo ligeramente diferente; halos, bordes borrosos o pixeles irregulares alrededor de cifras clave (monto, fecha, destinatario, referencia); compresión JPEG desigual por zonas; interlineado o kerning inconsistente en una sola línea.
+   - "generada_ia": la imagen fue CREADA/SINTETIZADA por IA generativa. Señales: texto que parece correcto de lejos pero tiene letras deformes, caracteres inventados o "borrosos" al detalle; logos de banco con proporciones o detalles incorrectos; QR con patrón irregular o no cuadrado; iconos deformados; texturas de fondo demasiado "limpias" o repetitivas; sombras y ruido antinaturales; datos incoherentes (fecha imposible, referencia con formato raro).
+   - "sospechosa": hay indicios que no puedes clasificar con certeza pero que restan credibilidad.
+
+4. nivelRiesgo: "alto" si estás bastante seguro de edición o generación por IA; "medio" si hay indicios claros pero no concluyentes; "bajo" si parece auténtico.
+
+5. destinatarioCorrecto: ${llaveBreB ? `true si el destinatario/llave/número del comprobante contiene o coincide con "${llaveBreB}". false si es diferente o no se puede verificar.` : 'true (no hay llave configurada para verificar).'}
+
+6. monto: valor entero total pagado en pesos colombianos. En Colombia el punto es separador de miles y la coma decimales. Ej: "60.000,00"=60000, "$120.000"=120000, "1.200.000"=1200000. Solo el número entero sin puntos ni comas. Si no lo identificas, 0.
+
+7. motivo: explica en 1-2 frases concretas QUÉ señales viste (dónde y por qué). Si es auténtico, di "Sin señales de alteración".
+
+Sé conservador: si NO hay evidencia real de manipulación, marca esAutentico=true y tipoAlteracion="ninguna". No inventes fraude donde no lo hay. Responde SOLO el JSON.`;
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: image } }] }],
+        }),
+      });
+      const result: any = await response.json();
+      const text = (result?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
+      let analysis: any = null;
+      try {
+        const cleanJson = String(text).replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        analysis = JSON.parse(cleanJson);
+      } catch {
+        // Fallback: al menos intentar el monto.
+        const monto = parseInt(String(text).replace(/\D/g, ''), 10) || 0;
+        return { success: true, monto, analysis: null };
+      }
+      return {
+        success: true,
+        monto: analysis?.monto || 0,
+        analysis: {
+          esComprobante: !!analysis.esComprobante,
+          esAutentico: !!analysis.esAutentico,
+          tipoAlteracion: analysis.tipoAlteracion || (analysis.esAutentico ? 'ninguna' : 'sospechosa'),
+          nivelRiesgo: analysis.nivelRiesgo || (analysis.esAutentico ? 'bajo' : 'medio'),
+          destinatarioCorrecto: !!analysis.destinatarioCorrecto,
+          motivo: analysis.motivo || '',
+          checkedDestinatario: !!llaveBreB,
+        },
+      };
+    } catch (e: any) {
+      return { success: false, message: e?.message || 'Error analizando el comprobante' };
+    }
+  }
+
+  /**
+   * Crea una preferencia de Mercado Pago. La mercadoPagoKey se lee de Sheets
+   * (por conjunto) y NUNCA se expone al cliente. Registra los pagos como
+   * "Procesando" en mirror/pagos (con _fbWrite) con el external_reference.
+   */
+  async createPreference(input: {
+    conjunto: string;
+    usuario: string;
+    nombre?: string;
+    meses?: string[];
+    monto?: number;
+    concepto?: string;
+    preferredMethod?: string;
+    successUrl?: string;
+    failureUrl?: string;
+    pendingUrl?: string;
+  }): Promise<{ success: boolean; message?: string; init_point?: string; preference_id?: string; external_reference?: string }> {
+    const secrets = await this.properties.getSecretsByConjunto(input.conjunto);
+    const accessToken = secrets?.mercadoPagoKey || '';
+    if (!accessToken) return { success: false, message: 'El conjunto no tiene Mercado Pago configurado.' };
+
+    const monto = Number(input.monto ?? secrets?.cuotaMonto ?? 0);
+    if (!monto || monto <= 0) return { success: false, message: 'Monto inválido.' };
+
+    const nombreMostrar = input.nombre || input.usuario;
+    const meses = input.meses || [];
+    const year = new Date().getFullYear();
+
+    const items = meses.length > 0
+      ? meses.map((m) => ({
+          title: `Administración ${m} ${year}`,
+          description: `Pago administración ${input.conjunto} - ${nombreMostrar}`,
+          quantity: 1,
+          currency_id: 'COP',
+          unit_price: monto,
+        }))
+      : [{
+          title: input.concepto || 'Pago Administración',
+          description: `Pago ${input.conjunto} - ${nombreMostrar}`,
+          quantity: 1,
+          currency_id: 'COP',
+          unit_price: monto,
+        }];
+
+    const externalReference = `GOPASE-${input.usuario}-${Date.now()}`;
+    const paymentMethods =
+      input.preferredMethod === 'nequi' || input.preferredMethod === 'daviplata'
+        ? { excluded_payment_types: [{ id: 'credit_card' }, { id: 'debit_card' }, { id: 'ticket' }] }
+        : {};
+
+    const payload = {
+      items,
+      payer: { name: nombreMostrar },
+      external_reference: externalReference,
+      payment_methods: paymentMethods,
+      back_urls: {
+        success: input.successUrl || 'https://gopase.vercel.app/app/payments?status=success',
+        failure: input.failureUrl || 'https://gopase.vercel.app/app/payments?status=failure',
+        pending: input.pendingUrl || 'https://gopase.vercel.app/app/payments?status=pending',
+      },
+      auto_return: 'approved',
+      statement_descriptor: 'GOPASE ADM',
+    };
+
+    try {
+      const mpResp = await fetch('https://api.mercadopago.com/checkout/preferences', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify(payload),
+      });
+      const mpResult: any = await mpResp.json();
+      if (mpResp.status !== 201) {
+        return { success: false, message: `Error de Mercado Pago: ${mpResult?.message || 'desconocido'}` };
+      }
+
+      // Registrar los pagos como "Procesando" en mirror/pagos (no en Sheets).
+      const db = this.firebase.db();
+      const updates: Record<string, any> = {};
+      const hoy = new Date().toISOString().split('T')[0];
+      const base = Date.now().toString();
+      const registrar = (id: string, concepto: string) => {
+        updates[`mirror/pagos/${this.safeKey(id)}`] = {
+          id, usuario: input.usuario, usuarioId: input.usuario, concepto,
+          valor: String(monto), fecha: hoy, estado: 'Procesando',
+          referencia: externalReference, conjunto: input.conjunto || '', _fbWrite: true,
+        };
+      };
+      if (meses.length > 0) {
+        meses.forEach((m, j) => registrar(`${base}-${j}`, `Administración ${m} ${year}`));
+      } else {
+        registrar(base, input.concepto || 'Pago Administración');
+      }
+      await db.ref().update(updates);
+
+      return {
+        success: true,
+        init_point: mpResult.init_point,
+        preference_id: mpResult.id,
+        external_reference: externalReference,
+      };
+    } catch (e: any) {
+      this.logger.error(`createPreference falló: ${e?.message}`);
+      return { success: false, message: e?.message || 'Error creando la preferencia de pago' };
+    }
   }
 }
