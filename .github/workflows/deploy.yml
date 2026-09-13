@@ -1,6 +1,9 @@
 name: CD - Build & Deploy (QA / Prod)
 
-# Despliegue continuo:
+# Despliegue continuo, en dos fases separadas (jobs):
+#   build   -> construye y publica la imagen en Docker Hub
+#   deploy  -> dispara el deploy en Render y espera a que quede "live"
+#
 #   - push a rama `qa`   -> imagen :qa      -> deploy servicio Render QA
 #   - push a rama `main` -> imagen :latest  -> deploy servicio Render Producción
 #
@@ -10,7 +13,7 @@ name: CD - Build & Deploy (QA / Prod)
 # │ NO van en este archivo. Se guardan en el GitHub Environment "DOCKERHUB_USERNAME": │
 # │   https://github.com/ServiceConnect123/Gopase-MS/settings/environments      │
 # │   (repo -> Settings -> Environments -> DOCKERHUB_USERNAME -> Add secret)     │
-# │   El job declara `environment: DOCKERHUB_USERNAME` para poder leerlos.       │
+# │   Cada job declara `environment: DOCKERHUB_USERNAME` para poder leerlos.     │
 # │                                                                             │
 # │ Para ROTARLAS: genera el valor nuevo (Docker Hub / Render) y edítalo en esa │
 # │ misma página. No hay que tocar este YAML: se leen por nombre en runtime.    │
@@ -22,9 +25,6 @@ name: CD - Build & Deploy (QA / Prod)
 #   RENDER_API_KEY          -> API key de Render (Account Settings -> API Keys)
 #   RENDER_SERVICE_ID_QA    -> srv-daj1f2h5efls73f8jh40
 #   RENDER_SERVICE_ID_PROD  -> srv-dacpm40ae00c73deqjhg
-#
-# Cada paso de abajo referencia su secret con ${{ secrets.NOMBRE }}, así que
-# también puedes ver "dónde se usa cada uno" leyendo el job.
 
 on:
   push:
@@ -36,58 +36,46 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-and-deploy:
+  # ==========================================================================
+  # FASE 1: BUILD - construye y publica la imagen en Docker Hub
+  # ==========================================================================
+  build:
+    name: Build & Push
     runs-on: ubuntu-latest
-    # Los secrets viven en el Environment de GitHub llamado "DOCKERHUB_USERNAME"
-    # (Settings -> Environments). El job debe declararlo para poder leerlos.
     environment: DOCKERHUB_USERNAME
+    outputs:
+      app_env: ${{ steps.env.outputs.app_env }}
+      image_tag: ${{ steps.env.outputs.image_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      # Falla temprano y con mensaje claro si faltan credenciales, en vez del
-      # críptico "Username and password required" del paso de login.
+      # Falla temprano y con mensaje claro si faltan credenciales de build.
       - name: Check required secrets
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: |
           missing=""
           [ -z "$DOCKERHUB_USERNAME" ] && missing="$missing DOCKERHUB_USERNAME"
           [ -z "$DOCKERHUB_TOKEN" ] && missing="$missing DOCKERHUB_TOKEN"
-          [ -z "$RENDER_API_KEY" ] && missing="$missing RENDER_API_KEY"
           if [ -n "$missing" ]; then
-            echo "::error::Faltan secrets en el repo:$missing"
-            echo "Cárgalos en: Settings -> Secrets and variables -> Actions (Repository secrets)."
+            echo "::error::Faltan secrets en el environment DOCKERHUB_USERNAME:$missing"
             exit 1
           fi
-          echo "Secrets presentes."
+          echo "Secrets de build presentes."
 
-      # Determina entorno, tag de imagen y service id según la rama.
+      # Determina entorno y tag de imagen según la rama.
       - name: Resolve environment
         id: env
         run: |
           if [ "${{ github.ref_name }}" = "main" ]; then
             echo "app_env=production" >> "$GITHUB_OUTPUT"
             echo "image_tag=latest" >> "$GITHUB_OUTPUT"
-            echo "service_id=${{ secrets.RENDER_SERVICE_ID_PROD }}" >> "$GITHUB_OUTPUT"
           else
             echo "app_env=qa" >> "$GITHUB_OUTPUT"
             echo "image_tag=qa" >> "$GITHUB_OUTPUT"
-            echo "service_id=${{ secrets.RENDER_SERVICE_ID_QA }}" >> "$GITHUB_OUTPUT"
           fi
-
-      # Verifica que el service id de Render exista para la rama actual.
-      - name: Check Render service id
-        env:
-          SERVICE_ID: ${{ steps.env.outputs.service_id }}
-        run: |
-          if [ -z "$SERVICE_ID" ]; then
-            echo "::error::Falta el secret RENDER_SERVICE_ID_${{ github.ref_name == 'main' && 'PROD' || 'QA' }} en el environment DOCKERHUB_USERNAME."
-            exit 1
-          fi
-          echo "Service id presente."
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3.11.1
@@ -112,17 +100,47 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Dispara el deploy en Render vía API y espera a que termine.
-      - name: Trigger Render deploy
+  # ==========================================================================
+  # FASE 2: DEPLOY - dispara Render y espera a que quede "live"
+  # Solo corre si la fase build terminó bien (needs: build).
+  # ==========================================================================
+  deploy:
+    name: Deploy to Render
+    runs-on: ubuntu-latest
+    environment: DOCKERHUB_USERNAME
+    needs: build
+    steps:
+      # Resuelve el service id de Render según la rama y valida que exista.
+      - name: Resolve Render service
+        id: svc
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            SERVICE_ID="${{ secrets.RENDER_SERVICE_ID_PROD }}"
+            NEED="RENDER_SERVICE_ID_PROD"
+          else
+            SERVICE_ID="${{ secrets.RENDER_SERVICE_ID_QA }}"
+            NEED="RENDER_SERVICE_ID_QA"
+          fi
+          if [ -z "$SERVICE_ID" ]; then
+            echo "::error::Falta el secret $NEED en el environment DOCKERHUB_USERNAME."
+            exit 1
+          fi
+          if [ -z "${{ secrets.RENDER_API_KEY }}" ]; then
+            echo "::error::Falta el secret RENDER_API_KEY en el environment DOCKERHUB_USERNAME."
+            exit 1
+          fi
+          echo "service_id=$SERVICE_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger Render deploy & wait
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          SERVICE_ID: ${{ steps.env.outputs.service_id }}
+          SERVICE_ID: ${{ steps.svc.outputs.service_id }}
         run: |
           set -euo pipefail
-          echo "Disparando deploy en Render para servicio '$SERVICE_ID' ..."
+          echo "🚀 Disparando deploy en Render para servicio '$SERVICE_ID' (imagen ${{ needs.build.outputs.image_tag }}) ..."
 
-          # Capturamos body y HTTP status por separado para poder mostrar el
-          # error real de la API en vez de reventar al parsear JSON vacío.
+          # Capturamos body y HTTP status por separado para mostrar el error
+          # real de la API en vez de reventar al parsear JSON vacío.
           RESP=$(curl -sS -w '\n%{http_code}' -X POST \
             "https://api.render.com/v1/services/$SERVICE_ID/deploys" \
             -H "Authorization: Bearer $RENDER_API_KEY" \
@@ -140,6 +158,7 @@ jobs:
 
           DEPLOY_ID=$(printf '%s' "$BODY" | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
           echo "Deploy creado: $DEPLOY_ID"
+          echo "Siguiendo el estado en Render (esto queda 'pendiente' hasta que Render termine)..."
 
           # Poll hasta que el deploy termine (live) o falle.
           for i in $(seq 1 60); do
@@ -151,14 +170,14 @@ jobs:
             echo "Estado del deploy: $STATUS"
             case "$STATUS" in
               live)
-                echo "✅ Deploy completado."
+                echo "✅ Deploy en Render completado (live)."
                 exit 0
                 ;;
               build_failed|update_failed|canceled|deactivated|pre_deploy_failed)
-                echo "❌ Deploy falló con estado: $STATUS"
+                echo "::error::El deploy en Render falló con estado: $STATUS"
                 exit 1
                 ;;
             esac
           done
-          echo "⏱️ Timeout esperando el deploy."
+          echo "::error::Timeout esperando que Render deje el deploy en 'live'."
           exit 1
