@@ -45,11 +45,12 @@ jobs:
     name: Build image
     runs-on: ubuntu-latest
     environment: DOCKERHUB_USERNAME
+    # Solo exportamos valores NO sensibles. La referencia de imagen incluye el
+    # username (secret) y GitHub no propaga outputs que contengan secrets, así
+    # que cada job la reconstruye leyendo DOCKERHUB_USERNAME localmente.
     outputs:
       app_env: ${{ steps.env.outputs.app_env }}
       image_tag: ${{ steps.env.outputs.image_tag }}
-      image_ref: ${{ steps.env.outputs.image_ref }}
-      image_ref_sha: ${{ steps.env.outputs.image_ref_sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -67,8 +68,6 @@ jobs:
       # Determina entorno, tag y las referencias completas de la imagen.
       - name: Resolve environment
         id: env
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           if [ "${{ github.ref_name }}" = "main" ]; then
             APP_ENV=production
@@ -77,13 +76,9 @@ jobs:
             APP_ENV=qa
             IMAGE_TAG=qa
           fi
-          IMAGE_REF="$DOCKERHUB_USERNAME/wspsend-ms:$IMAGE_TAG"
-          IMAGE_REF_SHA="$DOCKERHUB_USERNAME/wspsend-ms:$APP_ENV-${{ github.sha }}"
           {
             echo "app_env=$APP_ENV"
             echo "image_tag=$IMAGE_TAG"
-            echo "image_ref=$IMAGE_REF"
-            echo "image_ref_sha=$IMAGE_REF_SHA"
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
@@ -98,8 +93,8 @@ jobs:
           build-args: |
             APP_ENV=${{ steps.env.outputs.app_env }}
           tags: |
-            ${{ steps.env.outputs.image_ref }}
-            ${{ steps.env.outputs.image_ref_sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/wspsend-ms:${{ steps.env.outputs.image_tag }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/wspsend-ms:${{ steps.env.outputs.app_env }}-${{ github.sha }}
           outputs: type=docker,dest=/tmp/image.tar
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -147,10 +142,13 @@ jobs:
 
       - name: Push image tags
         env:
-          IMAGE_REF: ${{ needs.build.outputs.image_ref }}
-          IMAGE_REF_SHA: ${{ needs.build.outputs.image_ref_sha }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          APP_ENV: ${{ needs.build.outputs.app_env }}
         run: |
           set -euo pipefail
+          IMAGE_REF="$DOCKERHUB_USERNAME/wspsend-ms:$IMAGE_TAG"
+          IMAGE_REF_SHA="$DOCKERHUB_USERNAME/wspsend-ms:$APP_ENV-${{ github.sha }}"
           echo "Publicando $IMAGE_REF ..."
           docker push "$IMAGE_REF"
           echo "Publicando $IMAGE_REF_SHA ..."
@@ -193,7 +191,7 @@ jobs:
           SERVICE_ID: ${{ steps.svc.outputs.service_id }}
         run: |
           set -euo pipefail
-          echo "🚀 Disparando deploy en Render para servicio '$SERVICE_ID' (imagen ${{ needs.build.outputs.image_ref }}) ..."
+          echo "🚀 Disparando deploy en Render para servicio '$SERVICE_ID' (imagen tag ${{ needs.build.outputs.image_tag }}) ..."
 
           # Capturamos body y HTTP status por separado para mostrar el error
           # real de la API en vez de reventar al parsear JSON vacío.
