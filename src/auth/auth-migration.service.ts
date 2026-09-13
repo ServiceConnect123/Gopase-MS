@@ -19,6 +19,8 @@ export interface MigrateUserResult {
   username: string;
   uid?: string;
   action: 'created' | 'updated' | 'skipped' | 'failed';
+  /** true si se usó la contraseña temporal (el usuario deberá cambiarla). */
+  tempPassword?: boolean;
   message?: string;
 }
 
@@ -28,6 +30,8 @@ export interface MigrateSummary {
   updated: number;
   skipped: number;
   failed: number;
+  /** cuántos se crearon/actualizaron con la contraseña temporal por defecto. */
+  withTempPassword: number;
   results: MigrateUserResult[];
 }
 
@@ -35,6 +39,7 @@ export interface MigrateSummary {
 export class AuthMigrationService {
   private readonly logger = new Logger(AuthMigrationService.name);
   private readonly emailDomain: string;
+  private readonly tempPassword: string;
 
   constructor(
     private readonly sheets: SheetsService,
@@ -43,6 +48,9 @@ export class AuthMigrationService {
   ) {
     // Dominio del email sintético. Configurable; por defecto gopase.local.
     this.emailDomain = this.config.get<string>('AUTH_EMAIL_DOMAIN', 'gopase.local');
+    // Contraseña temporal para usuarios sin clave válida (>= 6 chars). El usuario
+    // deberá cambiarla en su primer acceso (custom claim mustChangePassword).
+    this.tempPassword = this.config.get<string>('AUTH_TEMP_PASSWORD', 'Gopase2025*');
   }
 
   /** username -> email sintético (minúsculas, saneado). */
@@ -71,7 +79,7 @@ export class AuthMigrationService {
    */
   async migrateAll(dryRun = false): Promise<MigrateSummary> {
     const summary: MigrateSummary = {
-      total: 0, created: 0, updated: 0, skipped: 0, failed: 0, results: [],
+      total: 0, created: 0, updated: 0, skipped: 0, failed: 0, withTempPassword: 0, results: [],
     };
 
     if (!this.firebase.isEnabled()) {
@@ -102,30 +110,26 @@ export class AuthMigrationService {
       summary.total++;
 
       const storedRaw = String((row as any).dato_3 ?? '');
-      const password = recoverPassword(storedRaw);
+      const recovered = recoverPassword(storedRaw);
       const nombre = String((row as any).dato_4 ?? '').trim();
       const rol = String((row as any).dato_5 ?? '').trim();
       const conjuntoId = resolveConjunto((row as any).dato_9);
       const email = this.usernameToEmail(username);
 
-      // Firebase exige password de al menos 6 caracteres.
-      if (!password || password.length < 6) {
-        summary.skipped++;
-        // Diagnóstico SIN exponer la contraseña: forma del valor guardado y del
-        // resultado del descifrado, para entender por qué se omitió.
-        const diag =
-          `storedLen=${storedRaw.length} tieneDosPuntos=${storedRaw.includes(':')} ` +
-          `descifradoLen=${password.length}`;
-        summary.results.push({
-          username,
-          action: 'skipped',
-          message: `Contraseña ausente o menor a 6 caracteres (Firebase la rechaza). [${diag}]`,
-        });
-        continue;
-      }
+      // Si la contraseña recuperada no sirve (ausente o < 6, que Firebase rechaza),
+      // se crea al usuario con la contraseña TEMPORAL y se marca mustChangePassword.
+      const usaTemp = !recovered || recovered.length < 6;
+      const password = usaTemp ? this.tempPassword : recovered;
 
       if (dryRun) {
-        summary.results.push({ username, uid: username, action: 'skipped', message: 'dry-run' });
+        summary.results.push({
+          username,
+          uid: username,
+          action: 'skipped',
+          tempPassword: usaTemp,
+          message: usaTemp ? 'dry-run (usaría contraseña temporal)' : 'dry-run',
+        });
+        if (usaTemp) summary.withTempPassword++;
         continue;
       }
 
@@ -139,19 +143,22 @@ export class AuthMigrationService {
           exists = false;
         }
 
-        const claims = { rol, conjuntoId };
+        // Claims: rol, conjuntoId y, si aplica, la marca de cambio de contraseña.
+        const claims: Record<string, unknown> = { rol, conjuntoId };
+        if (usaTemp) claims.mustChangePassword = true;
 
         if (exists) {
           await auth.updateUser(username, { email, password, displayName: nombre });
           await auth.setCustomUserClaims(username, claims);
           summary.updated++;
-          summary.results.push({ username, uid: username, action: 'updated' });
+          summary.results.push({ username, uid: username, action: 'updated', tempPassword: usaTemp });
         } else {
           await auth.createUser({ uid: username, email, password, displayName: nombre });
           await auth.setCustomUserClaims(username, claims);
           summary.created++;
-          summary.results.push({ username, uid: username, action: 'created' });
+          summary.results.push({ username, uid: username, action: 'created', tempPassword: usaTemp });
         }
+        if (usaTemp) summary.withTempPassword++;
       } catch (err: any) {
         summary.failed++;
         summary.results.push({
@@ -165,7 +172,8 @@ export class AuthMigrationService {
 
     this.logger.log(
       `[auth-migrate] total=${summary.total} creados=${summary.created} ` +
-        `actualizados=${summary.updated} omitidos=${summary.skipped} fallidos=${summary.failed}`,
+        `actualizados=${summary.updated} omitidos=${summary.skipped} fallidos=${summary.failed} ` +
+        `conTemp=${summary.withTempPassword}`,
     );
     return summary;
   }
