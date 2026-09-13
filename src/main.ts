@@ -83,6 +83,8 @@ async function bootstrap() {
     .addTag('payments', 'Lecturas y cálculos de Pagos (data ya calculada, RTDB)')
     .addTag('users', 'CRUD de usuarios contra Firebase (RTDB + Auth)')
     .addTag('properties', 'CRUD de propiedades/conjuntos (RTDB, sin claves sensibles)')
+    .addTag('zones', 'CRUD de zonas comunes (RTDB)')
+    .addTag('reservations', 'CRUD de reservas de zonas comunes (RTDB)')
     // Header opcional que protege los endpoints de sincronización.
     .addApiKey(
       { type: 'apiKey', name: 'x-sync-token', in: 'header' },

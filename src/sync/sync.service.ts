@@ -460,7 +460,8 @@ export class SyncService {
 
   async syncZonas(): Promise<SyncResult> {
     const rows = await this.sheets.read('zonas_comunes');
-    return this.writeMirror('zonas_comunes', rows.map((r) => this.mapZona(r)));
+    // Protegido: el CRUD de zonas ocurre en el backend.
+    return this.writeMirrorProtected('zonas_comunes', rows.map((r) => this.mapZona(r)));
   }
 
   async syncReservas(): Promise<SyncResult> {
@@ -604,7 +605,7 @@ export class SyncService {
       results.push(await this.writeMirror('eventos', eventosEnriched));
       results.push(await this.writeMirror('citofonia', citofoniaEnriched));
       results.push(await this.writeMirror('acuerdos', acuerdosEnriched));
-      results.push(await this.writeMirror('zonas_comunes', zonasEnriched));
+      results.push(await this.writeMirrorProtected('zonas_comunes', zonasEnriched));
       results.push(await this.writeMirrorProtected('reservas', reservasEnriched));
 
       // 5. Árbol anidado conjunto -> usuarios -> pagos (vista de referencia).
