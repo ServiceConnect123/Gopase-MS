@@ -7,9 +7,10 @@ name: CD - Build & Deploy (QA / Prod)
 # ┌───────────────────────────────────────────────────────────────────────────┐
 # │ DÓNDE SE CONFIGURAN / CAMBIAN LAS CREDENCIALES                              │
 # │                                                                             │
-# │ NO van en este archivo. Se guardan como "Repository secrets" aquí:          │
-# │   https://github.com/ServiceConnect123/Gopase-MS/settings/secrets/actions   │
-# │   (repo -> Settings -> Secrets and variables -> Actions -> New/editar)      │
+# │ NO van en este archivo. Se guardan en el GitHub Environment "DOCKERHUB_USERNAME": │
+# │   https://github.com/ServiceConnect123/Gopase-MS/settings/environments      │
+# │   (repo -> Settings -> Environments -> DOCKERHUB_USERNAME -> Add secret)     │
+# │   El job declara `environment: DOCKERHUB_USERNAME` para poder leerlos.       │
 # │                                                                             │
 # │ Para ROTARLAS: genera el valor nuevo (Docker Hub / Render) y edítalo en esa │
 # │ misma página. No hay que tocar este YAML: se leen por nombre en runtime.    │
@@ -37,6 +38,9 @@ concurrency:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    # Los secrets viven en el Environment de GitHub llamado "DOCKERHUB_USERNAME"
+    # (Settings -> Environments). El job debe declararlo para poder leerlos.
+    environment: DOCKERHUB_USERNAME
     steps:
       - name: Checkout
         uses: actions/checkout@v5
