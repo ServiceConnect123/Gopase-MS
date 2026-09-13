@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { json, urlencoded } from 'express';
 import { AppModule } from './app.module';
 
 /**
@@ -29,6 +30,11 @@ async function bootstrap() {
   installGlobalErrorHandlers();
 
   const app = await NestFactory.create(AppModule);
+
+  // Subir el límite del body: los comprobantes llegan como imagen en base64
+  // (POST /drive/upload), que supera el default de Express (100kb).
+  app.use(json({ limit: '15mb' }));
+  app.use(urlencoded({ limit: '15mb', extended: true }));
 
   // CORS: permitir que el frontend (gopasehome.site y previews) consuma la API.
   // CORS_ORIGINS puede ser una lista separada por comas; si no se define, se
