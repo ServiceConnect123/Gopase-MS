@@ -117,12 +117,13 @@ export class PaymentsController {
     body: {
       usuario: string;
       montoPerMonth: string | number;
-      meses: string[];
+      meses?: string[];
       year: number;
       estado: string;
       referencia?: string;
       conjunto?: string;
       conjuntoId?: string;
+      concepto?: string;
     },
   ) {
     return this.payments.createPayments({
@@ -134,6 +135,7 @@ export class PaymentsController {
       referencia: body.referencia || '',
       conjunto: body.conjunto,
       conjuntoId: body.conjuntoId,
+      concepto: body.concepto,
     });
   }
 

@@ -99,10 +99,25 @@ export class UsersService {
       const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
       users = users.filter((u) => norm(u.conjunto) === norm(conjunto));
     }
-    // No exponer marcas internas.
+    // No exponer marcas internas. Se incluyen alias posicionales dato_n para
+    // pantallas que aún leen usuarios por posición (kpi, guests, complexes...).
     return users.map((u) => {
       const { _fbWrite, ...rest } = u;
-      return rest;
+      return {
+        ...rest,
+        dato_1: rest.usuario ?? rest.id ?? '',
+        dato_2: rest.email ?? '',
+        dato_4: rest.nombre ?? '',
+        dato_5: rest.rol ?? '',
+        dato_6: rest.docType ?? '',
+        dato_7: rest.docNum ?? '',
+        dato_8: rest.phone ?? '',
+        dato_9: rest.conjunto ?? '',
+        dato_10: rest.parcela ?? '',
+        dato_11: rest.placa1 ?? '',
+        dato_12: rest.placa2 ?? '',
+        dato_13: rest.fechaIngreso ?? '',
+      };
     });
   }
 

@@ -224,12 +224,28 @@ export class PaymentsService {
       this.readCollection<Usuario>('usuarios'),
     ]);
     const pagos = this.filterPagosByYear(pagosAll, year);
-    if (isSuperAdmin || !conjunto) return pagos;
+    let filtered = pagos;
+    if (!isSuperAdmin && conjunto) {
+      const usuariosDelConjunto = new Set(
+        usuarios.filter((u) => (u.conjunto || '') === conjunto).map((u) => u.usuario),
+      );
+      filtered = pagos.filter((p) => usuariosDelConjunto.has(p.usuario));
+    }
+    return filtered.map((p) => this.withPositionalAliases(p));
+  }
 
-    const usuariosDelConjunto = new Set(
-      usuarios.filter((u) => (u.conjunto || '') === conjunto).map((u) => u.usuario),
-    );
-    return pagos.filter((p) => usuariosDelConjunto.has(p.usuario));
+  /** Agrega alias posicionales dato_n a un pago para pantallas que leen por posición. */
+  private withPositionalAliases(p: Pago): any {
+    return {
+      ...p,
+      dato_1: p.id ?? '',
+      dato_2: p.usuario ?? '',
+      dato_3: p.concepto ?? '',
+      dato_4: p.valor ?? '',
+      dato_5: p.fecha ?? '',
+      dato_6: p.estado ?? '',
+      dato_7: p.referencia ?? '',
+    };
   }
 
   /** Deudores de un mes (sin pago confirmado) con teléfono, para recordatorios. */
@@ -271,12 +287,15 @@ export class PaymentsService {
   async createPayments(input: {
     usuario: string;
     montoPerMonth: string | number;
-    meses: string[];
+    meses?: string[];
     year: number;
     estado: string;
     referencia: string;
     conjunto?: string;
     conjuntoId?: string;
+    // Concepto libre (p. ej. pago de una reserva). Si viene, se crea UN pago con
+    // ese concepto y se ignora `meses`.
+    concepto?: string;
   }): Promise<{ success: boolean; ids: string[]; pagos: Pago[] }> {
     const db = this.firebase.db();
     const hoy = new Date().toISOString().split('T')[0];
@@ -284,13 +303,18 @@ export class PaymentsService {
     const pagos: Pago[] = [];
     const updates: Record<string, any> = {};
 
-    for (const mes of input.meses) {
+    // Conceptos a crear: uno por mes, o uno solo con el concepto libre.
+    const conceptos = input.concepto
+      ? [input.concepto]
+      : (input.meses || []).map((mes) => `Administración ${mes} ${input.year}`);
+
+    for (const concepto of conceptos) {
       const id = Date.now().toString() + Math.random().toString().slice(2, 5);
       const pago: any = {
         id,
         usuario: input.usuario,
         usuarioId: input.usuario,
-        concepto: `Administración ${mes} ${input.year}`,
+        concepto,
         valor: String(input.montoPerMonth),
         fecha: hoy,
         estado: input.estado,

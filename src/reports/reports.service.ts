@@ -49,7 +49,22 @@ export class ReportsService {
     if (filters.usuario) reportes = reportes.filter((r) => norm(r.usuario) === norm(filters.usuario));
     return reportes.map((r) => {
       const { _fbWrite, ...rest } = r;
-      return rest;
+      // Además de los campos nombrados, exponemos los alias posicionales dato_n
+      // que algunas pantallas (kpi, expenses, surveillance) aún consumen. Nota:
+      // dato_8 es "ubicacion" en reportes normales pero es el MONTO en reportes
+      // de tipo Gasto/Ingreso Extra; conservarlo posicional evita ambigüedad.
+      return {
+        ...rest,
+        dato_1: rest.id ?? '',
+        dato_2: rest.titulo ?? '',
+        dato_3: rest.fecha ?? '',
+        dato_4: rest.usuario ?? '',
+        dato_5: rest.descripcion ?? '',
+        dato_6: rest.conjunto ?? '',
+        dato_7: rest.tipo ?? '',
+        dato_8: rest.ubicacion ?? '',
+        dato_9: rest.estado ?? '',
+      };
     });
   }
 
