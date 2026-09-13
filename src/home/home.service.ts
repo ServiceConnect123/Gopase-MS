@@ -90,47 +90,6 @@ export class HomeService {
     };
   }
 
-  /**
-   * Calcula si un propietario está "Al día": su último mes pagado (confirmado)
-   * cubre el mes anterior al actual (o uno posterior por adelantado).
-   */
-  private calcularAlDia(
-    username: string,
-    fechaIngreso: string | undefined,
-    pagos: any[],
-    year: number,
-  ): boolean {
-    const isCurrentYear = year === new Date().getFullYear();
-    const todayMonthIndex = new Date().getMonth();
-    const ingreso = this.parseFechaIngreso(fechaIngreso);
-    const ingresoYear = ingreso?.year ?? 0;
-    const ingresoMonthIndex = ingreso?.monthIndex ?? -1;
-
-    if (ingreso && ingresoYear > year) return true;
-
-    const startMonth = ingreso && ingresoYear === year ? Math.max(0, ingresoMonthIndex) : 0;
-    const lastDueMonth = isCurrentYear ? todayMonthIndex - 1 : 11;
-
-    const isPaidMonth = (idx: number) => {
-      const month = MONTHS[idx];
-      return pagos.some((p) => {
-        const isUserMatch = p.usuario === username;
-        const conceptLower = (p.concepto || '').toLowerCase();
-        const monthMatch = conceptLower.includes(month.toLowerCase());
-        const yearMatch = (p.concepto || '').includes(String(year));
-        return isUserMatch && monthMatch && yearMatch && p.estado?.toLowerCase() === 'confirmado';
-      });
-    };
-
-    if (lastDueMonth < startMonth) return true;
-
-    let ultimoMesPagado = -1;
-    for (let idx = 11; idx >= 0; idx--) {
-      if (isPaidMonth(idx)) { ultimoMesPagado = idx; break; }
-    }
-    return ultimoMesPagado >= lastDueMonth;
-  }
-
   /** Estado de pago por mes de un propietario (para la vista owner). */
   private buildOwnerMonths(username: string, fechaIngreso: string | undefined, pagos: any[], year: number): OwnerMonth[] {
     const isCurrentYear = year === new Date().getFullYear();
@@ -268,18 +227,24 @@ export class HomeService {
       };
     }
 
-    // Vista admin: usuarios con estado de pago.
+    // Vista admin: estado de pago DEL MES SELECCIONADO (opción A).
+    // "Al día" = tiene un pago Confirmado de ese mes+año; si no, "Debe".
     const usersWithStatus: DashboardUser[] = filteredUsers.map((u) => {
-      const isAlDia = this.calcularAlDia(u.username, u.fechaIngreso, pagos, year);
-      const paymentStatus: 'Al día' | 'Pendiente' = isAlDia ? 'Al día' : 'Pendiente';
-      const userPayments = pagos.filter(
+      const userMonthPayments = pagos.filter(
         (p) =>
           p.usuario === u.username &&
           p.concepto &&
           p.concepto.toLowerCase().includes(month.toLowerCase()) &&
           p.concepto.includes(String(year)),
       );
-      const paymentAmount = userPayments.reduce((sum: number, p: any) => sum + (parseFloat(p.valor) || 0), 0);
+      const pagoConfirmado = userMonthPayments.some(
+        (p) => (p.estado || '').toLowerCase() === 'confirmado',
+      );
+      const paymentStatus: 'Al día' | 'Pendiente' = pagoConfirmado ? 'Al día' : 'Pendiente';
+      const paymentAmount = userMonthPayments.reduce(
+        (sum: number, p: any) => sum + (parseFloat(p.valor) || 0),
+        0,
+      );
       return { ...u, paymentStatus, paymentAmount };
     });
 
