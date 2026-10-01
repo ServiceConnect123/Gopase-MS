@@ -203,6 +203,30 @@ export class PaymentsController {
     return this.payments.analyzeReceipt(body);
   }
 
+  @ApiOperation({
+    summary: 'Chat financiero con IA (Gemini); la clave del conjunto no sale al cliente',
+    description:
+      'Responde preguntas de finanzas del conjunto. El cliente envía el conjunto, la pregunta ' +
+      'y un contexto financiero ya resumido; el backend usa la geminiKey del conjunto.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        conjunto: { type: 'string' },
+        question: { type: 'string', description: 'Pregunta del usuario. Vacío = análisis general.' },
+        context: { type: 'string', description: 'Contexto financiero ya resumido (datos del conjunto).' },
+      },
+      required: ['conjunto'],
+    },
+  })
+  @Post('finance-chat')
+  async financeChat(
+    @Body() body: { conjunto: string; question?: string; context?: string },
+  ) {
+    return this.payments.financeChat(body);
+  }
+
   @ApiOperation({ summary: 'Crear preferencia de Mercado Pago; la clave no sale al cliente' })
   @ApiBody({
     schema: {

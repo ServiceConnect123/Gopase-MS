@@ -338,6 +338,60 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     await this.connect(session);
   }
 
+  /**
+   * Desvincula el WhatsApp de un conjunto: cierra la sesión, borra sus
+   * credenciales de la hoja y la deja APAGADA (a diferencia de relogin, no
+   * genera un QR nuevo ni reconecta). Elimina la sesión del mapa.
+   *
+   * Tras desvincular, los envíos del conjunto vuelven al fallback de la sesión
+   * por defecto (número global), igual que un conjunto que nunca vinculó.
+   */
+  async unlink(conjunto?: string | null): Promise<void> {
+    const key = this.normalizeKey(conjunto);
+    const session = this.sessions.get(key);
+    if (!session) {
+      // Nada vinculado en memoria; aun así, borramos el registro persistido.
+      await clearSheetsSession(
+        this.sheets,
+        this.sessionSheet,
+        this.rowKeyFor(key),
+      ).catch(() => undefined);
+      this.logger.log(`[${key}] Desvinculación: no había sesión activa en memoria.`);
+      return;
+    }
+
+    this.logger.warn(`[${key}] Desvinculación solicitada: cerrando y apagando sesión.`);
+    session.ready = false;
+    session.currentQr = null;
+
+    try {
+      await session.sock?.logout();
+    } catch {
+      // no-op
+    }
+    try {
+      await session.sock?.end(undefined);
+    } catch {
+      // no-op
+    }
+    session.sock = null;
+
+    if (session.clearSession) {
+      await session.clearSession().catch((e) =>
+        this.logger.error(`[${key}] Error limpiando sesión: ${e?.message}`),
+      );
+    } else {
+      await clearSheetsSession(
+        this.sheets,
+        this.sessionSheet,
+        session.sessionKey,
+      ).catch(() => undefined);
+    }
+
+    // Quitar del mapa: queda apagada. No se reconecta ni se genera QR nuevo.
+    this.sessions.delete(key);
+  }
+
   // ---------------------------------------------------------------------------
   // Envío de mensajes (enrutado por conjunto, con fallback a la sesión default)
   // ---------------------------------------------------------------------------

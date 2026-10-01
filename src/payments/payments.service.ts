@@ -506,6 +506,117 @@ Sé conservador: si NO hay evidencia real de manipulación, marca esAutentico=tr
   }
 
   /**
+   * Chat financiero con Gemini (solo texto). La geminiKey se resuelve por
+   * conjunto y NUNCA se expone al cliente. El cliente envía la pregunta y un
+   * contexto financiero ya resumido; aquí se arma el prompt y se consulta a
+   * Gemini descubriendo un modelo "flash" válido con reintentos (503/429).
+   */
+  async financeChat(input: {
+    conjunto: string;
+    question?: string;
+    context?: string;
+  }): Promise<{ success: boolean; message?: string; text?: string }> {
+    const secrets = await this.properties.getSecretsByConjunto(input.conjunto);
+    const geminiKey = secrets?.geminiKey || '';
+    if (!geminiKey) {
+      return { success: false, message: 'El conjunto no tiene Gemini configurado.' };
+    }
+
+    const question = (input.question || '').trim();
+    const context = (input.context || '').trim();
+
+    const guiaApp = `SOBRE LA APP goPase (orienta tus respuestas hacia la app):
+Secciones: Inicio (resumen), Pagos (registrar/confirmar pagos y ver morosos), ` +
+      `Gastos e Ingresos (registrar gastos e ingresos extra), Finanzas (KPIs, ` +
+      `comparativa mensual, saldo de caja y este asistente), Reportes, Propietarios, ` +
+      `Conjuntos (configurar cuota, medios de pago y API Key de Gemini), Zonas Comunes/` +
+      `Reservas, Vigilancia, Eventos, Invitados, Acuerdos, Roles, Configuración. ` +
+      `Cuando recomiendes una acción, indica EXACTAMENTE a qué sección ir.`;
+
+    const prompt = question
+      ? `Eres el Asistente Financiero de la app goPase para conjuntos residenciales en Colombia. ` +
+        `Responde la pregunta del usuario apoyándote en los datos y orientándolo a resolverla dentro de goPase.\n\n` +
+        `${context || 'Sin datos financieros disponibles.'}\n\n${guiaApp}\n\n` +
+        `PREGUNTA DEL USUARIO:\n"${question}"\n\n` +
+        `INSTRUCCIONES:\n- Responde directo usando los datos cuando aplique.\n` +
+        `- Si la pregunta no es de finanzas/administración del conjunto, indícalo con amabilidad.\n` +
+        `- Termina indicando la sección de goPase donde actuar.\n` +
+        `- Español, directo y profesional. Máximo 300 palabras. Usa **negritas** para puntos clave.`
+      : `Eres un asistente financiero experto para conjuntos residenciales en Colombia. ` +
+        `Realiza un análisis financiero completo y da recomendaciones prácticas.\n\n` +
+        `${context || 'Sin datos financieros disponibles.'}\n\n` +
+        `ANÁLISIS REQUERIDO:\n1. Estado financiero general (¿sano o en riesgo?)\n` +
+        `2. Tendencia de recaudo\n3. Análisis de gastos (¿optimizables?)\n4. Recomendaciones (máx 4)\n\n` +
+        `${guiaApp}\n\nEspañol, directo y profesional. Máximo 300 palabras. Usa **negritas** para puntos clave.`;
+
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    // Modelos preferidos (alias estables) + descubrimiento dinámico de "flash".
+    const preferredAliases = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.0-flash'];
+    let discovered: string[] = [];
+    try {
+      const listResp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`,
+      );
+      const listJson: any = await listResp.json();
+      discovered = (listJson?.models || [])
+        .filter((m: any) => (m?.supportedGenerationMethods || []).includes('generateContent'))
+        .map((m: any) => (m?.name || '').replace(/^models\//, ''))
+        .filter(Boolean)
+        .filter((n: string) => /flash/i.test(n) && !/vision|embedding|aqa|image|tts|audio/i.test(n))
+        .sort((a: string, b: string) => b.localeCompare(a, undefined, { numeric: true }));
+    } catch {
+      // Sin lista: se usan los alias preferidos.
+    }
+
+    const models = [...new Set([...preferredAliases, ...discovered])];
+    let text: string | undefined;
+    let lastError: any = null;
+
+    for (const model of models.slice(0, 5)) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const resp = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+            },
+          );
+          const result: any = await resp.json();
+          text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) break;
+
+          lastError = result?.error || result;
+          const status = result?.error?.code ?? resp.status;
+          const msg = (result?.error?.message || '').toLowerCase();
+          if (msg.includes('no longer available') || msg.includes('not found') || status === 404 || status === 400) {
+            break; // modelo inválido: siguiente
+          }
+          if (status === 503 || status === 429) {
+            await sleep(2000 * (attempt + 1));
+            continue; // saturado: reintentar
+          }
+          break;
+        } catch (err) {
+          lastError = err;
+          await sleep(2000 * (attempt + 1));
+        }
+      }
+      if (text) break;
+    }
+
+    if (text) return { success: true, text };
+
+    const code = lastError?.code;
+    if (code === 503 || code === 429) {
+      return { success: false, message: 'El servicio de IA está saturado. Inténtalo de nuevo en unos segundos.' };
+    }
+    return { success: false, message: 'No se pudo obtener respuesta de la IA.' };
+  }
+
+  /**
    * Crea una preferencia de Mercado Pago. La mercadoPagoKey se lee de Sheets
    * (por conjunto) y NUNCA se expone al cliente. Registra los pagos como
    * "Procesando" en mirror/pagos (con _fbWrite) con el external_reference.

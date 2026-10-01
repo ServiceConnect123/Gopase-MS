@@ -90,4 +90,24 @@ export class WhatsappController {
         'Sesión reiniciada. Consulta GET /whatsapp/qr para escanear el nuevo QR.',
     };
   }
+
+  /**
+   * Desvincula el WhatsApp del conjunto: cierra la sesión, borra el registro de
+   * vinculación y la deja apagada (sin generar un QR nuevo).
+   */
+  @ApiOperation({
+    summary: 'Desvincula el WhatsApp del conjunto (apaga la sesión)',
+    description:
+      'Cierra la sesión del conjunto, borra sus credenciales y la deja apagada. No genera QR nuevo.',
+  })
+  @ApiQuery({ name: 'conjunto', required: false })
+  @Post('unlink')
+  async unlink(@Query('conjunto') conjunto?: string) {
+    await this.whatsapp.unlink(conjunto);
+    return {
+      ok: true,
+      conjunto: conjunto || null,
+      message: 'WhatsApp desvinculado del conjunto.',
+    };
+  }
 }

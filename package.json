@@ -24,6 +24,7 @@
     "@nestjs/schedule": "^4.1.2",
     "@nestjs/swagger": "^8.1.1",
     "@whiskeysockets/baileys": "^6.7.9",
+    "exceljs": "^4.4.0",
     "firebase-admin": "^14.4.0",
     "googleapis": "^180.0.0",
     "pino": "^9.5.0",
