@@ -4,7 +4,6 @@ import {
   OnModuleInit,
   OnModuleDestroy,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import makeWASocket, {
   DisconnectReason,
   WASocket,
@@ -13,8 +12,8 @@ import { Boom } from '@hapi/boom';
 import * as qrcodeTerminal from 'qrcode-terminal';
 import * as QRCode from 'qrcode';
 import pino from 'pino';
-import { SheetsService } from '../sheets/sheets.service';
-import { clearSheetsSession, useSheetsAuthState } from './sheets-auth-state';
+import { FirebaseService } from '../firebase/firebase.service';
+import { clearFirebaseSession, useFirebaseAuthState } from './firebase-auth-state';
 
 /**
  * Representa una sesión de WhatsApp vinculada (una por conjunto, más una
@@ -23,7 +22,7 @@ import { clearSheetsSession, useSheetsAuthState } from './sheets-auth-state';
 interface WhatsappSession {
   /** Clave lógica de la sesión (nombre del conjunto normalizado, o DEFAULT). */
   key: string;
-  /** Clave de fila usada para persistir en la hoja (`session` o `session:<key>`). */
+  /** Clave de persistencia (nodo RTDB: `session` o `session:<key>`). */
   sessionKey: string;
   sock: WASocket | null;
   ready: boolean;
@@ -49,27 +48,16 @@ interface WhatsappSession {
 @Injectable()
 export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WhatsappService.name);
-  private readonly sessionSheet: string;
 
   /** Clave de la sesión por defecto (número global histórico). */
   static readonly DEFAULT_KEY = '__default__';
   /** Umbral tras el cual se limpia la sesión y se fuerza un QR nuevo. */
   private static readonly MAX_FAILURES_BEFORE_RESET = 5;
 
-  static readonly SHEET_SESSION = 'wsp_session';
-
   /** Sesiones activas, indexadas por clave lógica (conjunto normalizado). */
   private readonly sessions = new Map<string, WhatsappSession>();
 
-  constructor(
-    private readonly config: ConfigService,
-    private readonly sheets: SheetsService,
-  ) {
-    this.sessionSheet = this.config.get<string>(
-      'WHATSAPP_SESSION_SHEET',
-      WhatsappService.SHEET_SESSION,
-    );
-  }
+  constructor(private readonly firebase: FirebaseService) {}
 
   async onModuleInit() {
     // Arranca la sesión por defecto (retrocompatibilidad con el número global).
@@ -107,7 +95,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     return c || WhatsappService.DEFAULT_KEY;
   }
 
-  /** Fila de persistencia para una clave de sesión. */
+  /** Clave de persistencia (nodo RTDB) para una sesión. */
   private rowKeyFor(key: string): string {
     return key === WhatsappService.DEFAULT_KEY ? 'session' : `session:${key}`;
   }
@@ -198,14 +186,10 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     }
     session.sock = null;
 
-    let state: Awaited<ReturnType<typeof useSheetsAuthState>>['state'];
+    let state: Awaited<ReturnType<typeof useFirebaseAuthState>>['state'];
     let saveCreds: () => Promise<void>;
     try {
-      const auth = await useSheetsAuthState(
-        this.sheets,
-        this.sessionSheet,
-        session.sessionKey,
-      );
+      const auth = await useFirebaseAuthState(this.firebase, session.sessionKey);
       state = auth.state;
       saveCreds = auth.saveCreds;
       session.clearSession = auth.clear;
@@ -213,7 +197,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     } catch (e: any) {
       session.connecting = false;
       this.logger.error(
-        `No se pudo cargar la sesión '${session.key}' desde Sheets: ${e?.message}. Reintentando en 10s...`,
+        `No se pudo cargar la sesión '${session.key}' desde Firebase: ${e?.message}. Reintentando en 10s...`,
       );
       setTimeout(
         () => this.connect(session).catch((err) => this.logger.error(err)),
@@ -328,11 +312,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         this.logger.error(`[${key}] Error limpiando sesión: ${e?.message}`),
       );
     } else {
-      await clearSheetsSession(
-        this.sheets,
-        this.sessionSheet,
-        session.sessionKey,
-      ).catch(() => undefined);
+      await clearFirebaseSession(this.firebase, session.sessionKey).catch(
+        () => undefined,
+      );
     }
 
     await this.connect(session);
@@ -351,11 +333,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     const session = this.sessions.get(key);
     if (!session) {
       // Nada vinculado en memoria; aun así, borramos el registro persistido.
-      await clearSheetsSession(
-        this.sheets,
-        this.sessionSheet,
-        this.rowKeyFor(key),
-      ).catch(() => undefined);
+      await clearFirebaseSession(this.firebase, this.rowKeyFor(key)).catch(
+        () => undefined,
+      );
       this.logger.log(`[${key}] Desvinculación: no había sesión activa en memoria.`);
       return;
     }
@@ -381,11 +361,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         this.logger.error(`[${key}] Error limpiando sesión: ${e?.message}`),
       );
     } else {
-      await clearSheetsSession(
-        this.sheets,
-        this.sessionSheet,
-        session.sessionKey,
-      ).catch(() => undefined);
+      await clearFirebaseSession(this.firebase, session.sessionKey).catch(
+        () => undefined,
+      );
     }
 
     // Quitar del mapa: queda apagada. No se reconecta ni se genera QR nuevo.

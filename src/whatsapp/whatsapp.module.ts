@@ -1,10 +1,10 @@
 import { Module } from '@nestjs/common';
 import { WhatsappService } from './whatsapp.service';
 import { WhatsappController } from './whatsapp.controller';
-import { SheetsModule } from '../sheets/sheets.module';
+import { FirebaseModule } from '../firebase/firebase.module';
 
 @Module({
-  imports: [SheetsModule],
+  imports: [FirebaseModule],
   controllers: [WhatsappController],
   providers: [WhatsappService],
   exports: [WhatsappService],
