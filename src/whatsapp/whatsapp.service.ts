@@ -17,32 +17,49 @@ import { SheetsService } from '../sheets/sheets.service';
 import { clearSheetsSession, useSheetsAuthState } from './sheets-auth-state';
 
 /**
- * Maneja la conexión con WhatsApp usando Baileys.
- * - Persiste la sesión en Google Sheets (hoja wsp_session).
- * - Muestra el QR en consola y lo expone vía getQr() para escanearlo por HTTP.
- * - Reconecta automáticamente salvo que la sesión haya sido cerrada (logout).
- * - Permite relogin() para vincular un número de WhatsApp distinto.
+ * Representa una sesión de WhatsApp vinculada (una por conjunto, más una
+ * sesión por defecto retrocompatible).
+ */
+interface WhatsappSession {
+  /** Clave lógica de la sesión (nombre del conjunto normalizado, o DEFAULT). */
+  key: string;
+  /** Clave de fila usada para persistir en la hoja (`session` o `session:<key>`). */
+  sessionKey: string;
+  sock: WASocket | null;
+  ready: boolean;
+  /** Último QR crudo emitido por Baileys, o null si ya está conectado. */
+  currentQr: string | null;
+  clearSession: (() => Promise<void>) | null;
+  flushSession: (() => Promise<void>) | null;
+  connecting: boolean;
+  consecutiveFailures: number;
+}
+
+/**
+ * Maneja la conexión con WhatsApp usando Baileys, con MULTI-SESIÓN por conjunto.
+ *
+ * - Cada conjunto puede vincular su propio número; las notificaciones de ese
+ *   conjunto salen desde su sesión. Existe además una sesión por defecto
+ *   (clave DEFAULT_KEY) retrocompatible con el comportamiento global anterior.
+ * - Cada sesión persiste en la hoja wsp_session en su propia fila:
+ *   `session` (por defecto) o `session:<conjunto>`.
+ * - Muestra el QR por consola y lo expone vía getQr(conjunto) para HTTP.
+ * - Reconecta automáticamente salvo logout; permite relogin(conjunto).
  */
 @Injectable()
 export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WhatsappService.name);
-  private sock: WASocket | null = null;
-  private ready = false;
   private readonly sessionSheet: string;
 
-  /** Último QR emitido (string crudo de Baileys), o null si ya está conectado. */
-  private currentQr: string | null = null;
-  private clearSession: (() => Promise<void>) | null = null;
-  private flushSession: (() => Promise<void>) | null = null;
-
-  /** Evita conexiones concurrentes (que causan sesiones "doble uso"). */
-  private connecting = false;
-  /** Cierres consecutivos sin llegar a 'open'; alto = sesión probablemente corrupta. */
-  private consecutiveFailures = 0;
+  /** Clave de la sesión por defecto (número global histórico). */
+  static readonly DEFAULT_KEY = '__default__';
   /** Umbral tras el cual se limpia la sesión y se fuerza un QR nuevo. */
   private static readonly MAX_FAILURES_BEFORE_RESET = 5;
 
   static readonly SHEET_SESSION = 'wsp_session';
+
+  /** Sesiones activas, indexadas por clave lógica (conjunto normalizado). */
+  private readonly sessions = new Map<string, WhatsappSession>();
 
   constructor(
     private readonly config: ConfigService,
@@ -55,209 +72,381 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit() {
-    // No await: si el Apps Script no responde, no debe tumbar el arranque.
-    // connect() maneja sus propios reintentos.
-    this.connect().catch((e) =>
-      this.logger.error(`Fallo al iniciar conexión de WhatsApp: ${e?.message}`),
-    );
+    // Arranca la sesión por defecto (retrocompatibilidad con el número global).
+    // Las sesiones por conjunto se crean on-demand cuando el admin pide su QR
+    // o cuando se intenta notificar a ese conjunto.
+    this.ensureSession(WhatsappService.DEFAULT_KEY)
+      .connect()
+      .catch((e) =>
+        this.logger.error(`Fallo al iniciar la sesión por defecto: ${e?.message}`),
+      );
   }
 
   async onModuleDestroy() {
-    // Persistir cualquier cambio pendiente antes de apagar.
-    try {
-      await this.flushSession?.();
-    } catch {
-      // no-op
-    }
-    try {
-      await this.sock?.end(undefined);
-    } catch {
-      // no-op
+    for (const session of this.sessions.values()) {
+      try {
+        await session.flushSession?.();
+      } catch {
+        // no-op
+      }
+      try {
+        await session.sock?.end(undefined);
+      } catch {
+        // no-op
+      }
     }
   }
 
-  isReady(): boolean {
-    return this.ready;
+  // ---------------------------------------------------------------------------
+  // Gestión de claves y sesiones
+  // ---------------------------------------------------------------------------
+
+  /** Normaliza el nombre de conjunto a una clave estable para indexar sesiones. */
+  private normalizeKey(conjunto?: string | null): string {
+    const c = (conjunto == null ? '' : String(conjunto)).trim().toLowerCase();
+    return c || WhatsappService.DEFAULT_KEY;
   }
 
-  private async connect(): Promise<void> {
-    // Evita conexiones concurrentes: dos sockets con la misma sesión provocan
-    // fallos de descifrado ("unable to authenticate data").
-    if (this.connecting) {
-      this.logger.debug('connect() ignorado: ya hay una conexión en curso.');
+  /** Fila de persistencia para una clave de sesión. */
+  private rowKeyFor(key: string): string {
+    return key === WhatsappService.DEFAULT_KEY ? 'session' : `session:${key}`;
+  }
+
+  /**
+   * Devuelve la sesión para la clave dada, creando su registro en memoria si no
+   * existe. No conecta por sí misma: usa `.connect()` o `ensureConnected()`.
+   */
+  private ensureSession(key: string): {
+    session: WhatsappSession;
+    connect: () => Promise<void>;
+  } {
+    let session = this.sessions.get(key);
+    if (!session) {
+      session = {
+        key,
+        sessionKey: this.rowKeyFor(key),
+        sock: null,
+        ready: false,
+        currentQr: null,
+        clearSession: null,
+        flushSession: null,
+        connecting: false,
+        consecutiveFailures: 0,
+      };
+      this.sessions.set(key, session);
+    }
+    return { session, connect: () => this.connect(session!) };
+  }
+
+  /** Arranca la conexión de una sesión si aún no está lista ni conectando. */
+  private ensureConnected(key: string): WhatsappSession {
+    const { session, connect } = this.ensureSession(key);
+    if (!session.ready && !session.connecting && !session.sock) {
+      connect().catch((e) =>
+        this.logger.error(`Error conectando sesión '${key}': ${e?.message}`),
+      );
+    }
+    return session;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Estado / QR (por conjunto)
+  // ---------------------------------------------------------------------------
+
+  /** True si la sesión del conjunto (o la por defecto) está conectada. */
+  isReady(conjunto?: string | null): boolean {
+    const key = this.normalizeKey(conjunto);
+    return this.sessions.get(key)?.ready ?? false;
+  }
+
+  /**
+   * Devuelve el QR actual (crudo + PNG dataURL) de la sesión del conjunto.
+   * Si la sesión no existe aún, la crea y arranca la conexión para generar QR.
+   */
+  async getQr(
+    conjunto?: string | null,
+  ): Promise<{ qr: string; pngDataUrl: string } | null> {
+    const key = this.normalizeKey(conjunto);
+    const session = this.ensureConnected(key);
+    if (session.ready) return null;
+    if (!session.currentQr) return null;
+    const pngDataUrl = await QRCode.toDataURL(session.currentQr);
+    return { qr: session.currentQr, pngDataUrl };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Conexión (por sesión)
+  // ---------------------------------------------------------------------------
+
+  private async connect(session: WhatsappSession): Promise<void> {
+    // Evita conexiones concurrentes de la misma sesión: dos sockets con la
+    // misma credencial rompen el descifrado ("unable to authenticate data").
+    if (session.connecting) {
+      this.logger.debug(
+        `connect('${session.key}') ignorado: ya hay una conexión en curso.`,
+      );
       return;
     }
-    this.connecting = true;
+    session.connecting = true;
 
-    // Cerrar cualquier socket previo antes de crear uno nuevo.
+    // Cerrar cualquier socket previo de esta sesión antes de crear uno nuevo.
     try {
-      this.sock?.ev.removeAllListeners('connection.update');
-      await this.sock?.end(undefined);
+      session.sock?.ev.removeAllListeners('connection.update');
+      await session.sock?.end(undefined);
     } catch {
       // no-op
     }
-    this.sock = null;
+    session.sock = null;
 
     let state: Awaited<ReturnType<typeof useSheetsAuthState>>['state'];
     let saveCreds: () => Promise<void>;
     try {
-      const auth = await useSheetsAuthState(this.sheets, this.sessionSheet);
+      const auth = await useSheetsAuthState(
+        this.sheets,
+        this.sessionSheet,
+        session.sessionKey,
+      );
       state = auth.state;
       saveCreds = auth.saveCreds;
-      this.clearSession = auth.clear;
-      this.flushSession = auth.flush;
+      session.clearSession = auth.clear;
+      session.flushSession = auth.flush;
     } catch (e: any) {
-      // Si no se pudo cargar la sesión (p. ej. Apps Script caído), reintentar
-      // sin tumbar el proceso.
-      this.connecting = false;
+      session.connecting = false;
       this.logger.error(
-        `No se pudo cargar la sesión desde Sheets: ${e?.message}. Reintentando en 10s...`,
+        `No se pudo cargar la sesión '${session.key}' desde Sheets: ${e?.message}. Reintentando en 10s...`,
       );
-      setTimeout(() => this.connect().catch((err) => this.logger.error(err)), 10000);
+      setTimeout(
+        () => this.connect(session).catch((err) => this.logger.error(err)),
+        10000,
+      );
       return;
     }
 
-    this.sock = makeWASocket({
+    session.sock = makeWASocket({
       auth: state,
       logger: pino({ level: 'silent' }),
       printQRInTerminal: false,
     });
-    // El socket ya se creó; permitir futuras reconexiones desde 'close'.
-    this.connecting = false;
+    session.connecting = false;
 
-    this.sock.ev.on('creds.update', saveCreds);
+    session.sock.ev.on('creds.update', saveCreds);
 
-    this.sock.ev.on('connection.update', (update) => {
+    session.sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        this.currentQr = qr;
+        session.currentQr = qr;
         this.logger.warn(
-          'Escanea este QR con WhatsApp para vincular el número emisor ' +
-            `(o abre GET /whatsapp/qr):`,
+          `[${session.key}] Escanea este QR con WhatsApp para vincular el número emisor:`,
         );
         qrcodeTerminal.generate(qr, { small: true });
       }
 
       if (connection === 'open') {
-        this.ready = true;
-        this.currentQr = null;
-        this.consecutiveFailures = 0; // conexión sana: reiniciar contador
-        this.logger.log('Conexión con WhatsApp establecida.');
+        session.ready = true;
+        session.currentQr = null;
+        session.consecutiveFailures = 0;
+        this.logger.log(`[${session.key}] Conexión con WhatsApp establecida.`);
       }
 
       if (connection === 'close') {
-        this.ready = false;
+        session.ready = false;
         const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
         const loggedOut = statusCode === DisconnectReason.loggedOut;
-        this.consecutiveFailures++;
+        session.consecutiveFailures++;
 
         if (loggedOut) {
           this.logger.error(
-            `Sesión cerrada (logout). Usa POST /whatsapp/relogin para vincular otro número.`,
+            `[${session.key}] Sesión cerrada (logout). Usa relogin para vincular otro número.`,
           );
-          this.consecutiveFailures = 0;
+          session.consecutiveFailures = 0;
           return;
         }
 
-        // Si la sesión falla repetidamente sin llegar a conectar, casi siempre
-        // está corrupta (errores de descifrado del protocolo Noise). Limpiarla
-        // y forzar una vinculación nueva por QR, en vez de reintentar en bucle.
-        if (this.consecutiveFailures >= WhatsappService.MAX_FAILURES_BEFORE_RESET) {
+        if (
+          session.consecutiveFailures >=
+          WhatsappService.MAX_FAILURES_BEFORE_RESET
+        ) {
           this.logger.error(
-            `Sesión inestable tras ${this.consecutiveFailures} intentos. Limpiando credenciales para regenerar QR...`,
+            `[${session.key}] Sesión inestable tras ${session.consecutiveFailures} intentos. Limpiando credenciales para regenerar QR...`,
           );
-          this.consecutiveFailures = 0;
-          this.clearSession?.()
-            .catch((e) => this.logger.error(`Error limpiando sesión: ${e?.message}`))
+          session.consecutiveFailures = 0;
+          session.clearSession?.()
+            .catch((e) =>
+              this.logger.error(
+                `[${session.key}] Error limpiando sesión: ${e?.message}`,
+              ),
+            )
             .finally(() => {
-              setTimeout(() => this.connect().catch((e) => this.logger.error(e)), 3000);
+              setTimeout(
+                () => this.connect(session).catch((e) => this.logger.error(e)),
+                3000,
+              );
             });
           return;
         }
 
-        // Backoff creciente (5s, 10s, 15s...) hasta el reset.
-        const delay = 5000 * this.consecutiveFailures;
+        const delay = 5000 * session.consecutiveFailures;
         this.logger.warn(
-          `Conexión cerrada (intento ${this.consecutiveFailures}). Reintentando en ${delay / 1000}s...`,
+          `[${session.key}] Conexión cerrada (intento ${session.consecutiveFailures}). Reintentando en ${delay / 1000}s...`,
         );
-        setTimeout(() => this.connect().catch((e) => this.logger.error(e)), delay);
+        setTimeout(
+          () => this.connect(session).catch((e) => this.logger.error(e)),
+          delay,
+        );
       }
     });
   }
 
   /**
-   * Cierra la sesión actual, borra las credenciales guardadas en Sheets y
-   * arranca una conexión nueva que generará un QR nuevo. Sirve para vincular
-   * un número de WhatsApp distinto.
+   * Cierra la sesión del conjunto, borra sus credenciales y arranca una nueva
+   * conexión que generará un QR nuevo (para vincular otro número).
    */
-  async relogin(): Promise<void> {
-    this.logger.warn('Relogin solicitado: cerrando sesión y limpiando credenciales...');
-    this.ready = false;
-    this.currentQr = null;
+  async relogin(conjunto?: string | null): Promise<void> {
+    const key = this.normalizeKey(conjunto);
+    const { session } = this.ensureSession(key);
+    this.logger.warn(
+      `[${key}] Relogin solicitado: cerrando sesión y limpiando credenciales...`,
+    );
+    session.ready = false;
+    session.currentQr = null;
 
-    // Intentar logout limpio (best-effort); ignora errores si ya está caído.
     try {
-      await this.sock?.logout();
+      await session.sock?.logout();
     } catch {
       // no-op
     }
     try {
-      await this.sock?.end(undefined);
+      await session.sock?.end(undefined);
     } catch {
       // no-op
     }
-    this.sock = null;
+    session.sock = null;
 
-    // Limpiar la sesión persistida en Sheets.
-    if (this.clearSession) {
-      await this.clearSession().catch((e) =>
-        this.logger.error(`Error limpiando sesión: ${e?.message}`),
+    if (session.clearSession) {
+      await session.clearSession().catch((e) =>
+        this.logger.error(`[${key}] Error limpiando sesión: ${e?.message}`),
       );
     } else {
-      await clearSheetsSession(this.sheets, this.sessionSheet).catch(() => undefined);
+      await clearSheetsSession(
+        this.sheets,
+        this.sessionSheet,
+        session.sessionKey,
+      ).catch(() => undefined);
     }
 
-    // Reconectar en limpio -> emitirá un QR nuevo.
-    await this.connect();
+    await this.connect(session);
   }
 
-  /** Devuelve el QR actual como string crudo y como dataURL PNG (o null). */
-  async getQr(): Promise<{ qr: string; pngDataUrl: string } | null> {
-    if (this.ready) return null;
-    if (!this.currentQr) return null;
-    const pngDataUrl = await QRCode.toDataURL(this.currentQr);
-    return { qr: this.currentQr, pngDataUrl };
+  // ---------------------------------------------------------------------------
+  // Envío de mensajes (enrutado por conjunto, con fallback a la sesión default)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Resuelve el socket a usar para enviar: prioriza la sesión del conjunto si
+   * está conectada; si no, cae a la sesión por defecto (número global).
+   */
+  private resolveSenderSession(conjunto?: string | null): WhatsappSession | null {
+    const key = this.normalizeKey(conjunto);
+    const own = this.sessions.get(key);
+    if (own?.ready && own.sock) return own;
+
+    // Fallback: sesión por defecto (compatibilidad con el número global).
+    const def = this.sessions.get(WhatsappService.DEFAULT_KEY);
+    if (def?.ready && def.sock) {
+      if (key !== WhatsappService.DEFAULT_KEY) {
+        this.logger.debug(
+          `[${key}] sin sesión propia conectada; se usa la sesión por defecto.`,
+        );
+      }
+      return def;
+    }
+    return null;
   }
+
+  async sendMessage(
+    phone: string | number,
+    text: string,
+    conjunto?: string | null,
+  ): Promise<boolean> {
+    const session = this.resolveSenderSession(conjunto);
+    if (!session) {
+      this.logger.warn('WhatsApp no está listo. Mensaje no enviado.');
+      return false;
+    }
+    try {
+      const jid = this.toJid(phone);
+      await session.sock!.sendMessage(jid, { text });
+      this.logger.log(`[${session.key}] Mensaje enviado a ${phone}`);
+      return true;
+    } catch (error: any) {
+      this.logger.error(`Error enviando a ${phone}: ${error?.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Envía una imagen por WhatsApp. Acepta la imagen como URL (imageUrl) o como
+   * base64 (imageBase64). Si se pasa una URL de Google Drive se intenta
+   * normalizar a un enlace de descarga directa.
+   */
+  async sendImage(
+    phone: string | number,
+    opts: { imageUrl?: string; imageBase64?: string; caption?: string },
+    conjunto?: string | null,
+  ): Promise<boolean> {
+    const session = this.resolveSenderSession(conjunto);
+    if (!session) {
+      this.logger.warn('WhatsApp no está listo. Imagen no enviada.');
+      return false;
+    }
+
+    let buffer: Buffer | null = null;
+    if (opts.imageBase64) {
+      const clean = opts.imageBase64.replace(/^data:image\/\w+;base64,/, '');
+      try {
+        buffer = Buffer.from(clean, 'base64');
+      } catch {
+        buffer = null;
+      }
+    } else if (opts.imageUrl) {
+      buffer = await this.downloadImage(this.normalizeDriveUrl(opts.imageUrl));
+    }
+
+    if (!buffer || buffer.length === 0) {
+      // Si no se logró obtener la imagen pero hay caption, al menos manda el texto.
+      if (opts.caption) return this.sendMessage(phone, opts.caption, conjunto);
+      this.logger.warn('No se pudo obtener la imagen a enviar.');
+      return false;
+    }
+
+    try {
+      const jid = this.toJid(phone);
+      await session.sock!.sendMessage(jid, {
+        image: buffer,
+        caption: opts.caption || undefined,
+      });
+      this.logger.log(`[${session.key}] Imagen enviada a ${phone}`);
+      return true;
+    } catch (error: any) {
+      this.logger.error(`Error enviando imagen a ${phone}: ${error?.message}`);
+      return false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers (sin cambios de comportamiento)
+  // ---------------------------------------------------------------------------
 
   /**
    * Normaliza un número colombiano a JID de WhatsApp.
    * Acepta formatos como "3001234567", "573001234567", "+57 300 123 4567".
    */
   private toJid(phone: string | number): string {
-    // El teléfono puede llegar como número (Google Sheets) o con formato; se
-    // normaliza a string y se dejan solo dígitos.
     let digits = String(phone == null ? '' : phone).replace(/\D/g, '');
     if (!digits) throw new Error('Número de WhatsApp vacío');
-    // Si viene sin indicativo (10 dígitos, típico celular CO) le anteponemos 57.
     if (digits.length === 10) digits = `57${digits}`;
     return `${digits}@s.whatsapp.net`;
-  }
-
-  async sendMessage(phone: string | number, text: string): Promise<boolean> {
-    if (!this.sock || !this.ready) {
-      this.logger.warn('WhatsApp no está listo. Mensaje no enviado.');
-      return false;
-    }
-    try {
-      const jid = this.toJid(phone);
-      await this.sock.sendMessage(jid, { text });
-      this.logger.log(`Mensaje enviado a ${phone}`);
-      return true;
-    } catch (error: any) {
-      this.logger.error(`Error enviando a ${phone}: ${error?.message}`);
-      return false;
-    }
   }
 
   /**
@@ -283,57 +472,12 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Envía una imagen por WhatsApp. Acepta la imagen como URL (imageUrl) o como
-   * base64 (imageBase64). Si se pasa una URL de Google Drive se intenta
-   * normalizar a un enlace de descarga directa.
-   */
-  async sendImage(
-    phone: string | number,
-    opts: { imageUrl?: string; imageBase64?: string; caption?: string },
-  ): Promise<boolean> {
-    if (!this.sock || !this.ready) {
-      this.logger.warn('WhatsApp no está listo. Imagen no enviada.');
-      return false;
-    }
-
-    let buffer: Buffer | null = null;
-    if (opts.imageBase64) {
-      const clean = opts.imageBase64.replace(/^data:image\/\w+;base64,/, '');
-      try {
-        buffer = Buffer.from(clean, 'base64');
-      } catch {
-        buffer = null;
-      }
-    } else if (opts.imageUrl) {
-      buffer = await this.downloadImage(this.normalizeDriveUrl(opts.imageUrl));
-    }
-
-    if (!buffer || buffer.length === 0) {
-      // Si no se logró obtener la imagen pero hay caption, al menos manda el texto.
-      if (opts.caption) return this.sendMessage(phone, opts.caption);
-      this.logger.warn('No se pudo obtener la imagen a enviar.');
-      return false;
-    }
-
-    try {
-      const jid = this.toJid(phone);
-      await this.sock.sendMessage(jid, { image: buffer, caption: opts.caption || undefined });
-      this.logger.log(`Imagen enviada a ${phone}`);
-      return true;
-    } catch (error: any) {
-      this.logger.error(`Error enviando imagen a ${phone}: ${error?.message}`);
-      return false;
-    }
-  }
-
-  /**
    * Convierte enlaces de Google Drive a una URL de descarga directa de la
    * imagen. Soporta formatos comunes: /file/d/<id>/view, ?id=<id>,
    * lh3.googleusercontent.com/d/<id>. Si no reconoce el patrón, devuelve la URL tal cual.
    */
   private normalizeDriveUrl(url: string): string {
     if (!url) return url;
-    // lh3.googleusercontent.com/d/<id> ya sirve como imagen directa.
     if (url.includes('googleusercontent.com')) return url;
 
     const idFromPath = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);

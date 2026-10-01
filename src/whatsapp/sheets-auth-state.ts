@@ -36,22 +36,33 @@ export interface SheetsAuthState {
   flush: () => Promise<void>;
 }
 
-const SESSION_KEY = 'session';
+const DEFAULT_SESSION_KEY = 'session';
 
-/** Elimina la fila de sesión (para relogin). */
+/**
+ * Elimina la fila de sesión (para relogin).
+ *
+ * `sessionKey` identifica la sesión dentro de la hoja. Por defecto 'session'
+ * (una sola sesión global, retrocompatible). Para multi-sesión por conjunto se
+ * usa una clave distinta por conjunto, p. ej. 'session:villa mayra'.
+ */
 export async function clearSheetsSession(
   sheets: SheetsService,
   sheetName: string,
+  sessionKey: string = DEFAULT_SESSION_KEY,
 ): Promise<number> {
-  const ok = await sheets.delete(sheetName, SESSION_KEY);
-  logger.log(`Sesión ${ok ? 'eliminada' : 'no encontrada'} en '${sheetName}'`);
+  const ok = await sheets.delete(sheetName, sessionKey);
+  logger.log(
+    `Sesión '${sessionKey}' ${ok ? 'eliminada' : 'no encontrada'} en '${sheetName}'`,
+  );
   return ok ? 1 : 0;
 }
 
 export async function useSheetsAuthState(
   sheets: SheetsService,
   sheetName: string,
+  sessionKey: string = DEFAULT_SESSION_KEY,
 ): Promise<SheetsAuthState> {
+  const SESSION_KEY = sessionKey;
   // Estado completo en memoria.
   let creds: AuthenticationCreds;
   const keys: { [category: string]: { [id: string]: any } } = {};

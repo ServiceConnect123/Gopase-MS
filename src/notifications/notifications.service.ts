@@ -121,11 +121,14 @@ export class NotificationsService implements OnModuleInit {
     this.logger.log(`[${trigger}] Iniciando chequeo de pagos pendientes (${fecha})`);
 
     try {
+      // Con multi-sesión ya no exigimos una conexión global: cada conjunto usa
+      // su propia sesión (y, si no está vinculada, el envío cae a la sesión por
+      // defecto dentro de WhatsappService). Si NINGUNA sesión está lista, no
+      // tiene sentido continuar este ciclo.
       if (!this.whatsapp.isReady()) {
-        this.logger.warn(
-          'WhatsApp aún no está conectado. Se omite este ciclo (se reintentará).',
+        this.logger.debug(
+          'La sesión por defecto no está conectada; se enviará solo por sesiones de conjunto vinculadas.',
         );
-        return;
       }
 
       const [conjuntos, pendingByConjunto, enviadosHoy] = await Promise.all([
@@ -154,8 +157,21 @@ export class NotificationsService implements OnModuleInit {
           continue;
         }
 
+        // Si ni la sesión del conjunto ni la por defecto están listas, se omite
+        // y se reintentará en el próximo ciclo (no se registra el envío).
+        if (!this.whatsapp.isReady(conjunto.nombre) && !this.whatsapp.isReady()) {
+          this.logger.debug(
+            `"${conjunto.nombre}" sin sesión de WhatsApp lista. Se reintentará.`,
+          );
+          continue;
+        }
+
         const mensaje = this.buildMessage(conjunto, pagos);
-        const ok = await this.whatsapp.sendMessage(conjunto.adminWhatsapp, mensaje);
+        const ok = await this.whatsapp.sendMessage(
+          conjunto.adminWhatsapp,
+          mensaje,
+          conjunto.nombre,
+        );
 
         if (ok) {
           await this.repo.registrarEnvio(conjunto.nombre, fecha, pagos.length);
@@ -182,15 +198,25 @@ export class NotificationsService implements OnModuleInit {
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  /** Espera hasta ~maxMs a que WhatsApp esté conectado (cold start de Render). */
-  private async waitForWhatsapp(maxMs = 60000): Promise<boolean> {
+  /**
+   * Espera hasta ~maxMs a que WhatsApp esté conectado (cold start de Render).
+   * Considera lista la conexión si la sesión del conjunto O la sesión por
+   * defecto están conectadas (el envío cae a la default si el conjunto no tiene
+   * número propio vinculado).
+   */
+  private async waitForWhatsapp(
+    conjunto?: string | null,
+    maxMs = 60000,
+  ): Promise<boolean> {
     const step = 3000;
     let waited = 0;
-    while (!this.whatsapp.isReady() && waited < maxMs) {
+    const ready = () =>
+      this.whatsapp.isReady(conjunto) || this.whatsapp.isReady();
+    while (!ready() && waited < maxMs) {
       await this.sleep(step);
       waited += step;
     }
-    return this.whatsapp.isReady();
+    return ready();
   }
 
   /**
@@ -203,6 +229,7 @@ export class NotificationsService implements OnModuleInit {
   async notifyDebtors(payload: {
     mensaje: string;
     destinatarios: Array<{ nombre: string; telefono: string; mes?: string; anio?: string }>;
+    conjunto?: string;
   }): Promise<{ ok: boolean; enviados: number; fallidos: number; total: number; message: string }> {
     const lista = (payload?.destinatarios || []).filter((d) => d && d.telefono);
     const total = lista.length;
@@ -210,10 +237,12 @@ export class NotificationsService implements OnModuleInit {
       return { ok: true, enviados: 0, fallidos: 0, total: 0, message: 'No hay destinatarios con teléfono.' };
     }
 
+    const conjunto = payload?.conjunto;
+
     // Delay entre mensajes (ms). Configurable; por defecto 4s.
     const delayMs = Number(this.config.get<string>('WHATSAPP_MESSAGE_DELAY_MS', '4000'));
 
-    const ready = await this.waitForWhatsapp();
+    const ready = await this.waitForWhatsapp(conjunto);
     if (!ready) {
       return {
         ok: false, enviados: 0, fallidos: total, total,
@@ -231,7 +260,7 @@ export class NotificationsService implements OnModuleInit {
         .replace(/\{año\}/g, d.anio || '')
         .replace(/\{anio\}/g, d.anio || '');
 
-      const ok = await this.whatsapp.sendMessage(d.telefono, texto);
+      const ok = await this.whatsapp.sendMessage(d.telefono, texto, conjunto);
       if (ok) enviados++;
       else fallidos++;
 
@@ -260,6 +289,7 @@ export class NotificationsService implements OnModuleInit {
     imageUrl?: string;
     imageBase64?: string;
     receipt?: ReceiptData;
+    conjunto?: string;
   }): Promise<{ ok: boolean; message: string }> {
     const telefono = (payload?.telefono || '').toString().trim();
     if (!telefono) {
@@ -269,7 +299,9 @@ export class NotificationsService implements OnModuleInit {
       return { ok: false, message: 'No hay recibo ni mensaje para enviar.' };
     }
 
-    const ready = await this.waitForWhatsapp();
+    const conjunto = payload?.conjunto;
+
+    const ready = await this.waitForWhatsapp(conjunto);
     if (!ready) {
       return { ok: false, message: 'WhatsApp no está conectado. Intenta de nuevo en un momento.' };
     }
@@ -285,11 +317,15 @@ export class NotificationsService implements OnModuleInit {
       }
     }
 
-    const ok = await this.whatsapp.sendImage(telefono, {
-      imageBase64: generatedBase64 || payload.imageBase64,
-      imageUrl: generatedBase64 ? undefined : payload.imageUrl,
-      caption: payload.caption,
-    });
+    const ok = await this.whatsapp.sendImage(
+      telefono,
+      {
+        imageBase64: generatedBase64 || payload.imageBase64,
+        imageUrl: generatedBase64 ? undefined : payload.imageUrl,
+        caption: payload.caption,
+      },
+      conjunto,
+    );
 
     return ok
       ? { ok: true, message: 'Recibo enviado por WhatsApp.' }

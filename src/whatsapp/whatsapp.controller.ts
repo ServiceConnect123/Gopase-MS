@@ -1,5 +1,5 @@
-import { Controller, Get, Header, Post } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Controller, Get, Header, Post, Query } from '@nestjs/common';
+import { ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { WhatsappService } from './whatsapp.service';
 
 @ApiTags('whatsapp')
@@ -7,39 +7,48 @@ import { WhatsappService } from './whatsapp.service';
 export class WhatsappController {
   constructor(private readonly whatsapp: WhatsappService) {}
 
-  /** Estado de la conexión de WhatsApp. */
-  @ApiOperation({ summary: 'Estado de la conexión de WhatsApp' })
+  /**
+   * Estado de la conexión de WhatsApp para un conjunto.
+   * Si no se pasa `conjunto`, consulta la sesión por defecto (número global).
+   */
+  @ApiOperation({ summary: 'Estado de la conexión de WhatsApp (por conjunto)' })
+  @ApiQuery({ name: 'conjunto', required: false })
   @Get('status')
-  status() {
+  status(@Query('conjunto') conjunto?: string) {
     return {
-      ready: this.whatsapp.isReady(),
+      ready: this.whatsapp.isReady(conjunto),
+      conjunto: conjunto || null,
       timestamp: new Date().toISOString(),
     };
   }
 
-  /** Devuelve el QR actual en JSON (string crudo + PNG en base64). */
-  @ApiOperation({ summary: 'QR actual en JSON (string + PNG base64)' })
+  /** Devuelve el QR actual en JSON (string crudo + PNG en base64) por conjunto. */
+  @ApiOperation({ summary: 'QR actual en JSON (string + PNG base64) por conjunto' })
+  @ApiQuery({ name: 'conjunto', required: false })
   @Get('qr')
-  async qr() {
-    const data = await this.whatsapp.getQr();
+  async qr(@Query('conjunto') conjunto?: string) {
+    const data = await this.whatsapp.getQr(conjunto);
     if (!data) {
+      const ready = this.whatsapp.isReady(conjunto);
       return {
-        ready: this.whatsapp.isReady(),
-        message: this.whatsapp.isReady()
+        ready,
+        conjunto: conjunto || null,
+        message: ready
           ? 'WhatsApp ya está conectado. No hay QR pendiente.'
-          : 'No hay QR disponible todavía. Espera unos segundos o usa /whatsapp/relogin.',
+          : 'No hay QR disponible todavía. Espera unos segundos y vuelve a consultar.',
       };
     }
     return data;
   }
 
   /** Página HTML sencilla para escanear el QR desde el navegador. */
-  @ApiOperation({ summary: 'Página HTML para escanear el QR' })
+  @ApiOperation({ summary: 'Página HTML para escanear el QR (por conjunto)' })
+  @ApiQuery({ name: 'conjunto', required: false })
   @Get('qr/view')
   @Header('Content-Type', 'text/html; charset=utf-8')
-  async qrView() {
-    const data = await this.whatsapp.getQr();
-    if (this.whatsapp.isReady()) {
+  async qrView(@Query('conjunto') conjunto?: string) {
+    const data = await this.whatsapp.getQr(conjunto);
+    if (this.whatsapp.isReady(conjunto)) {
       return `<html><body style="font-family:sans-serif;text-align:center;padding:40px">
         <h2>✅ WhatsApp conectado</h2>
         <p>No hay QR pendiente.</p>
@@ -49,7 +58,7 @@ export class WhatsappController {
       return `<html><head><meta http-equiv="refresh" content="3"></head>
         <body style="font-family:sans-serif;text-align:center;padding:40px">
         <h2>Generando QR...</h2>
-        <p>Esta página se recarga sola. Si no aparece, usa POST /whatsapp/relogin.</p>
+        <p>Esta página se recarga sola.</p>
       </body></html>`;
     }
     return `<html><head><meta http-equiv="refresh" content="20"></head>
@@ -62,20 +71,23 @@ export class WhatsappController {
   }
 
   /**
-   * Cierra la sesión actual, limpia las credenciales y genera un QR nuevo
-   * para vincular OTRO número de WhatsApp. Luego abre /whatsapp/qr/view.
+   * Cierra la sesión del conjunto, limpia las credenciales y genera un QR nuevo
+   * para vincular OTRO número de WhatsApp.
    */
   @ApiOperation({
-    summary: 'Reinicia la sesión y genera un QR nuevo',
-    description: 'Cierra la sesión actual, limpia credenciales y genera un QR para vincular otro número.',
+    summary: 'Reinicia la sesión y genera un QR nuevo (por conjunto)',
+    description:
+      'Cierra la sesión del conjunto, limpia credenciales y genera un QR para vincular otro número.',
   })
+  @ApiQuery({ name: 'conjunto', required: false })
   @Post('relogin')
-  async relogin() {
-    await this.whatsapp.relogin();
+  async relogin(@Query('conjunto') conjunto?: string) {
+    await this.whatsapp.relogin(conjunto);
     return {
       ok: true,
+      conjunto: conjunto || null,
       message:
-        'Sesión reiniciada. Abre GET /whatsapp/qr/view para escanear el nuevo QR.',
+        'Sesión reiniciada. Consulta GET /whatsapp/qr para escanear el nuevo QR.',
     };
   }
 }

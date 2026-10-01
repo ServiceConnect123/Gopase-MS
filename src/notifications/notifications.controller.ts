@@ -23,6 +23,13 @@ class NotifyDebtorsDto {
 
   @ApiProperty({ type: [DebtorDto], description: 'Destinatarios del recordatorio.' })
   destinatarios: DebtorDto[];
+
+  @ApiPropertyOptional({
+    description:
+      'Conjunto del admin que notifica. Enruta el envío a su sesión de WhatsApp vinculada.',
+    example: 'Villa Mayra',
+  })
+  conjunto?: string;
 }
 
 class ReceiptDataDto {
@@ -69,6 +76,13 @@ class SendReceiptDto {
 
   @ApiPropertyOptional({ type: ReceiptDataDto })
   receipt?: ReceiptDataDto;
+
+  @ApiPropertyOptional({
+    description:
+      'Conjunto del admin. Enruta el envío a su sesión de WhatsApp vinculada.',
+    example: 'Villa Mayra',
+  })
+  conjunto?: string;
 }
 
 @ApiTags('notifications')
