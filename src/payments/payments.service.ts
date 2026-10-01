@@ -223,7 +223,9 @@ export class PaymentsService {
       this.readCollection<Pago>('pagos'),
       this.readCollection<Usuario>('usuarios'),
     ]);
-    const pagos = this.filterPagosByYear(pagosAll, year);
+    // year <= 0 => TODOS los años (usado por el cuadre de caja global). En otro
+    // caso, filtra por el año indicado (vía el texto del concepto).
+    const pagos = year > 0 ? this.filterPagosByYear(pagosAll, year) : pagosAll;
     let filtered = pagos;
     if (!isSuperAdmin && conjunto) {
       const usuariosDelConjunto = new Set(

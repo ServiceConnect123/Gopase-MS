@@ -69,16 +69,19 @@ export class ReportsController {
   @ApiQuery({ name: 'conjunto', required: true })
   @ApiQuery({ name: 'tipo', required: false, description: 'Gasto | Ingreso Extra' })
   @ApiQuery({ name: 'mode', required: false, enum: ['create', 'edit'] })
+  @ApiQuery({ name: 'propietario', required: false, description: 'Filtra por propietario (username) en modo edit' })
   @Get('finance-template')
   async financeTemplate(
     @Query('conjunto') conjunto: string,
     @Query('tipo') tipo?: string,
     @Query('mode') mode?: 'create' | 'edit',
+    @Query('propietario') propietario?: string,
   ) {
     const buffer = await this.financeImport.generateTemplate({
       conjunto: conjunto || '',
       tipo,
       mode: mode === 'edit' ? 'edit' : 'create',
+      propietario: propietario || '',
     });
     const nombre = `gopase_${mode === 'edit' ? 'editar' : 'plantilla'}_gastos_ingresos.xlsx`;
     return {

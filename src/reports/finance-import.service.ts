@@ -74,6 +74,8 @@ export class FinanceImportService {
     conjunto: string;
     tipo?: string;
     mode: 'create' | 'edit';
+    /** Filtra por propietario (username) en modo 'edit'. Vacío = todos. */
+    propietario?: string;
   }): Promise<Buffer> {
     const wb = new ExcelJS.Workbook();
     wb.creator = 'goPase';
@@ -96,10 +98,13 @@ export class FinanceImportService {
 
     if (opts.mode === 'edit') {
       const data = await this.reports.list({ conjunto: opts.conjunto });
+      const propFiltro = this.norm(opts.propietario);
       const filtered = data.filter((r: any) => {
         const t = r.tipo || r.dato_7 || '';
         if (!TIPOS_VALIDOS.includes(t)) return false;
         if (opts.tipo && t !== opts.tipo) return false;
+        // Filtro por propietario (username) si se indicó.
+        if (propFiltro && this.norm(r.usuario ?? r.dato_4 ?? '') !== propFiltro) return false;
         return true;
       });
       for (const r of filtered) {
