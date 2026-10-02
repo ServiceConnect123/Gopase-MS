@@ -133,6 +133,24 @@ export class NotificationsController {
   }
 
   /**
+   * SOLO despierta el servicio (Render Free), SIN agendar el chequeo de pagos
+   * pendientes. Pensado para el flujo de confirmar un pago: el admin solo
+   * necesita que el servicio esté vivo para enviar el recibo, no recibir la
+   * notificación de "pagos pendientes por aprobar".
+   */
+  @ApiOperation({ summary: 'Despierta el servicio SIN agendar el chequeo (GET)' })
+  @Get('ping')
+  pingGet() {
+    return { ok: true, whatsappReady: this.whatsapp.isReady(), message: 'Servicio despierto' };
+  }
+
+  @ApiOperation({ summary: 'Despierta el servicio SIN agendar el chequeo (POST)' })
+  @Post('ping')
+  pingPost() {
+    return { ok: true, whatsappReady: this.whatsapp.isReady(), message: 'Servicio despierto' };
+  }
+
+  /**
    * Envía recordatorios de cobro a los deudores enviados por el frontend.
    * Responde de inmediato (fire-and-forget) porque el envío con delay entre
    * mensajes puede tardar y el servicio puede estar despertando (Render).
