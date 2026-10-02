@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, Param, Post, Put, Query } from '@nestjs/common';
 import { ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { PaymentsService } from './payments.service';
+import { PaymentsImportService } from './payments-import.service';
 
 /**
  * Lecturas de la pantalla de Pagos (data ya calculada). El frontend solo pinta.
@@ -9,7 +10,74 @@ import { PaymentsService } from './payments.service';
 @ApiTags('payments')
 @Controller('payments')
 export class PaymentsController {
-  constructor(private readonly payments: PaymentsService) {}
+  constructor(
+    private readonly payments: PaymentsService,
+    private readonly paymentsImport: PaymentsImportService,
+  ) {}
+
+  // ==========================================================================
+  // Carga masiva de PAGOS (Excel, una hoja por propietario)
+  // ==========================================================================
+
+  @ApiOperation({
+    summary: 'Descargar plantilla Excel de pagos (una hoja por propietario)',
+    description:
+      'mode=edit: cada hoja trae TODOS los pagos del propietario (todos los años). ' +
+      'mode=create: hojas con una fila de ejemplo. Edición directa, sin OCR ni Mercado Pago.',
+  })
+  @ApiQuery({ name: 'conjunto', required: false })
+  @ApiQuery({ name: 'superAdmin', required: false, type: Boolean })
+  @ApiQuery({ name: 'mode', required: false, enum: ['create', 'edit'] })
+  @Get('import-template')
+  async importTemplate(
+    @Query('conjunto') conjunto?: string,
+    @Query('superAdmin') superAdmin?: string,
+    @Query('mode') mode?: 'create' | 'edit',
+  ) {
+    const buffer = await this.paymentsImport.generateTemplate({
+      conjunto: conjunto || '',
+      isSuperAdmin: superAdmin === 'true',
+      mode: mode === 'create' ? 'create' : 'edit',
+    });
+    return {
+      success: true,
+      fileName: `gopase_pagos.xlsx`,
+      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      base64: buffer.toString('base64'),
+    };
+  }
+
+  @ApiOperation({
+    summary: 'Importar pagos desde Excel (crear/actualizar/eliminar en bloque)',
+    description:
+      'dryRun=true devuelve el resumen sin aplicar (preview). dryRun=false aplica si no hay errores. ' +
+      'Edición directa sobre los pagos; no pasa por Mercado Pago ni OCR.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        conjunto: { type: 'string' },
+        superAdmin: { type: 'boolean' },
+        fileBase64: { type: 'string' },
+        dryRun: { type: 'boolean' },
+      },
+      required: ['fileBase64'],
+    },
+  })
+  @Post('import')
+  async importFile(
+    @Body()
+    body: { conjunto?: string; superAdmin?: boolean; fileBase64: string; dryRun?: boolean },
+  ) {
+    const summary = await this.paymentsImport.processImport({
+      conjunto: body.conjunto || '',
+      isSuperAdmin: body.superAdmin === true,
+      fileBase64: body.fileBase64 || '',
+      dryRun: body.dryRun !== false, // por defecto dry-run (seguro)
+    });
+    return { success: summary.errores === 0, summary };
+  }
 
   @ApiOperation({ summary: 'Lista de propietarios con estado de pago (vista admin)' })
   @ApiQuery({ name: 'conjunto', required: false })
