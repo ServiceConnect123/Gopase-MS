@@ -25,6 +25,8 @@ export interface Pago {
   fecha: string;
   estado: string;
   referencia: string;
+  /** Marca de "duplicado validado por el admin" (no vuelve al reporte). */
+  dupOk?: boolean;
 }
 
 interface Usuario {
@@ -356,7 +358,9 @@ export class PaymentsService {
 
     const result: DuplicateGroup[] = [];
     for (const [key, arr] of grupos) {
-      if (arr.length < 2) continue;
+      // Solo cuentan como "duplicado activo" los pagos NO validados por el admin.
+      const noValidados = arr.filter((p) => (p as any).dupOk !== true);
+      if (noValidados.length < 2) continue;
       const [usuario, mes, anio] = key.split('||');
       const valores = arr.map((x) => parseFloat(String(x.valor)) || 0);
       const montoExtra = valores.reduce((s, v) => s + v, 0) - Math.max(...valores);
@@ -595,6 +599,20 @@ export class PaymentsService {
   async deletePayment(id: string): Promise<{ success: boolean; message?: string }> {
     if (!id) return { success: false, message: 'ID de pago requerido' };
     await this.firebase.db().ref(`mirror/pagos/${this.safeKey(id)}`).remove();
+    return { success: true };
+  }
+
+  /**
+   * Marca (o desmarca) un pago como "duplicado validado": el admin revisó el
+   * duplicado y lo considera legítimo, por lo que no debe volver a aparecer en
+   * el reporte de duplicados. Guarda la marca en el propio pago (dupOk).
+   */
+  async setDuplicateOk(id: string, ok = true): Promise<{ success: boolean; message?: string }> {
+    if (!id) return { success: false, message: 'ID de pago requerido' };
+    const ref = this.firebase.db().ref(`mirror/pagos/${this.safeKey(id)}`);
+    const snap = await ref.get();
+    if (!snap.exists()) return { success: false, message: 'El pago no existe.' };
+    await ref.update({ dupOk: ok, _fbWrite: true });
     return { success: true };
   }
 

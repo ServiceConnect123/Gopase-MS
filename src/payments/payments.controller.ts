@@ -113,6 +113,21 @@ export class PaymentsController {
     return { success: true, ...data };
   }
 
+  @ApiOperation({
+    summary: 'Marca/desmarca un pago como duplicado validado (no vuelve al reporte)',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: { id: { type: 'string' }, ok: { type: 'boolean' } },
+      required: ['id'],
+    },
+  })
+  @Post('duplicates/validate')
+  async validateDuplicate(@Body() body: { id: string; ok?: boolean }) {
+    return this.payments.setDuplicateOk(body.id, body.ok !== false);
+  }
+
   @ApiOperation({ summary: 'Pagos duplicados por (usuario+mes+año) para auditar' })
   @ApiQuery({ name: 'conjunto', required: false })
   @ApiQuery({ name: 'year', required: false, type: Number, description: 'year<=0 = todos los años' })
