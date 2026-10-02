@@ -139,6 +139,18 @@ export class PaymentsController {
     return { success: true, data };
   }
 
+  @ApiOperation({ summary: 'Estadística de pago de un propietario en el año (mes a mes + totales)' })
+  @ApiQuery({ name: 'username', required: true })
+  @ApiQuery({ name: 'year', required: false, type: Number })
+  @Get('owner-stats')
+  async ownerStats(@Query('username') username: string, @Query('year') year?: string) {
+    const data = await this.payments.getOwnerStats(
+      username || '',
+      year ? parseInt(year, 10) : new Date().getFullYear(),
+    );
+    return { success: true, data };
+  }
+
   @ApiOperation({ summary: 'Deudores de un mes (con teléfono) para recordatorios' })
   @ApiQuery({ name: 'conjunto', required: false })
   @ApiQuery({ name: 'month', required: true })

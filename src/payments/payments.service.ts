@@ -88,8 +88,23 @@ export interface FinanceMonth {
   saldoCaja: number;  // acumulado, arrancando desde el saldo inicial (arrastre)
 }
 
+/**
+ * Dinero que ENTRÓ en caja en un mes, según la FECHA del pago/registro (no el
+ * mes al que corresponde la cuota). Incluye cuotas confirmadas + ingresos extra.
+ */
+export interface RecaudoMes {
+  month: string;      // abreviado (Ene, Feb...)
+  monthFull: string;  // completo (Enero...)
+  cuotas: number;     // suma de cuotas confirmadas cuya fecha cae en el mes
+  extra: number;      // suma de ingresos extra cuya fecha cae en el mes
+  total: number;      // cuotas + extra
+  count: number;      // nº de pagos de cuota con fecha en el mes
+}
+
 export interface FinanceSummary {
   monthlyData: FinanceMonth[];
+  /** Dinero realmente ingresado por mes (según fecha del pago), 12 meses del año. */
+  recaudoPorMes: RecaudoMes[];
   totals: {
     totalIncome: number;
     totalExpenses: number;
@@ -251,6 +266,49 @@ export class PaymentsService {
 
       return { month, status, color, icon, payment, count: userPayments.length, payments: userPayments };
     });
+  }
+
+  /**
+   * Estadística de pago de un propietario en un año: estado mes a mes (pagado o
+   * no, monto, estado), total pagado y cuántos meses aplicables ya pagó. Reutiliza
+   * getUserMonths (misma lógica que la pantalla de Pagos).
+   */
+  async getOwnerStats(username: string, year: number): Promise<{
+    username: string;
+    nombre: string;
+    year: number;
+    meses: { month: string; pagado: boolean; monto: number; estado: string }[];
+    totalPagado: number;
+    mesesPagados: number;
+    totalAplicable: number;
+  }> {
+    const [months, usuarios] = await Promise.all([
+      this.getUserMonths(username, year),
+      this.readCollection<Usuario>('usuarios'),
+    ]);
+    const u = usuarios.find((x) => x.usuario === username);
+
+    let totalPagado = 0;
+    let mesesPagados = 0;
+    let totalAplicable = 0;
+    const meses = months.map((m) => {
+      const pagado = m.status === 'Pagado';
+      // "No aplica" (antes del ingreso del propietario) no cuenta como aplicable.
+      if (m.status !== 'No aplica') totalAplicable++;
+      const monto = pagado && m.payment ? parseFloat(String(m.payment.valor)) || 0 : 0;
+      if (pagado) { mesesPagados++; totalPagado += monto; }
+      return { month: m.month, pagado, monto, estado: m.status };
+    });
+
+    return {
+      username,
+      nombre: u?.nombre || username,
+      year,
+      meses,
+      totalPagado,
+      mesesPagados,
+      totalAplicable,
+    };
   }
 
   /** Pagos de un propietario en el año (su propia vista). */
@@ -514,8 +572,35 @@ export class PaymentsService {
     const totalBalance = totalIncome - totalExpenses + totalAjuste;
     const saldoCaja = monthlyData.length ? monthlyData[monthlyData.length - 1].saldoCaja : saldoInicial;
 
+    // --- Recaudo por mes de INGRESO (según la fecha del pago, no el concepto) ---
+    // Cuotas confirmadas cuya FECHA cae en el año seleccionado (independiente del
+    // mes que paga el propietario) + ingresos extra por su fecha.
+    const cuotasDelAnioPorFecha = pagosConfirmados.filter(
+      (p) => this.extractYear(String(p.fecha || '')) === year,
+    );
+    const recaudoPorMes: RecaudoMes[] = MONTHS.map((monthFull, idx) => {
+      const cuotas = cuotasDelAnioPorFecha
+        .filter((p) => this.monthOfFecha(String(p.fecha || '')) === idx)
+        .reduce((s, p) => s + (parseFloat(String(p.valor)) || 0), 0);
+      const count = cuotasDelAnioPorFecha.filter(
+        (p) => this.monthOfFecha(String(p.fecha || '')) === idx,
+      ).length;
+      const extra = extraYear
+        .filter((r) => this.monthOfFecha(fechaReporte(r)) === idx)
+        .reduce((s, r) => s + montoReporte(r), 0);
+      return {
+        month: PaymentsService.MONTHS_SHORT[idx],
+        monthFull,
+        cuotas,
+        extra,
+        total: cuotas + extra,
+        count,
+      };
+    });
+
     return {
       monthlyData,
+      recaudoPorMes,
       totals: { totalIncome, totalExpenses, totalAjuste, totalBalance, saldoCaja },
       saldoInicial,
       totalUsers,
