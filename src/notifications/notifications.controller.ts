@@ -1,5 +1,5 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
-import { ApiOperation, ApiProperty, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+import { ApiOperation, ApiProperty, ApiPropertyOptional, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { NotificationsService } from './notifications.service';
 import { WhatsappService } from '../whatsapp/whatsapp.service';
 
@@ -93,12 +93,22 @@ export class NotificationsController {
     private readonly whatsapp: WhatsappService,
   ) {}
 
-  /** Estado de salud: si WhatsApp está conectado. */
-  @ApiOperation({ summary: 'Estado de salud (WhatsApp conectado)' })
+  /**
+   * Estado de salud: si WhatsApp está conectado. Si se pasa `conjunto`, reporta
+   * la sesión de ESE conjunto (o la por defecto como fallback); si no, la por
+   * defecto. Esto es clave: un conjunto puede tener su propia sesión vinculada
+   * aunque la sesión global no lo esté.
+   */
+  @ApiOperation({ summary: 'Estado de salud (WhatsApp conectado, por conjunto)' })
+  @ApiQuery({ name: 'conjunto', required: false })
   @Get('status')
-  status() {
+  status(@Query('conjunto') conjunto?: string) {
+    const ready = conjunto
+      ? this.whatsapp.isReady(conjunto) || this.whatsapp.isReady()
+      : this.whatsapp.isReady();
     return {
-      whatsappReady: this.whatsapp.isReady(),
+      whatsappReady: ready,
+      conjunto: conjunto || null,
       timestamp: new Date().toISOString(),
     };
   }
