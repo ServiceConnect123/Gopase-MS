@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
 import { PropertiesService } from '../properties/properties.service';
+import { ReportsService } from '../reports/reports.service';
 
 /**
  * Lecturas y cálculos de la pantalla de Pagos, movidos del frontend al backend.
@@ -49,12 +50,54 @@ export interface MonthStatus {
   color: string;
   icon: string;
   payment: Pago | null;
+  /** Nº de pagos registrados en ese mes (>1 indica duplicado). */
+  count: number;
+  /** Todos los pagos del mes (para auditar/eliminar duplicados). */
+  payments: Pago[];
 }
 
 export interface Debtor {
   name: string;
   phone: string;
   username: string;
+}
+
+/** Grupo de pagos repetidos (mismo usuario + mes + año). */
+export interface DuplicateGroup {
+  usuario: string;
+  nombre: string;
+  mes: string;
+  anio: string;
+  count: number;
+  /** Suma de los pagos "de más" (todos menos uno). */
+  montoExtra: number;
+  pagos: Pago[];
+}
+
+/** Fila mensual del resumen financiero (igual que kpi.tsx). */
+export interface FinanceMonth {
+  month: string;      // abreviado (Ene, Feb...)
+  monthFull: string;  // completo (Enero...)
+  income: number;     // cuotas confirmadas del mes + ingresos extra del mes
+  expenses: number;   // gastos del mes
+  ajuste: number;     // ajustes de cuadre del mes (+/-)
+  balance: number;    // income - expenses + ajuste
+  recaudoPercent: number;
+  saldoCaja: number;  // acumulado, arrancando desde el saldo inicial (arrastre)
+}
+
+export interface FinanceSummary {
+  monthlyData: FinanceMonth[];
+  totals: {
+    totalIncome: number;
+    totalExpenses: number;
+    totalAjuste: number;
+    totalBalance: number;
+    saldoCaja: number;
+  };
+  /** Saldo acumulado de años anteriores (arrastre). */
+  saldoInicial: number;
+  totalUsers: number;
 }
 
 @Injectable()
@@ -64,6 +107,7 @@ export class PaymentsService {
   constructor(
     private readonly firebase: FirebaseService,
     private readonly properties: PropertiesService,
+    private readonly reports: ReportsService,
   ) {}
 
   private parseFechaIngreso(raw: any): { year: number; monthIndex: number } | null {
@@ -191,7 +235,7 @@ export class PaymentsService {
       const payment = userPayments.find((p) => p.estado === 'Confirmado') || userPayments[0] || null;
 
       if (ingresoYear > 0 && (year < ingresoYear || (year === ingresoYear && idx < ingresoMonthIndex))) {
-        return { month, status: 'No aplica', color: '#757575', icon: 'remove-circle-outline', payment: null };
+        return { month, status: 'No aplica', color: '#757575', icon: 'remove-circle-outline', payment: null, count: 0, payments: [] };
       }
 
       if (userPayments.length > 0) {
@@ -203,7 +247,7 @@ export class PaymentsService {
         status = 'Disponible'; color = '#2196F3'; icon = 'add-circle-outline';
       }
 
-      return { month, status, color, icon, payment };
+      return { month, status, color, icon, payment, count: userPayments.length, payments: userPayments };
     });
   }
 
@@ -275,6 +319,203 @@ export class PaymentsService {
       return debtors.filter((d) => (d.phone || '').replace(/\D/g, '').length >= 10);
     }
     return debtors;
+  }
+
+  /**
+   * Detecta pagos repetidos: agrupa por (usuario + mes detectado en el concepto
+   * + año) y devuelve los grupos con más de un pago. Útil para auditar y limpiar
+   * duplicados (p. ej. doble registro accidental). year<=0 => todos los años.
+   */
+  async getDuplicatePayments(conjunto: string, year: number, isSuperAdmin = false): Promise<DuplicateGroup[]> {
+    const [pagosAll, usuarios] = await Promise.all([
+      this.readCollection<Pago>('pagos'),
+      this.readCollection<Usuario>('usuarios'),
+    ]);
+    let pagos = year > 0 ? this.filterPagosByYear(pagosAll, year) : pagosAll;
+    if (!isSuperAdmin && conjunto) {
+      const delConjunto = new Set(
+        usuarios.filter((u) => (u.conjunto || '') === conjunto).map((u) => u.usuario),
+      );
+      pagos = pagos.filter((p) => delConjunto.has(p.usuario));
+    }
+
+    const nombrePorUsuario = new Map(usuarios.map((u) => [u.usuario, u.nombre || u.usuario]));
+
+    // Agrupa por usuario + mes (del concepto) + año (del concepto).
+    const grupos = new Map<string, Pago[]>();
+    for (const p of pagos) {
+      const concepto = String(p.concepto || '').toLowerCase();
+      const anio = (concepto.match(/\b(20\d{2})\b/) || [])[1] || '?';
+      const mesIdx = MONTHS.findIndex((m) => concepto.includes(m.toLowerCase()));
+      const mes = mesIdx >= 0 ? MONTHS[mesIdx] : '(sin mes)';
+      const key = `${p.usuario}||${mes}||${anio}`;
+      const arr = grupos.get(key) || [];
+      arr.push(p);
+      grupos.set(key, arr);
+    }
+
+    const result: DuplicateGroup[] = [];
+    for (const [key, arr] of grupos) {
+      if (arr.length < 2) continue;
+      const [usuario, mes, anio] = key.split('||');
+      const valores = arr.map((x) => parseFloat(String(x.valor)) || 0);
+      const montoExtra = valores.reduce((s, v) => s + v, 0) - Math.max(...valores);
+      result.push({
+        usuario,
+        nombre: nombrePorUsuario.get(usuario) || usuario,
+        mes,
+        anio,
+        count: arr.length,
+        montoExtra,
+        pagos: arr,
+      });
+    }
+    // Mayor cantidad primero.
+    result.sort((a, b) => b.count - a.count);
+    return result;
+  }
+
+  /** Abreviaturas de meses, en el mismo orden que MONTHS. */
+  private static readonly MONTHS_SHORT = [
+    'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun',
+    'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic',
+  ];
+
+  /** Año embebido en un texto (concepto o fecha), o null. */
+  private extractYear(text: string): number | null {
+    const m = String(text || '').match(/\b(20\d{2})\b/);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  /** Mes (0-11) de una fecha YYYY-MM-DD o DD/MM/YYYY, o -1. */
+  private monthOfFecha(fecha: string): number {
+    const f = String(fecha || '');
+    if (f.includes('-')) {
+      const parts = f.split('T')[0].split('-');
+      if (parts.length >= 2) return parseInt(parts[1], 10) - 1;
+    } else if (f.includes('/')) {
+      const parts = f.split('/');
+      if (parts.length >= 2) return parseInt(parts[1], 10) - 1;
+    }
+    return -1;
+  }
+
+  /**
+   * Resumen financiero del conjunto para un año: desglose mensual + totales +
+   * saldo de caja CON ARRASTRE del saldo acumulado de años anteriores.
+   * Replica exactamente los cálculos que hacía kpi.tsx en el cliente.
+   */
+  async getFinanceSummary(conjunto: string, year: number, isSuperAdmin = false): Promise<FinanceSummary> {
+    const [pagosAll, usuarios] = await Promise.all([
+      this.readCollection<Pago>('pagos'),
+      this.readCollection<Usuario>('usuarios'),
+    ]);
+
+    // Pagos del conjunto (todos los años), solo Confirmado.
+    let pagosConjunto = pagosAll;
+    if (!isSuperAdmin && conjunto) {
+      const delConjunto = new Set(
+        usuarios.filter((u) => (u.conjunto || '') === conjunto).map((u) => u.usuario),
+      );
+      pagosConjunto = pagosAll.filter((p) => delConjunto.has(p.usuario));
+    }
+    const pagosConfirmados = pagosConjunto.filter(
+      (p) => String(p.estado || '').toLowerCase() === 'confirmado',
+    );
+
+    // Reportes del conjunto (gastos/ingresos extra/ajustes). Monto en dato_8.
+    const reportes = await this.reports.list({ conjunto });
+    const gastos = reportes.filter((r) => (r.tipo || r.dato_7) === 'Gasto');
+    const extra = reportes.filter((r) => (r.tipo || r.dato_7) === 'Ingreso Extra');
+    const ajustes = reportes.filter((r) => (r.tipo || r.dato_7) === 'Ajuste Caja');
+    const montoReporte = (r: any) => parseFloat(String(r.ubicacion ?? r.dato_8 ?? 0)) || 0;
+    const fechaReporte = (r: any) => String(r.fecha ?? r.dato_3 ?? '');
+
+    // totalUsers = propietarios (criterio del cliente), del conjunto si aplica.
+    const totalUsers = usuarios.filter((u) => {
+      if ((u.rol || '') !== 'propietario') return false;
+      if (!isSuperAdmin && conjunto) return (u.conjunto || '') === conjunto;
+      return true;
+    }).length;
+
+    // --- Saldo inicial (arrastre de años anteriores a `year`) ---
+    const pagosPrev = pagosConfirmados.filter((p) => {
+      const y = this.extractYear(p.concepto || '');
+      return y != null && y < year;
+    });
+    const sumPrevPagos = pagosPrev.reduce((s, p) => s + (parseFloat(String(p.valor)) || 0), 0);
+    const sumPrev = (arr: any[]) =>
+      arr
+        .filter((r) => {
+          const y = this.extractYear(fechaReporte(r));
+          return y != null && y < year;
+        })
+        .reduce((s, r) => s + montoReporte(r), 0);
+    const saldoInicial = sumPrevPagos + sumPrev(extra) + sumPrev(ajustes) - sumPrev(gastos);
+
+    // --- Pagos/reportes del año seleccionado ---
+    const pagosYear = pagosConfirmados.filter((p) => (p.concepto || '').includes(String(year)));
+    const inYear = (arr: any[]) =>
+      arr.filter((r) => fechaReporte(r).includes(String(year)));
+    const gastosYear = inYear(gastos);
+    const extraYear = inYear(extra);
+    const ajustesYear = inYear(ajustes);
+
+    // --- Desglose mensual ---
+    const monthlyData: FinanceMonth[] = MONTHS.map((monthFull, idx) => {
+      const monthLower = monthFull.toLowerCase();
+
+      const monthPayments = pagosYear.filter((p) =>
+        (p.concepto || '').toLowerCase().includes(monthLower),
+      );
+      const monthIncomeCuotas = monthPayments.reduce((s, p) => s + (parseFloat(String(p.valor)) || 0), 0);
+      const uniquePayers = new Set(monthPayments.map((p) => p.usuario || '')).size;
+      const recaudoPercent = totalUsers > 0 ? Math.round((uniquePayers / totalUsers) * 100) : 0;
+
+      const monthExtra = extraYear
+        .filter((r) => this.monthOfFecha(fechaReporte(r)) === idx)
+        .reduce((s, r) => s + montoReporte(r), 0);
+      const monthExpenses = gastosYear
+        .filter((r) => this.monthOfFecha(fechaReporte(r)) === idx)
+        .reduce((s, r) => s + montoReporte(r), 0);
+      const monthAjuste = ajustesYear
+        .filter((r) => this.monthOfFecha(fechaReporte(r)) === idx)
+        .reduce((s, r) => s + montoReporte(r), 0);
+
+      const income = monthIncomeCuotas + monthExtra;
+      const balance = income - monthExpenses + monthAjuste;
+
+      return {
+        month: PaymentsService.MONTHS_SHORT[idx],
+        monthFull,
+        income,
+        expenses: monthExpenses,
+        ajuste: monthAjuste,
+        balance,
+        recaudoPercent,
+        saldoCaja: 0, // se calcula abajo con arrastre
+      };
+    });
+
+    // Saldo de caja acumulado, arrancando desde el saldo inicial (arrastre).
+    let saldoAcumulado = saldoInicial;
+    for (const m of monthlyData) {
+      saldoAcumulado += m.balance;
+      m.saldoCaja = saldoAcumulado;
+    }
+
+    const totalIncome = monthlyData.reduce((s, m) => s + m.income, 0);
+    const totalExpenses = monthlyData.reduce((s, m) => s + m.expenses, 0);
+    const totalAjuste = monthlyData.reduce((s, m) => s + m.ajuste, 0);
+    const totalBalance = totalIncome - totalExpenses + totalAjuste;
+    const saldoCaja = monthlyData.length ? monthlyData[monthlyData.length - 1].saldoCaja : saldoInicial;
+
+    return {
+      monthlyData,
+      totals: { totalIncome, totalExpenses, totalAjuste, totalBalance, saldoCaja },
+      saldoInicial,
+      totalUsers,
+    };
   }
 
   // ==================== ESCRITURAS (Fase 2, a RTDB) ====================

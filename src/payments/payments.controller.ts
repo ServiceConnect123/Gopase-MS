@@ -92,6 +92,45 @@ export class PaymentsController {
     return { success: true, data };
   }
 
+  @ApiOperation({
+    summary: 'Resumen financiero del año (desglose mensual + totales + saldo de caja con arrastre)',
+    description: 'Calcula en backend lo que kpi.tsx hacía en cliente. El saldo de caja arrastra el saldo acumulado de años anteriores.',
+  })
+  @ApiQuery({ name: 'conjunto', required: false })
+  @ApiQuery({ name: 'year', required: false, type: Number })
+  @ApiQuery({ name: 'superAdmin', required: false, type: Boolean })
+  @Get('finance-summary')
+  async financeSummary(
+    @Query('conjunto') conjunto?: string,
+    @Query('year') year?: string,
+    @Query('superAdmin') superAdmin?: string,
+  ) {
+    const data = await this.payments.getFinanceSummary(
+      conjunto || '',
+      year ? parseInt(year, 10) : new Date().getFullYear(),
+      superAdmin === 'true',
+    );
+    return { success: true, ...data };
+  }
+
+  @ApiOperation({ summary: 'Pagos duplicados por (usuario+mes+año) para auditar' })
+  @ApiQuery({ name: 'conjunto', required: false })
+  @ApiQuery({ name: 'year', required: false, type: Number, description: 'year<=0 = todos los años' })
+  @ApiQuery({ name: 'superAdmin', required: false, type: Boolean })
+  @Get('duplicates')
+  async duplicates(
+    @Query('conjunto') conjunto?: string,
+    @Query('year') year?: string,
+    @Query('superAdmin') superAdmin?: string,
+  ) {
+    const data = await this.payments.getDuplicatePayments(
+      conjunto || '',
+      year !== undefined ? parseInt(year, 10) : new Date().getFullYear(),
+      superAdmin === 'true',
+    );
+    return { success: true, data };
+  }
+
   // ==================== ESCRITURAS (Fase 2) ====================
 
   @ApiOperation({ summary: 'Crear pago(s) de administración (uno por mes)' })
