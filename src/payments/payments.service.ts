@@ -35,6 +35,7 @@ interface Usuario {
   rol: string;
   phone: string;
   conjunto: string;
+  parcela?: string;
   fechaIngreso?: string;
 }
 
@@ -308,6 +309,121 @@ export class PaymentsService {
       totalPagado,
       mesesPagados,
       totalAplicable,
+    };
+  }
+
+  /**
+   * Reporte "al día" de TODOS los propietarios para los 3 meses relevantes:
+   * mes actual (M), mes anterior (M-1) y dos meses atrás (M-2). Maneja el cruce
+   * de año (si M-1 o M-2 caen en diciembre/noviembre del año anterior).
+   *
+   * Regla de "al día" (definida con el usuario):
+   *   - Debe tener pagados M-2 y M-1 (meses ya vencidos).
+   *   - El mes actual (M) NO es obligatorio todavía (está en curso).
+   *   - GRACIA: si M-1 no está pagado pero estamos dentro de los primeros 10
+   *     días del mes actual, se considera al día (plazo para pagar el mes
+   *     anterior). Pasados los 10 días, no tener M-1 pagado = en mora.
+   *   - Meses anteriores a la fecha de ingreso del propietario = "N/A" (no
+   *     exigibles) y no cuentan para la mora.
+   */
+  async getAlDiaReport(conjunto: string, isSuperAdmin = false): Promise<{
+    conjunto: string;
+    generadoEl: string;
+    diaDelMes: number;
+    graciaActiva: boolean;
+    meses: { idx: number; anio: number; label: string }[];
+    propietarios: {
+      nombre: string;
+      parcela: string;
+      usuario: string;
+      m2: string;
+      m1: string;
+      actual: string;
+      alDia: boolean;
+    }[];
+    totalAlDia: number;
+    totalMora: number;
+  }> {
+    const [pagosAll, usuarios] = await Promise.all([
+      this.readCollection<Pago>('pagos'),
+      this.readCollection<Usuario>('usuarios'),
+    ]);
+
+    const now = new Date();
+    const diaDelMes = now.getDate();
+    const graciaActiva = diaDelMes <= 10;
+
+    // Los 3 meses relevantes (del más antiguo al actual), con su año propio.
+    const relMonth = (offset: number) => {
+      const d = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+      return { idx: d.getMonth(), anio: d.getFullYear(), label: `${MONTHS[d.getMonth()]} ${d.getFullYear()}` };
+    };
+    const mesM2 = relMonth(2);
+    const mesM1 = relMonth(1);
+    const mesM = relMonth(0);
+    const meses = [mesM2, mesM1, mesM];
+
+    // Pagos cacheados por año (isPaidMonth filtra sobre pagos ya de ese año).
+    const pagosPorAnio = new Map<number, Pago[]>();
+    const getPagosAnio = (anio: number) => {
+      if (!pagosPorAnio.has(anio)) pagosPorAnio.set(anio, this.filterPagosByYear(pagosAll, anio));
+      return pagosPorAnio.get(anio)!;
+    };
+
+    let users = usuarios.filter((u) => u.rol !== 'superAdmin' && u.rol !== 'vigilante');
+    if (!isSuperAdmin && conjunto) {
+      users = users.filter((u) => (u.conjunto || '') === conjunto);
+    }
+
+    // Estado de un mes para un usuario: 'Pagado' | 'Pendiente' | 'N/A'.
+    const estadoMes = (u: Usuario, mes: { idx: number; anio: number }): string => {
+      const ingreso = this.parseFechaIngreso(u.fechaIngreso);
+      if (ingreso) {
+        const antesDeIngreso =
+          mes.anio < ingreso.year || (mes.anio === ingreso.year && mes.idx < ingreso.monthIndex);
+        if (antesDeIngreso) return 'N/A';
+      }
+      return this.isPaidMonth(getPagosAnio(mes.anio), u.usuario, mes.idx, mes.anio)
+        ? 'Pagado'
+        : 'Pendiente';
+    };
+
+    const propietarios = users.map((u) => {
+      const m2 = estadoMes(u, mesM2);
+      const m1 = estadoMes(u, mesM1);
+      const actual = estadoMes(u, mesM);
+
+      // Al día: M-2 cubierto (Pagado o N/A) y M-1 cubierto (Pagado o N/A), con
+      // gracia de 10 días para M-1 Pendiente.
+      const m2Ok = m2 === 'Pagado' || m2 === 'N/A';
+      const m1Ok = m1 === 'Pagado' || m1 === 'N/A' || (m1 === 'Pendiente' && graciaActiva);
+      const alDia = m2Ok && m1Ok;
+
+      return {
+        nombre: u.nombre || u.usuario,
+        parcela: u.parcela || '',
+        usuario: u.usuario,
+        m2,
+        m1,
+        actual,
+        alDia,
+      };
+    });
+
+    // Orden: primero en mora, luego al día; dentro, por nombre.
+    propietarios.sort((a, b) =>
+      a.alDia === b.alDia ? a.nombre.localeCompare(b.nombre) : a.alDia ? 1 : -1,
+    );
+
+    return {
+      conjunto: conjunto || (isSuperAdmin ? 'Todos los conjuntos' : ''),
+      generadoEl: now.toISOString().split('T')[0],
+      diaDelMes,
+      graciaActiva,
+      meses,
+      propietarios,
+      totalAlDia: propietarios.filter((p) => p.alDia).length,
+      totalMora: propietarios.filter((p) => !p.alDia).length,
     };
   }
 

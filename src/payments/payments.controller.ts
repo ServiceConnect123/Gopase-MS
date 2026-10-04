@@ -151,6 +151,20 @@ export class PaymentsController {
     return { success: true, data };
   }
 
+  @ApiOperation({
+    summary: 'Reporte "al día" de todos los propietarios (meses M-2, M-1 y actual + regla de gracia 10 días)',
+  })
+  @ApiQuery({ name: 'conjunto', required: false })
+  @ApiQuery({ name: 'superAdmin', required: false, type: Boolean })
+  @Get('al-dia-report')
+  async alDiaReport(
+    @Query('conjunto') conjunto?: string,
+    @Query('superAdmin') superAdmin?: string,
+  ) {
+    const data = await this.payments.getAlDiaReport(conjunto || '', superAdmin === 'true');
+    return { success: true, data };
+  }
+
   @ApiOperation({ summary: 'Deudores de un mes (con teléfono) para recordatorios' })
   @ApiQuery({ name: 'conjunto', required: false })
   @ApiQuery({ name: 'month', required: true })
