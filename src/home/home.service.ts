@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { SheetsService } from '../sheets/sheets.service';
+import { PaymentsService } from '../payments/payments.service';
 
 /**
  * Lógica del dashboard de la pantalla Home, movida del frontend al backend.
@@ -50,7 +51,10 @@ const MONTHS = [
 export class HomeService {
   private readonly logger = new Logger(HomeService.name);
 
-  constructor(private readonly sheets: SheetsService) {}
+  constructor(
+    private readonly sheets: SheetsService,
+    private readonly payments: PaymentsService,
+  ) {}
 
   /** Parsea la fecha de ingreso (varios formatos) -> { year, monthIndex } o null. */
   private parseFechaIngreso(raw: any): { year: number; monthIndex: number } | null {
@@ -227,25 +231,36 @@ export class HomeService {
       };
     }
 
-    // Vista admin: estado de pago DEL MES SELECCIONADO (opción A).
-    // "Al día" = tiene un pago Confirmado de ese mes+año; si no, "Debe".
+    // Vista admin: estado "al día" EXACTO, calculado por PaymentsService contra
+    // Firebase RTDB (mirror/*), con la MISMA regla que el reporte PDF: pagó los
+    // dos meses anteriores (M-2 y M-1), con 10 días de gracia en el mes actual
+    // para M-1; meses anteriores al ingreso = N/A (no cuentan). Así la lista de
+    // Home y el reporte coinciden siempre y reflejan los pagos reales.
+    const isSuperAdmin = role === 'superAdmin';
+    const reporte = await this.payments.getAlDiaReport(complex || '', isSuperAdmin);
+
+    // Mapa username(normalizado) -> alDia del reporte.
+    const normU = (s: string) => String(s || '').trim().toLowerCase();
+    const alDiaByUser = new Map<string, boolean>();
+    for (const p of reporte.propietarios) alDiaByUser.set(normU(p.usuario), p.alDia);
+
+    // Monto del mes seleccionado (solo informativo para la tarjeta; no define el estado).
+    const montoDelMes = (usuario: string) =>
+      pagos
+        .filter(
+          (p) =>
+            p.usuario === usuario &&
+            p.concepto &&
+            p.concepto.toLowerCase().includes(month.toLowerCase()) &&
+            p.concepto.includes(String(year)) &&
+            (p.estado || '').toLowerCase() === 'confirmado',
+        )
+        .reduce((sum: number, p: any) => sum + (parseFloat(p.valor) || 0), 0);
+
     const usersWithStatus: DashboardUser[] = filteredUsers.map((u) => {
-      const userMonthPayments = pagos.filter(
-        (p) =>
-          p.usuario === u.username &&
-          p.concepto &&
-          p.concepto.toLowerCase().includes(month.toLowerCase()) &&
-          p.concepto.includes(String(year)),
-      );
-      const pagoConfirmado = userMonthPayments.some(
-        (p) => (p.estado || '').toLowerCase() === 'confirmado',
-      );
-      const paymentStatus: 'Al día' | 'Pendiente' = pagoConfirmado ? 'Al día' : 'Pendiente';
-      const paymentAmount = userMonthPayments.reduce(
-        (sum: number, p: any) => sum + (parseFloat(p.valor) || 0),
-        0,
-      );
-      return { ...u, paymentStatus, paymentAmount };
+      const alDia = alDiaByUser.get(normU(u.username)) ?? false;
+      const paymentStatus: 'Al día' | 'Pendiente' = alDia ? 'Al día' : 'Pendiente';
+      return { ...u, paymentStatus, paymentAmount: montoDelMes(u.username) };
     });
 
     usersWithStatus.sort((a, b) => {
