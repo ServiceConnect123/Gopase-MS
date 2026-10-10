@@ -1,7 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { FirebaseService } from '../firebase/firebase.service';
 import { recoverPassword } from './password.util';
+import { SessionTracker } from '../activity-audit/core/session-tracker';
+import { SESSION_TRACKER } from '../activity-audit/integrations/nest/activity-audit.tokens';
 
 /**
  * Login por backend contra Firebase Auth (estrategia A1).
@@ -42,6 +44,9 @@ export class AuthLoginService {
   constructor(
     private readonly firebase: FirebaseService,
     private readonly config: ConfigService,
+    // Opcional: si el módulo de auditoría no estuviera registrado, el login
+    // sigue funcionando igual (sin métricas de sesión).
+    @Optional() @Inject(SESSION_TRACKER) private readonly sessionTracker?: SessionTracker,
   ) {
     this.emailDomain = this.config.get<string>('AUTH_EMAIL_DOMAIN', 'gopase.local');
     this.webApiKey = this.config.get<string>('FIREBASE_WEB_API_KEY', '');
@@ -122,6 +127,10 @@ export class AuthLoginService {
       this.logger.error(`Error validando login de ${user}: ${err?.message}`);
       return { success: false, message: 'Error de conexión con el servicio de autenticación.' };
     }
+
+    // Métrica de sesión: login exitoso. Fire-and-forget: NO bloquea ni rompe
+    // el login aunque el proyecto de auditoría falle o no esté configurado.
+    this.sessionTracker?.trackLogin(uid);
 
     return this.buildUserResponse(uid, email);
   }
