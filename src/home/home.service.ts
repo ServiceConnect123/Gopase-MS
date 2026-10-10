@@ -94,46 +94,48 @@ export class HomeService {
     };
   }
 
-  /** Estado de pago por mes de un propietario (para la vista owner). */
-  private buildOwnerMonths(username: string, fechaIngreso: string | undefined, pagos: any[], year: number): OwnerMonth[] {
-    const isCurrentYear = year === new Date().getFullYear();
-    const todayMonthIndex = new Date().getMonth();
-    const ingreso = this.parseFechaIngreso(fechaIngreso);
-    const ingresoYear = ingreso?.year ?? 0;
-    const ingresoMonthIndex = ingreso?.monthIndex ?? -1;
-    const myPayments = pagos.filter((p) => p.usuario === username);
+  /**
+   * Estado de pago por mes de un propietario (para la vista owner).
+   *
+   * Delega en PaymentsService.getUserMonths, que lee de Firebase RTDB
+   * (mirror/pagos) — la MISMA fuente y lógica que la pantalla de Pagos. Así el
+   * Home del propietario y Pagos siempre coinciden (antes Home leía de Google
+   * Sheets, que podía estar desfasado respecto a RTDB y mostraba meses como
+   * "pendientes" aunque ya estuvieran pagados en Pagos).
+   *
+   * Solo reetiqueta los estados al vocabulario que el frontend del Home espera
+   * (p. ej. 'Pendiente' -> 'Pendiente de Pago', 'Por confirmar' -> 'En Revisión').
+   */
+  private async buildOwnerMonths(username: string, year: number): Promise<OwnerMonth[]> {
+    const monthStatuses = await this.payments.getUserMonths(username, year);
 
-    return MONTHS.map((month, idx) => {
-      const payment = myPayments.find(
-        (p) =>
-          p.concepto &&
-          p.concepto.toLowerCase().includes(month.toLowerCase()) &&
-          p.concepto.includes(String(year)),
-      );
+    return monthStatuses.map((m) => {
+      // Mapea los estados de Pagos al vocabulario/estilo del Home.
+      let status = m.status;
+      let color = m.color;
+      let icon = m.icon;
 
-      let status = 'Pendiente de Pago';
-      let color = '#F44336';
-      let icon = 'alert-circle';
-
-      if (payment) {
-        if (payment.estado === 'Confirmado') {
+      switch (m.status) {
+        case 'Pagado':
           status = 'Pagado'; color = '#4CAF50'; icon = 'checkmark-circle';
-        } else if (payment.estado === 'Pendiente') {
+          break;
+        case 'Por confirmar':
           status = 'En Revisión'; color = '#FF9800'; icon = 'time';
-        }
-      } else {
-        const antesDeIngreso =
-          ingresoYear > 0 && (year < ingresoYear || (year === ingresoYear && idx < ingresoMonthIndex));
-        const noVenceAun = isCurrentYear && idx >= todayMonthIndex;
-        const anioFuturo = year > new Date().getFullYear();
-        if (antesDeIngreso) {
+          break;
+        case 'Pendiente':
+          status = 'Pendiente de Pago'; color = '#F44336'; icon = 'alert-circle';
+          break;
+        case 'No aplica':
           status = 'No aplica'; color = '#757575'; icon = 'remove-circle-outline';
-        } else if (noVenceAun || anioFuturo) {
+          break;
+        case 'Disponible':
           status = 'Disponible'; color = '#2196F3'; icon = 'add-circle-outline';
-        }
+          break;
       }
 
-      return { month, status, color, icon, payment: payment || null };
+      // El frontend lee payment.estado como 'Confirmado'/'Pendiente'; los pagos
+      // de RTDB ya traen ese campo, así que se pasan tal cual.
+      return { month: m.month, status, color, icon, payment: m.payment || null };
     });
   }
 
@@ -220,8 +222,7 @@ export class HomeService {
 
     // Vista propietario: estado por mes.
     if (role === 'propietario') {
-      const me = filteredUsers[0];
-      const ownerMonths = this.buildOwnerMonths(username, me?.fechaIngreso, pagos, year);
+      const ownerMonths = await this.buildOwnerMonths(username, year);
       return {
         role,
         vigilanteEnTurno,

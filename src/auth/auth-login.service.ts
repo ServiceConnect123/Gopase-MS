@@ -3,7 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { FirebaseService } from '../firebase/firebase.service';
 import { recoverPassword } from './password.util';
 import { SessionTracker } from '../activity-audit/core/session-tracker';
-import { SESSION_TRACKER } from '../activity-audit/integrations/nest/activity-audit.tokens';
+import { ActivityLogger } from '../activity-audit/core/activity-logger';
+import { SESSION_TRACKER, ACTIVITY_LOGGER } from '../activity-audit/integrations/nest/activity-audit.tokens';
 
 /**
  * Login por backend contra Firebase Auth (estrategia A1).
@@ -45,8 +46,9 @@ export class AuthLoginService {
     private readonly firebase: FirebaseService,
     private readonly config: ConfigService,
     // Opcional: si el módulo de auditoría no estuviera registrado, el login
-    // sigue funcionando igual (sin métricas de sesión).
+    // sigue funcionando igual (sin métricas de sesión ni evento de actividad).
     @Optional() @Inject(SESSION_TRACKER) private readonly sessionTracker?: SessionTracker,
+    @Optional() @Inject(ACTIVITY_LOGGER) private readonly activity?: ActivityLogger,
   ) {
     this.emailDomain = this.config.get<string>('AUTH_EMAIL_DOMAIN', 'gopase.local');
     this.webApiKey = this.config.get<string>('FIREBASE_WEB_API_KEY', '');
@@ -179,6 +181,14 @@ export class AuthLoginService {
       // Métrica de sesión: login exitoso, con el conjunto ya resuelto.
       // Fire-and-forget: NO bloquea ni rompe el login aunque la auditoría falle.
       this.sessionTracker?.trackLogin(uid, conjuntoNombre || undefined);
+      // Evento de actividad "Inició sesión" para que el login también aparezca
+      // en la pestaña Actividad del monitoreo (no solo en el conteo de Sesiones).
+      this.activity?.log({
+        vista: 'Inició sesión',
+        usuario: uid,
+        conjunto: conjuntoNombre || undefined,
+        detalle: { accion: 'Sesión', recurso: 'Inicio de sesión', rol: claims.rol || '' },
+      });
       return {
         success: true,
         user: {
@@ -196,6 +206,11 @@ export class AuthLoginService {
       this.logger.error(`Login OK pero no se pudo leer el usuario ${uid}: ${err?.message}`);
       // La contraseña era válida: registra el login igual (sin conjunto).
       this.sessionTracker?.trackLogin(uid);
+      this.activity?.log({
+        vista: 'Inició sesión',
+        usuario: uid,
+        detalle: { accion: 'Sesión', recurso: 'Inicio de sesión' },
+      });
       // devolvemos lo mínimo aunque falle la lectura de claims.
       return {
         success: true,
