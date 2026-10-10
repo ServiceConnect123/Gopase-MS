@@ -52,12 +52,16 @@ export class RtdbActivityStore implements ActivityStore {
     const results: ActivityLog[] = [];
 
     for (const day of days) {
-      // Trae a lo sumo `limit` por día ordenados por timestamp (índice recomendado).
-      const snap = await db
-        .ref(`${this.basePath}/${day}`)
-        .orderByChild('timestamp')
-        .limitToLast(limit)
-        .get();
+      const dayRef = db.ref(`${this.basePath}/${day}`);
+      let snap;
+      try {
+        // Ruta óptima: ordena/pagina por timestamp (requiere .indexOn en RTDB).
+        snap = await dayRef.orderByChild('timestamp').limitToLast(limit).get();
+      } catch {
+        // Sin índice configurado, orderByChild lanza. Fallback tolerante: lee el
+        // nodo del día tal cual y se ordena/recorta en memoria (no rompe el 500).
+        snap = await dayRef.get();
+      }
       if (!snap.exists()) continue;
 
       const val = snap.val() as Record<string, RawLog>;
