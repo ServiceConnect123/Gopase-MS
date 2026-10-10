@@ -37,22 +37,31 @@ export class AuditInterceptor implements NestInterceptor {
     if (ctx.getType() !== 'http') return next.handle();
 
     const req = ctx.switchToHttp().getRequest();
-    const start = Date.now();
+    const method = String(req?.method || 'GET').toUpperCase();
+    const path = String(req?.route?.path ?? req?.originalUrl ?? req?.url ?? '');
 
+    // Solo se auditan ESCRITURAS significativas (crear/editar/eliminar). Las
+    // lecturas (GET) no se registran para no inundar el log. Tampoco se audita
+    // el propio módulo de auditoría (evita auto-registro en bucle).
+    const isWrite = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
+    if (!isWrite || path.startsWith('/audit')) return next.handle();
+
+    const start = Date.now();
     return next.handle().pipe(
       tap({
-        next: () => this.emit(req, start, 200),
-        error: (e) => this.emit(req, start, e?.status ?? 500),
+        next: () => this.emit(req, method, path, start, 200),
+        error: (e) => this.emit(req, method, path, start, e?.status ?? 500),
       }),
     );
   }
 
-  private emit(req: any, start: number, statusCode: number): void {
+  private emit(req: any, method: string, path: string, start: number, statusCode: number): void {
     try {
-      const vista = `${req?.method ?? 'GET'} ${req?.route?.path ?? req?.originalUrl ?? req?.url ?? ''}`;
+      const { accion, recurso } = describe(method, path);
+      // Vista legible para el monitoreo, p. ej. "Eliminó Pago" / "Creó Propietario".
+      const vista = `${accion} ${recurso}`;
       const usuario =
         req?.user?.uid || req?.user?.username || req?.body?.usuario || req?.body?.username || 'anonimo';
-      // Conjunto: del usuario autenticado o del cuerpo/query de la petición.
       const conjunto =
         req?.user?.conjunto || req?.body?.conjunto || req?.query?.conjunto || undefined;
 
@@ -61,8 +70,12 @@ export class AuditInterceptor implements NestInterceptor {
         usuario: String(usuario),
         conjunto: conjunto ? String(conjunto) : undefined,
         detalle: {
+          accion,
+          recurso,
+          metodo: method,
+          endpoint: path,
+          id: req?.params?.id ?? req?.params?.usuario ?? undefined,
           params: req?.params ?? {},
-          query: req?.query ?? {},
           body: redact(req?.body),
         },
         evidenciaUrl: req?.body?.evidenciaUrl,
@@ -77,6 +90,64 @@ export class AuditInterceptor implements NestInterceptor {
       /* el interceptor nunca debe romper el request */
     }
   }
+}
+
+/** Verbo de acción legible según el método HTTP. */
+function accionDeMetodo(method: string): string {
+  switch (method) {
+    case 'POST': return 'Creó';
+    case 'PUT':
+    case 'PATCH': return 'Editó';
+    case 'DELETE': return 'Eliminó';
+    default: return 'Acción';
+  }
+}
+
+/** Nombre de recurso legible a partir del primer segmento de la ruta. */
+const RESOURCE_LABELS: Record<string, string> = {
+  payments: 'Pago',
+  users: 'Usuario',
+  properties: 'Conjunto',
+  zones: 'Zona común',
+  reservations: 'Reserva',
+  roles: 'Rol',
+  reports: 'Reporte',
+  events: 'Evento',
+  agreements: 'Acuerdo',
+  guests: 'Invitado',
+  profile: 'Perfil',
+  drive: 'Archivo',
+  notifications: 'Notificación',
+  auth: 'Autenticación',
+};
+
+function recursoDeRuta(path: string): string {
+  const seg = path.split('/').filter(Boolean)[0] || '';
+  return RESOURCE_LABELS[seg] || (seg ? seg.charAt(0).toUpperCase() + seg.slice(1) : 'Recurso');
+}
+
+/**
+ * Sub-rutas POST que NO son "crear un registro" sino acciones/consultas con
+ * una etiqueta propia más clara. La clave es el último segmento de la ruta.
+ */
+const ACTION_OVERRIDES: Record<string, { accion: string; recurso: string }> = {
+  import: { accion: 'Importó', recurso: 'por carga masiva' },
+  review: { accion: 'Revisó', recurso: 'Pago' },
+  'duplicates/validate': { accion: 'Validó', recurso: 'Pago duplicado' },
+  preference: { accion: 'Generó', recurso: 'link de pago' },
+  'analyze-receipt': { accion: 'Analizó', recurso: 'comprobante' },
+  'finance-chat': { accion: 'Consultó', recurso: 'IA financiera' },
+};
+
+function describe(method: string, path: string): { accion: string; recurso: string } {
+  const segs = path.split('/').filter(Boolean);
+  // Detecta sub-rutas de acción (p. ej. payments/review, payments/import).
+  const sub1 = segs.slice(1).join('/'); // todo tras el recurso
+  const subLast = segs[segs.length - 1] || '';
+  const override = ACTION_OVERRIDES[sub1] || ACTION_OVERRIDES[subLast];
+  if (method === 'POST' && override) return override;
+
+  return { accion: accionDeMetodo(method), recurso: recursoDeRuta(path) };
 }
 
 /** Enmascara credenciales/tokens en el body antes de auditarlo. */
