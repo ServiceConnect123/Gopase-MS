@@ -69,7 +69,25 @@ export function resolveAuditApp(cfg: AuditFirebaseCredentials): App {
   return initializeApp(options, AUDIT_APP_NAME);
 }
 
-/** Database RTDB del proyecto de auditoría. */
+/** Database RTDB del proyecto de auditoría (de la App nombrada aislada). */
 export function auditDatabase(app: App): Database {
+  // Pasar la App explícita: getDatabase(app) usa SU databaseURL, no la App por
+  // defecto (evita "The default Firebase app does not exist").
   return getDatabase(app);
+}
+
+/**
+ * Devuelve una función que resuelve la `Database` de auditoría de forma
+ * PEREZOSA y memoizada: la App Firebase se inicializa en el PRIMER uso real
+ * (primera escritura), no durante el bootstrap de Nest. Si la inicialización
+ * falla, lanza al invocarse; el llamador (fail-safe) absorbe el error.
+ */
+export function createLazyAuditDatabase(cfg: AuditFirebaseCredentials): () => Database {
+  let cached: Database | null = null;
+  return () => {
+    if (cached) return cached;
+    const app = resolveAuditApp(cfg);
+    cached = getDatabase(app);
+    return cached;
+  };
 }

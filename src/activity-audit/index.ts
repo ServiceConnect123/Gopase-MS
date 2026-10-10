@@ -26,6 +26,7 @@ export { fireAndForget, runSafe } from './core/fail-safe';
 export {
   resolveAuditApp,
   auditDatabase,
+  createLazyAuditDatabase,
   AUDIT_APP_NAME,
   type AuditFirebaseCredentials,
 } from './adapters/rtdb/audit-firebase.provider';

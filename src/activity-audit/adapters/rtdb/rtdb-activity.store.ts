@@ -9,18 +9,22 @@ import type { ActivityLog } from '../../core/types';
 /**
  * Persiste logs de actividad en Realtime Database bajo una ruta dedicada.
  * Estructura: /{basePath}/{YYYY-MM-DD}/{pushId} = { ...log }.
- * El particionado por día mantiene nodos pequeños y facilita el borrado por
- * retención y las consultas por fecha.
+ *
+ * La `Database` se resuelve de forma PEREZOSA (vía `getDb`), en la primera
+ * escritura, no al construir el módulo. Así se evita inicializar Firebase
+ * durante el bootstrap de Nest (orden de arranque) y cualquier fallo cae dentro
+ * del wrapper fail-safe, nunca en el arranque de la app.
  */
 export class RtdbActivityStore implements ActivityStore {
   constructor(
-    private readonly db: Database,
+    private readonly getDb: () => Database,
     private readonly basePath = 'activity_logs',
   ) {}
 
   async append(log: ActivityLog): Promise<void> {
+    const db = this.getDb();
     const day = log.timestamp.toISOString().slice(0, 10); // YYYY-MM-DD
-    const ref = this.db.ref(`${this.basePath}/${day}`).push();
+    const ref = db.ref(`${this.basePath}/${day}`).push();
     await ref.set({
       vista: log.vista,
       usuario: log.usuario,

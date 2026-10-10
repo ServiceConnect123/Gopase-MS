@@ -21,13 +21,13 @@ interface RawSummary {
  */
 export class RtdbSessionStore implements SessionStore {
   constructor(
-    private readonly db: Database,
+    private readonly getDb: () => Database,
     private readonly basePath = 'session_summaries',
   ) {}
 
   async recordLogin(usuario: string, at: Date): Promise<void> {
     const atMs = at.getTime();
-    const ref = this.db.ref(`${this.basePath}/${safeKey(usuario)}`);
+    const ref = this.getDb().ref(`${this.basePath}/${safeKey(usuario)}`);
     await ref.transaction((current: RawSummary | null) => {
       if (!current) {
         return {
@@ -49,7 +49,7 @@ export class RtdbSessionStore implements SessionStore {
   }
 
   async get(usuario: string): Promise<SessionSummary | null> {
-    const snap = await this.db.ref(`${this.basePath}/${safeKey(usuario)}`).get();
+    const snap = await this.getDb().ref(`${this.basePath}/${safeKey(usuario)}`).get();
     if (!snap.exists()) return null;
     const d = snap.val() as RawSummary;
     return {

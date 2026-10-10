@@ -8,8 +8,7 @@ import { SessionTracker } from '../../core/session-tracker';
 import { systemClock, type AuditLogger } from '../../core/ports';
 import { NoopActivityStore, NoopSessionStore } from '../../adapters/memory/noop.store';
 import {
-  resolveAuditApp,
-  auditDatabase,
+  createLazyAuditDatabase,
   type AuditFirebaseCredentials,
 } from '../../adapters/rtdb/audit-firebase.provider';
 import { RtdbActivityStore } from '../../adapters/rtdb/rtdb-activity.store';
@@ -65,23 +64,33 @@ export class ActivityAuditModule {
   }
 }
 
-/** Construye los stores reales (RTDB) o cae a no-op si no hay credenciales. */
+/**
+ * Construye los stores. NO inicializa Firebase aquí (eso ocurre perezosamente
+ * en la primera escritura, ya con el runtime levantado): así el bootstrap de
+ * Nest nunca falla por el orden de inicialización ni por credenciales malas.
+ * Solo decide real vs no-op según haya credenciales mínimas configuradas.
+ */
 function buildStores(options: ActivityAuditOptions, logger: AuditLogger) {
-  try {
-    const app = resolveAuditApp(options.credentials);
-    const db = auditDatabase(app);
-    return {
-      enabled: true,
-      activityStore: new RtdbActivityStore(db, options.paths?.activity),
-      sessionStore: new RtdbSessionStore(db, options.paths?.sessions),
-    };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logger.warn(`[activity-audit] inicialización fallida (${msg}). Modo no-op.`);
+  const c = options.credentials || ({} as AuditFirebaseCredentials);
+  const hasCreds =
+    !!c.databaseURL &&
+    (!!c.serviceAccountJson ||
+      (!!c.projectId && !!c.clientEmail && !!c.privateKey) ||
+      !!c.useApplicationDefault);
+
+  if (!hasCreds) {
     return {
       enabled: false,
       activityStore: new NoopActivityStore(),
       sessionStore: new NoopSessionStore(),
     };
   }
+
+  // Resolver perezoso y memoizado: Firebase se inicializa en el primer uso.
+  const getDb = createLazyAuditDatabase(c);
+  return {
+    enabled: true,
+    activityStore: new RtdbActivityStore(getDb, options.paths?.activity),
+    sessionStore: new RtdbSessionStore(getDb, options.paths?.sessions),
+  };
 }
