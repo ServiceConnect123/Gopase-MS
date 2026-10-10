@@ -66,17 +66,55 @@ export class RtdbActivityStore implements ActivityStore {
       if (!snap.exists()) continue;
 
       const val = snap.val() as Record<string, RawLog>;
-      for (const raw of Object.values(val)) {
+      for (const [id, raw] of Object.entries(val)) {
         if (filter.conjunto && (raw.conjunto || '') !== filter.conjunto) continue;
         if (filter.usuario && (raw.usuario || '') !== filter.usuario) continue;
         if (filter.ambiente && (raw.ambiente || '') !== filter.ambiente) continue;
-        results.push(fromRaw(raw));
+        results.push(fromRaw(raw, id, day));
       }
     }
 
     // Más recientes primero y recorte al límite.
     results.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
     return results.slice(0, limit);
+  }
+
+  /** Elimina un log puntual: /{basePath}/{day}/{id}. Idempotente. */
+  async remove(day: string, id: string): Promise<void> {
+    if (!day || !id) return;
+    const db = this.getDb();
+    await db.ref(`${this.basePath}/${day}/${id}`).remove();
+  }
+
+  /**
+   * Borrado masivo por filtro. Recorre la ventana de días, identifica las keys
+   * que cumplen el filtro y las elimina. Devuelve el total borrado.
+   * Sin filtros, borra TODA la ventana de días (limpieza completa reciente).
+   */
+  async removeByFilter(filter: ActivityQuery): Promise<number> {
+    const db = this.getDb();
+    const days = recentDays(30); // ventana amplia para limpiar
+    let deleted = 0;
+
+    for (const day of days) {
+      const dayRef = db.ref(`${this.basePath}/${day}`);
+      const snap = await dayRef.get();
+      if (!snap.exists()) continue;
+
+      const val = snap.val() as Record<string, RawLog>;
+      const updates: Record<string, null> = {};
+      for (const [id, raw] of Object.entries(val)) {
+        if (filter.conjunto && (raw.conjunto || '') !== filter.conjunto) continue;
+        if (filter.usuario && (raw.usuario || '') !== filter.usuario) continue;
+        if (filter.ambiente && (raw.ambiente || '') !== filter.ambiente) continue;
+        updates[id] = null; // marcar para borrado en un solo update
+        deleted++;
+      }
+      if (Object.keys(updates).length > 0) {
+        await dayRef.update(updates);
+      }
+    }
+    return deleted;
   }
 }
 
@@ -92,7 +130,7 @@ interface RawLog {
   timestampIso?: string;
 }
 
-function fromRaw(raw: RawLog): ActivityLog {
+function fromRaw(raw: RawLog, id?: string, day?: string): ActivityLog {
   return {
     vista: raw.vista,
     usuario: raw.usuario,
@@ -102,6 +140,8 @@ function fromRaw(raw: RawLog): ActivityLog {
     evidenciaUrl: raw.evidenciaUrl,
     meta: raw.meta as ActivityLog['meta'],
     timestamp: new Date(raw.timestamp ?? 0),
+    id,
+    day,
   };
 }
 

@@ -4,7 +4,7 @@
 // Contrato de API para que el cliente registre actividad (con evidenciaUrl
 // opcional, ya subida a Storage) y para consultar las métricas de sesión.
 
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiProperty, ApiPropertyOptional, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { Inject } from '@nestjs/common';
 import { ActivityLogger } from '../../core/activity-logger';
@@ -76,6 +76,31 @@ export class AuditController {
       limit: limit ? parseInt(limit, 10) : undefined,
     });
     return { success: true, data };
+  }
+
+  @Delete('activity')
+  @ApiOperation({ summary: 'Elimina en masa logs de actividad por filtro (conjunto/usuario/ambiente).' })
+  @ApiQuery({ name: 'conjunto', required: false })
+  @ApiQuery({ name: 'usuario', required: false })
+  @ApiQuery({ name: 'ambiente', required: false })
+  async clearActivity(
+    @Query('conjunto') conjunto?: string,
+    @Query('usuario') usuario?: string,
+    @Query('ambiente') ambiente?: string,
+  ) {
+    const deleted = await this.activity.removeByFilter({
+      conjunto: conjunto || undefined,
+      usuario: usuario || undefined,
+      ambiente: ambiente || undefined,
+    });
+    return { success: true, deleted };
+  }
+
+  @Delete('activity/:day/:id')
+  @ApiOperation({ summary: 'Elimina un log de actividad puntual (día + id).' })
+  async deleteActivity(@Param('day') day: string, @Param('id') id: string) {
+    const ok = await this.activity.remove(day, id);
+    return { success: ok };
   }
 
   @Get('sessions')

@@ -21,6 +21,10 @@ export interface ActivityLog {
   timestamp: Date;
   /** Metadatos técnicos opcionales. */
   meta?: ActivityMeta;
+  /** Id de almacenamiento (push key). Solo presente al leer; permite borrar. */
+  id?: string;
+  /** Partición de día (YYYY-MM-DD) donde está guardado. Solo lectura. */
+  day?: string;
 }
 
 export interface ActivityMeta {

@@ -16,6 +16,10 @@ export interface ActivityStore {
   append(log: ActivityLog): Promise<void>;
   /** Consulta logs recientes con filtros opcionales (conjunto/usuario). */
   query(filter: ActivityQuery): Promise<ActivityLog[]>;
+  /** Elimina un log puntual por su día (YYYY-MM-DD) e id de push. */
+  remove(day: string, id: string): Promise<void>;
+  /** Elimina en masa los logs que cumplen el filtro. Devuelve cuántos borró. */
+  removeByFilter(filter: ActivityQuery): Promise<number>;
 }
 
 /** Puerto de salida: dónde viven las métricas de sesión. */

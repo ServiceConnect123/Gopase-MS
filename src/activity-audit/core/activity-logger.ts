@@ -46,6 +46,25 @@ export class ActivityLogger {
     return this.deps.store.query(filter);
   }
 
+  /** Elimina un log puntual (día + id). Fail-safe: nunca lanza. */
+  async remove(day: string, id: string): Promise<boolean> {
+    return runSafe(
+      () => this.deps.store.remove(day, id),
+      this.deps.logger,
+      `remove day=${day} id=${id}`,
+    );
+  }
+
+  /** Borrado masivo por filtro. Devuelve cuántos borró (0 si falla). */
+  async removeByFilter(filter: ActivityQuery): Promise<number> {
+    try {
+      return await this.deps.store.removeByFilter(filter);
+    } catch (e) {
+      this.deps.logger.error(`removeByFilter falló: ${(e as Error)?.message}`);
+      return 0;
+    }
+  }
+
   private normalize(input: ActivityInput): ActivityLog {
     return {
       vista: input.vista,

@@ -14,6 +14,12 @@ export class NoopActivityStore implements ActivityStore {
   async query(): Promise<[]> {
     return [];
   }
+  async remove(): Promise<void> {
+    /* no-op: auditoría deshabilitada */
+  }
+  async removeByFilter(): Promise<number> {
+    return 0;
+  }
 }
 
 export class NoopSessionStore implements SessionStore {
