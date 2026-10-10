@@ -9,6 +9,8 @@ export interface ActivityLog {
   vista: string;
   /** Identificador del usuario (uid, username...). */
   usuario: string;
+  /** Conjunto/propiedad al que pertenece la acción (para filtrar por conjunto). */
+  conjunto?: string;
   /** Información contextual flexible de la acción. */
   detalle: Record<string, unknown>;
   /** URL/referencia a una captura o archivo adjunto (Firebase Storage, etc.). */
@@ -33,7 +35,23 @@ export type ActivityInput = Omit<ActivityLog, 'timestamp'> & { timestamp?: Date 
 /** Resumen de sesiones por usuario (métricas de login). */
 export interface SessionSummary {
   usuario: string;
+  /** Último conjunto conocido del usuario (para filtrar por conjunto). */
+  conjunto?: string;
   sesionesIniciadas: number;
   ultimoInicioSesion: Date;
   primerInicioSesion: Date;
+}
+
+/** Filtros de consulta de actividad. */
+export interface ActivityQuery {
+  conjunto?: string;
+  usuario?: string;
+  /** Máximo de resultados (más recientes primero). */
+  limit?: number;
+}
+
+/** Filtros de consulta de resúmenes de sesión. */
+export interface SessionQuery {
+  conjunto?: string;
+  limit?: number;
 }

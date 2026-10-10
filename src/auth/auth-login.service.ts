@@ -128,10 +128,6 @@ export class AuthLoginService {
       return { success: false, message: 'Error de conexión con el servicio de autenticación.' };
     }
 
-    // Métrica de sesión: login exitoso. Fire-and-forget: NO bloquea ni rompe
-    // el login aunque el proyecto de auditoría falle o no esté configurado.
-    this.sessionTracker?.trackLogin(uid);
-
     return this.buildUserResponse(uid, email);
   }
 
@@ -180,6 +176,9 @@ export class AuthLoginService {
       const conjuntoId = claims.conjuntoId || '';
       // Resolver el NOMBRE del conjunto (la app usa el nombre como "complex").
       const conjuntoNombre = await this.resolveConjuntoNombre(conjuntoId);
+      // Métrica de sesión: login exitoso, con el conjunto ya resuelto.
+      // Fire-and-forget: NO bloquea ni rompe el login aunque la auditoría falle.
+      this.sessionTracker?.trackLogin(uid, conjuntoNombre || undefined);
       return {
         success: true,
         user: {
@@ -195,7 +194,9 @@ export class AuthLoginService {
       };
     } catch (err: any) {
       this.logger.error(`Login OK pero no se pudo leer el usuario ${uid}: ${err?.message}`);
-      // La contraseña era válida; devolvemos lo mínimo aunque falle la lectura de claims.
+      // La contraseña era válida: registra el login igual (sin conjunto).
+      this.sessionTracker?.trackLogin(uid);
+      // devolvemos lo mínimo aunque falle la lectura de claims.
       return {
         success: true,
         user: { username: uid, uid, email },

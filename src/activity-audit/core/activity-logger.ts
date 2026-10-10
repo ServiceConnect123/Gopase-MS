@@ -3,7 +3,7 @@
 // ==========================================
 
 import type { ActivityStore, Clock, AuditLogger } from './ports';
-import type { ActivityInput } from './types';
+import type { ActivityInput, ActivityLog, ActivityQuery } from './types';
 import { fireAndForget, runSafe } from './fail-safe';
 
 export interface ActivityLoggerDeps {
@@ -39,10 +39,16 @@ export class ActivityLogger {
     );
   }
 
-  private normalize(input: ActivityInput) {
+  /** Consulta logs recientes con filtros (para la vista de monitoreo). */
+  query(filter: ActivityQuery): Promise<ActivityLog[]> {
+    return this.deps.store.query(filter);
+  }
+
+  private normalize(input: ActivityInput): ActivityLog {
     return {
       vista: input.vista,
       usuario: input.usuario || 'anonimo',
+      conjunto: input.conjunto,
       detalle: input.detalle ?? {},
       evidenciaUrl: input.evidenciaUrl,
       meta: input.meta,

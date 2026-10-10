@@ -4,10 +4,11 @@
 
 import type { Database } from 'firebase-admin/database';
 import type { SessionStore } from '../../core/ports';
-import type { SessionSummary } from '../../core/types';
+import type { SessionQuery, SessionSummary } from '../../core/types';
 
 interface RawSummary {
   usuario: string;
+  conjunto?: string;
   sesionesIniciadas: number;
   ultimoInicioSesion: number; // epoch ms
   primerInicioSesion: number; // epoch ms
@@ -25,13 +26,14 @@ export class RtdbSessionStore implements SessionStore {
     private readonly basePath = 'session_summaries',
   ) {}
 
-  async recordLogin(usuario: string, at: Date): Promise<void> {
+  async recordLogin(usuario: string, at: Date, conjunto?: string): Promise<void> {
     const atMs = at.getTime();
     const ref = this.getDb().ref(`${this.basePath}/${safeKey(usuario)}`);
     await ref.transaction((current: RawSummary | null) => {
       if (!current) {
         return {
           usuario,
+          ...(conjunto ? { conjunto } : {}),
           sesionesIniciadas: 1,
           primerInicioSesion: atMs,
           ultimoInicioSesion: atMs,
@@ -40,6 +42,8 @@ export class RtdbSessionStore implements SessionStore {
       return {
         ...current,
         usuario,
+        // Actualiza el conjunto si viene uno nuevo (último conjunto conocido).
+        ...(conjunto ? { conjunto } : {}),
         sesionesIniciadas: (current.sesionesIniciadas || 0) + 1,
         ultimoInicioSesion: atMs,
         // primerInicioSesion NO se toca: es inmutable tras el primer login.
@@ -51,14 +55,36 @@ export class RtdbSessionStore implements SessionStore {
   async get(usuario: string): Promise<SessionSummary | null> {
     const snap = await this.getDb().ref(`${this.basePath}/${safeKey(usuario)}`).get();
     if (!snap.exists()) return null;
-    const d = snap.val() as RawSummary;
-    return {
-      usuario: d.usuario ?? usuario,
-      sesionesIniciadas: d.sesionesIniciadas ?? 0,
-      ultimoInicioSesion: new Date(d.ultimoInicioSesion ?? 0),
-      primerInicioSesion: new Date(d.primerInicioSesion ?? 0),
-    };
+    return toSummary(snap.val() as RawSummary, usuario);
   }
+
+  /**
+   * Lista todos los resúmenes de sesión (ordenados por último login, desc).
+   * Filtra por conjunto en memoria. El volumen de usuarios es acotado, así que
+   * leer el nodo completo es aceptable.
+   */
+  async list(filter: SessionQuery): Promise<SessionSummary[]> {
+    const snap = await this.getDb().ref(this.basePath).get();
+    if (!snap.exists()) return [];
+    const all = snap.val() as Record<string, RawSummary>;
+    let items = Object.values(all).map((d) => toSummary(d, d.usuario));
+    if (filter.conjunto) {
+      items = items.filter((s) => (s.conjunto || '') === filter.conjunto);
+    }
+    items.sort((a, b) => b.ultimoInicioSesion.getTime() - a.ultimoInicioSesion.getTime());
+    const limit = Math.min(Math.max(filter.limit ?? 200, 1), 1000);
+    return items.slice(0, limit);
+  }
+}
+
+function toSummary(d: RawSummary, fallbackUser: string): SessionSummary {
+  return {
+    usuario: d.usuario ?? fallbackUser,
+    conjunto: d.conjunto,
+    sesionesIniciadas: d.sesionesIniciadas ?? 0,
+    ultimoInicioSesion: new Date(d.ultimoInicioSesion ?? 0),
+    primerInicioSesion: new Date(d.primerInicioSesion ?? 0),
+  };
 }
 
 /** Las claves de RTDB no admiten . # $ [ ] / — se sustituyen por "_". */

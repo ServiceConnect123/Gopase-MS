@@ -52,10 +52,14 @@ export class AuditInterceptor implements NestInterceptor {
       const vista = `${req?.method ?? 'GET'} ${req?.route?.path ?? req?.originalUrl ?? req?.url ?? ''}`;
       const usuario =
         req?.user?.uid || req?.user?.username || req?.body?.usuario || req?.body?.username || 'anonimo';
+      // Conjunto: del usuario autenticado o del cuerpo/query de la petición.
+      const conjunto =
+        req?.user?.conjunto || req?.body?.conjunto || req?.query?.conjunto || undefined;
 
       this.activity.log({
         vista,
         usuario: String(usuario),
+        conjunto: conjunto ? String(conjunto) : undefined,
         detalle: {
           params: req?.params ?? {},
           query: req?.query ?? {},

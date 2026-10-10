@@ -20,11 +20,11 @@ export class SessionTracker {
   constructor(private readonly deps: SessionTrackerDeps) {}
 
   /** Registra un login. No bloquea ni lanza. */
-  trackLogin(usuario: string): void {
+  trackLogin(usuario: string, conjunto?: string): void {
     if (!usuario) return;
     const at = this.deps.clock.now();
     fireAndForget(
-      () => this.deps.store.recordLogin(usuario, at),
+      () => this.deps.store.recordLogin(usuario, at, conjunto),
       this.deps.logger,
       `recordLogin usuario=${usuario}`,
     );
@@ -33,5 +33,10 @@ export class SessionTracker {
   /** Lee el resumen de sesiones de un usuario (para reportes/analítica). */
   getSummary(usuario: string): Promise<SessionSummary | null> {
     return this.deps.store.get(usuario);
+  }
+
+  /** Lista resúmenes de sesión (vista de monitoreo). */
+  listSummaries(filter: { conjunto?: string; limit?: number } = {}): Promise<SessionSummary[]> {
+    return this.deps.store.list(filter);
   }
 }

@@ -4,11 +4,18 @@
 // Puertos de salida (persistencia) y utilidades abstractas. El core depende
 // solo de estas interfaces, nunca de implementaciones concretas (SOLID: DIP).
 
-import type { ActivityLog, SessionSummary } from './types';
+import type {
+  ActivityLog,
+  ActivityQuery,
+  SessionQuery,
+  SessionSummary,
+} from './types';
 
-/** Puerto de salida: dónde se guardan los logs de actividad. */
+/** Puerto de salida: dónde se guardan/consultan los logs de actividad. */
 export interface ActivityStore {
   append(log: ActivityLog): Promise<void>;
+  /** Consulta logs recientes con filtros opcionales (conjunto/usuario). */
+  query(filter: ActivityQuery): Promise<ActivityLog[]>;
 }
 
 /** Puerto de salida: dónde viven las métricas de sesión. */
@@ -17,8 +24,10 @@ export interface SessionStore {
    * Incrementa de forma ATÓMICA el contador de sesiones del usuario y actualiza
    * ultimoInicioSesion; fija primerInicioSesion solo la primera vez.
    */
-  recordLogin(usuario: string, at: Date): Promise<void>;
+  recordLogin(usuario: string, at: Date, conjunto?: string): Promise<void>;
   get(usuario: string): Promise<SessionSummary | null>;
+  /** Lista resúmenes de sesión (para la vista de monitoreo). */
+  list(filter: SessionQuery): Promise<SessionSummary[]>;
 }
 
 /** Reloj inyectable (testeable, sin acoplar a Date.now). */

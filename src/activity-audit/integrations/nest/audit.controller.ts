@@ -4,8 +4,8 @@
 // Contrato de API para que el cliente registre actividad (con evidenciaUrl
 // opcional, ya subida a Storage) y para consultar las métricas de sesión.
 
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
-import { ApiOperation, ApiProperty, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { ApiOperation, ApiProperty, ApiPropertyOptional, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { Inject } from '@nestjs/common';
 import { ActivityLogger } from '../../core/activity-logger';
 import { SessionTracker } from '../../core/session-tracker';
@@ -17,6 +17,9 @@ class ActivityLogDto {
 
   @ApiProperty({ example: 'adolfoiglesias', description: 'Identificador del usuario.' })
   usuario: string;
+
+  @ApiPropertyOptional({ example: 'Villa Mayra', description: 'Conjunto al que pertenece la acción.' })
+  conjunto?: string;
 
   @ApiPropertyOptional({
     type: Object,
@@ -47,10 +50,41 @@ export class AuditController {
     this.activity.log({
       vista: body.vista,
       usuario: body.usuario,
+      conjunto: body.conjunto,
       detalle: body.detalle ?? {},
       evidenciaUrl: body.evidenciaUrl,
     });
     return { ok: true };
+  }
+
+  @Get('activity')
+  @ApiOperation({ summary: 'Lista logs de actividad recientes (filtros opcionales).' })
+  @ApiQuery({ name: 'conjunto', required: false })
+  @ApiQuery({ name: 'usuario', required: false })
+  @ApiQuery({ name: 'limit', required: false, example: 100 })
+  async listActivity(
+    @Query('conjunto') conjunto?: string,
+    @Query('usuario') usuario?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const data = await this.activity.query({
+      conjunto: conjunto || undefined,
+      usuario: usuario || undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+    });
+    return { success: true, data };
+  }
+
+  @Get('sessions')
+  @ApiOperation({ summary: 'Lista resúmenes de sesión (filtro por conjunto).' })
+  @ApiQuery({ name: 'conjunto', required: false })
+  @ApiQuery({ name: 'limit', required: false, example: 200 })
+  async listSessions(@Query('conjunto') conjunto?: string, @Query('limit') limit?: string) {
+    const data = await this.sessions.listSummaries({
+      conjunto: conjunto || undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+    });
+    return { success: true, data };
   }
 
   @Get('sessions/:usuario')

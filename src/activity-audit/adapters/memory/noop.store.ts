@@ -11,6 +11,9 @@ export class NoopActivityStore implements ActivityStore {
   async append(): Promise<void> {
     /* descarta: auditoría deshabilitada */
   }
+  async query(): Promise<[]> {
+    return [];
+  }
 }
 
 export class NoopSessionStore implements SessionStore {
@@ -19,5 +22,8 @@ export class NoopSessionStore implements SessionStore {
   }
   async get(): Promise<SessionSummary | null> {
     return null;
+  }
+  async list(): Promise<[]> {
+    return [];
   }
 }
