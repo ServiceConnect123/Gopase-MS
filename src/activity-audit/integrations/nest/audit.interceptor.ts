@@ -46,6 +46,11 @@ export class AuditInterceptor implements NestInterceptor {
     const isWrite = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
     if (!isWrite || path.startsWith('/audit')) return next.handle();
 
+    // Rutas que el FRONTEND ya audita con un log enriquecido (usuario legible,
+    // mes, conjunto y captura de evidencia). Se omiten aquí para no duplicar el
+    // registro. El /drive/upload también se ignora (es parte de la captura).
+    if (isSelfAudited(path)) return next.handle();
+
     const start = Date.now();
     return next.handle().pipe(
       tap({
@@ -90,6 +95,16 @@ export class AuditInterceptor implements NestInterceptor {
       /* el interceptor nunca debe romper el request */
     }
   }
+}
+
+/**
+ * Rutas auditadas por el frontend con evidencia (captura) para evitar un log
+ * duplicado del interceptor. Hoy: pagos (crear/editar/eliminar/revisar) y la
+ * subida de la propia captura a Drive.
+ */
+function isSelfAudited(path: string): boolean {
+  const seg = path.split('/').filter(Boolean)[0] || '';
+  return seg === 'payments' || seg === 'drive';
 }
 
 /** Verbo de acción legible según el método HTTP. */
