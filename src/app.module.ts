@@ -36,6 +36,9 @@ import { AuditInterceptor } from './activity-audit/integrations/nest/audit.inter
         privateKey: process.env.AUDIT_FIREBASE_PRIVATE_KEY,
         databaseURL: process.env.AUDIT_FIREBASE_DATABASE_URL,
       },
+      // Entorno que etiqueta los registros. En QA se define AUDIT_ENV=qa; si no
+      // se define, se asume 'prod' (más seguro: un log real no se confunde con prueba).
+      environment: (process.env.AUDIT_ENV || 'prod').toLowerCase(),
     }),
     NotificationsModule,
     SyncModule,

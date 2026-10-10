@@ -61,15 +61,18 @@ export class AuditController {
   @ApiOperation({ summary: 'Lista logs de actividad recientes (filtros opcionales).' })
   @ApiQuery({ name: 'conjunto', required: false })
   @ApiQuery({ name: 'usuario', required: false })
+  @ApiQuery({ name: 'ambiente', required: false, description: "Entorno: 'qa' | 'prod'. Vacío = todos." })
   @ApiQuery({ name: 'limit', required: false, example: 100 })
   async listActivity(
     @Query('conjunto') conjunto?: string,
     @Query('usuario') usuario?: string,
+    @Query('ambiente') ambiente?: string,
     @Query('limit') limit?: string,
   ) {
     const data = await this.activity.query({
       conjunto: conjunto || undefined,
       usuario: usuario || undefined,
+      ambiente: ambiente || undefined,
       limit: limit ? parseInt(limit, 10) : undefined,
     });
     return { success: true, data };

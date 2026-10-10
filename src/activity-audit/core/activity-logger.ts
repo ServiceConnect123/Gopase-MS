@@ -10,6 +10,8 @@ export interface ActivityLoggerDeps {
   store: ActivityStore;
   clock: Clock;
   logger: AuditLogger;
+  /** Entorno de ejecución a estampar por defecto en cada log (p. ej. 'qa' | 'prod'). */
+  environment?: string;
 }
 
 /**
@@ -49,6 +51,8 @@ export class ActivityLogger {
       vista: input.vista,
       usuario: input.usuario || 'anonimo',
       conjunto: input.conjunto,
+      // El entorno del log: lo que traiga el input o, si no, el del backend.
+      ambiente: input.ambiente ?? this.deps.environment,
       detalle: input.detalle ?? {},
       evidenciaUrl: input.evidenciaUrl,
       meta: input.meta,

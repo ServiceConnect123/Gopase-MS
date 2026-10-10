@@ -21,6 +21,11 @@ export interface ActivityAuditOptions {
   credentials: AuditFirebaseCredentials;
   /** Rutas RTDB (opcional). */
   paths?: { activity?: string; sessions?: string };
+  /**
+   * Entorno de ejecución del backend (p. ej. 'qa' | 'prod'). Se estampa en
+   * cada log para poder separar registros de prueba de los de producción.
+   */
+  environment?: string;
 }
 
 /**
@@ -52,7 +57,12 @@ export class ActivityAuditModule {
       providers: [
         {
           provide: ACTIVITY_LOGGER,
-          useValue: new ActivityLogger({ store: activityStore, clock: systemClock, logger: auditLogger }),
+          useValue: new ActivityLogger({
+            store: activityStore,
+            clock: systemClock,
+            logger: auditLogger,
+            environment: options.environment,
+          }),
         },
         {
           provide: SESSION_TRACKER,

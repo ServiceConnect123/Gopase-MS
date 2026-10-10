@@ -29,6 +29,7 @@ export class RtdbActivityStore implements ActivityStore {
       vista: log.vista,
       usuario: log.usuario,
       ...(log.conjunto ? { conjunto: log.conjunto } : {}),
+      ...(log.ambiente ? { ambiente: log.ambiente } : {}),
       detalle: sanitize(log.detalle),
       // RTDB no admite `undefined`: solo se escriben campos presentes.
       ...(log.evidenciaUrl ? { evidenciaUrl: log.evidenciaUrl } : {}),
@@ -68,6 +69,7 @@ export class RtdbActivityStore implements ActivityStore {
       for (const raw of Object.values(val)) {
         if (filter.conjunto && (raw.conjunto || '') !== filter.conjunto) continue;
         if (filter.usuario && (raw.usuario || '') !== filter.usuario) continue;
+        if (filter.ambiente && (raw.ambiente || '') !== filter.ambiente) continue;
         results.push(fromRaw(raw));
       }
     }
@@ -82,6 +84,7 @@ interface RawLog {
   vista: string;
   usuario: string;
   conjunto?: string;
+  ambiente?: string;
   detalle?: Record<string, unknown>;
   evidenciaUrl?: string;
   meta?: Record<string, unknown>;
@@ -94,6 +97,7 @@ function fromRaw(raw: RawLog): ActivityLog {
     vista: raw.vista,
     usuario: raw.usuario,
     conjunto: raw.conjunto,
+    ambiente: raw.ambiente,
     detalle: raw.detalle ?? {},
     evidenciaUrl: raw.evidenciaUrl,
     meta: raw.meta as ActivityLog['meta'],

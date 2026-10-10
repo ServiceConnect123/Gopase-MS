@@ -11,6 +11,8 @@ export interface ActivityLog {
   usuario: string;
   /** Conjunto/propiedad al que pertenece la acción (para filtrar por conjunto). */
   conjunto?: string;
+  /** Entorno de ejecución del backend que generó el log (p. ej. 'qa' | 'prod'). */
+  ambiente?: string;
   /** Información contextual flexible de la acción. */
   detalle: Record<string, unknown>;
   /** URL/referencia a una captura o archivo adjunto (Firebase Storage, etc.). */
@@ -46,6 +48,8 @@ export interface SessionSummary {
 export interface ActivityQuery {
   conjunto?: string;
   usuario?: string;
+  /** Entorno a filtar (p. ej. 'qa' | 'prod'). Vacío/undefined = todos. */
+  ambiente?: string;
   /** Máximo de resultados (más recientes primero). */
   limit?: number;
 }
