@@ -489,10 +489,11 @@ export class PaymentsService {
         });
         return !userPayments.some((p) => p.estado === 'Confirmado');
       })
-      .map((u) => ({ name: u.nombre || '', phone: u.phone || '', username: u.usuario || '' }));
+      // phone puede venir como número desde RTDB: se normaliza a string.
+      .map((u) => ({ name: u.nombre || '', phone: String(u.phone ?? ''), username: u.usuario || '' }));
 
     if (onlyWithPhone) {
-      return debtors.filter((d) => (d.phone || '').replace(/\D/g, '').length >= 10);
+      return debtors.filter((d) => String(d.phone ?? '').replace(/\D/g, '').length >= 10);
     }
     return debtors;
   }
