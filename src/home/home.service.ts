@@ -196,9 +196,21 @@ export class HomeService {
     username: string;
     year: number;
     month?: string;
+    /**
+     * Solo aplica a superAdmin. true/undefined = vista global de todos los
+     * conjuntos (comportamiento histórico). false = opera como admin del
+     * `complex` indicado (filtra por ese conjunto).
+     */
+    verTodos?: boolean;
   }): Promise<DashboardResponse> {
     const { role, complex, username, year } = params;
     const month = params.month || MONTHS[new Date().getMonth()];
+
+    // Alcance global efectivo: solo un superAdmin que NO eligió un conjunto
+    // concreto ve "Todos". Si eligió conjunto (verTodos=false con complex),
+    // se comporta como el admin de ese conjunto.
+    const esSuperAdmin = role === 'superAdmin';
+    const scopeGlobal = esSuperAdmin && params.verTodos !== false;
 
     const [userRows, pagoRows, reporteRows] = await Promise.all([
       this.sheets.read('usuarios'),
@@ -211,9 +223,11 @@ export class HomeService {
 
     const vigilanteEnTurno = this.resolveVigilanteEnTurno(reporteRows, allUsers);
 
-    // Filtrado por rol/conjunto (mismas reglas que home.tsx).
+    // Filtrado por rol/conjunto. Se filtra por conjunto salvo en modo global
+    // (superAdmin viendo "Todos"). Un superAdmin con conjunto elegido filtra
+    // igual que un admin.
     let filteredUsers = allUsers.filter((u) => u.role !== 'superAdmin' && u.role !== 'vigilante');
-    if (role !== 'superAdmin') {
+    if (!scopeGlobal) {
       filteredUsers = filteredUsers.filter((u) => (u.complex || '') === (complex || ''));
     }
     if (role === 'propietario') {
@@ -237,8 +251,9 @@ export class HomeService {
     // dos meses anteriores (M-2 y M-1), con 10 días de gracia en el mes actual
     // para M-1; meses anteriores al ingreso = N/A (no cuentan). Así la lista de
     // Home y el reporte coinciden siempre y reflejan los pagos reales.
-    const isSuperAdmin = role === 'superAdmin';
-    const reporte = await this.payments.getAlDiaReport(complex || '', isSuperAdmin);
+    // En modo global pasa superAdmin=true (ignora conjunto); con conjunto
+    // elegido, superAdmin=false para filtrar por ese conjunto (como admin).
+    const reporte = await this.payments.getAlDiaReport(complex || '', scopeGlobal);
 
     // Mapa username(normalizado) -> alDia del reporte.
     const normU = (s: string) => String(s || '').trim().toLowerCase();
