@@ -21,6 +21,7 @@ import { APP_INTERCEPTOR, APP_GUARD } from '@nestjs/core';
 import { ActivityAuditModule } from './activity-audit/integrations/nest/activity-audit.module';
 import { AuditInterceptor } from './activity-audit/integrations/nest/audit.interceptor';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
+import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
 
 @Module({
   imports: [
@@ -59,6 +60,10 @@ import { JwtAuthGuard } from './auth/jwt-auth.guard';
     GuestsModule,
   ],
   providers: [
+    // Cifrado de payload (ofuscación). Va PRIMERO para descifrar el request
+    // antes de que el AuditInterceptor lea el body, y cifrar la respuesta al
+    // final. Controlado por PAYLOAD_ENCRYPTION_ENABLED (passthrough si off).
+    { provide: APP_INTERCEPTOR, useClass: PayloadCryptoInterceptor },
     // Audita cada request HTTP de forma no bloqueante (global).
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
     // Guard global de autenticación por JWT. Controlado por AUTH_GUARD_ENABLED:

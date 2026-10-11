@@ -62,7 +62,7 @@ async function bootstrap() {
       }
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'x-api-key', 'x-sync-token', 'accept', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'x-api-key', 'x-sync-token', 'accept', 'Authorization', 'X-Enc'],
   });
 
   // Swagger / OpenAPI en /docs (y el JSON en /docs-json).
