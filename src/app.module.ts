@@ -17,9 +17,10 @@ import { ReportsModule } from './reports/reports.module';
 import { EventsModule } from './events/events.module';
 import { AgreementsModule } from './agreements/agreements.module';
 import { GuestsModule } from './guests/guests.module';
-import { APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_INTERCEPTOR, APP_GUARD } from '@nestjs/core';
 import { ActivityAuditModule } from './activity-audit/integrations/nest/activity-audit.module';
 import { AuditInterceptor } from './activity-audit/integrations/nest/audit.interceptor';
+import { JwtAuthGuard } from './auth/jwt-auth.guard';
 
 @Module({
   imports: [
@@ -60,6 +61,10 @@ import { AuditInterceptor } from './activity-audit/integrations/nest/audit.inter
   providers: [
     // Audita cada request HTTP de forma no bloqueante (global).
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
+    // Guard global de autenticación por JWT. Controlado por AUTH_GUARD_ENABLED:
+    // mientras no sea 'true', deja pasar todo (permite desplegar sin romper los
+    // clientes que aún no envían el token).
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
   ],
 })
 export class AppModule {}

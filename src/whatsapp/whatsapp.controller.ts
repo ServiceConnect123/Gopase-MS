@@ -1,9 +1,13 @@
 import { Controller, Get, Header, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { WhatsappService } from './whatsapp.service';
+import { Public } from '../auth/public.decorator';
 
 @ApiTags('whatsapp')
 @Controller('whatsapp')
+// Público para el JwtAuthGuard: gestión de la sesión de WhatsApp (QR, estado,
+// relogin), que se consulta en estados sin sesión de usuario plena.
+@Public()
 export class WhatsappController {
   constructor(private readonly whatsapp: WhatsappService) {}
 

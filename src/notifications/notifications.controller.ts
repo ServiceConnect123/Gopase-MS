@@ -2,6 +2,7 @@ import { Body, Controller, Get, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiProperty, ApiPropertyOptional, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { NotificationsService } from './notifications.service';
 import { WhatsappService } from '../whatsapp/whatsapp.service';
+import { Public } from '../auth/public.decorator';
 
 class DebtorDto {
   @ApiProperty({ example: 'Juan Pérez' })
@@ -87,6 +88,9 @@ class SendReceiptDto {
 
 @ApiTags('notifications')
 @Controller('notifications')
+// Público para el JwtAuthGuard: subsistema de WhatsApp/cold-start (status, ping,
+// wake, send-receipt, notify-debtors). Se invoca en estados sin sesión plena.
+@Public()
 export class NotificationsController {
   constructor(
     private readonly notifications: NotificationsService,

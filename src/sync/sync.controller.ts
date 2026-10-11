@@ -5,11 +5,12 @@ import {
   Headers,
   Param,
   Post,
-  UnauthorizedException,
 } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { SyncService, SyncCollection } from './sync.service';
+import { assertSyncToken } from '../auth/sync-token.util';
+import { Public } from '../auth/public.decorator';
 
 const VALID_COLLECTIONS: SyncCollection[] = [
   'conjuntos',
@@ -34,6 +35,9 @@ const VALID_COLLECTIONS: SyncCollection[] = [
  */
 @ApiTags('sync')
 @Controller('sync')
+// Público para el JwtAuthGuard: estas rutas son de ops y se protegen con
+// x-sync-token (no con el JWT de usuario).
+@Public()
 export class SyncController {
   constructor(
     private readonly sync: SyncService,
@@ -41,10 +45,8 @@ export class SyncController {
   ) {}
 
   private assertAuthorized(token?: string): void {
-    const expected = this.config.get<string>('SYNC_TOKEN', '');
-    if (expected && token !== expected) {
-      throw new UnauthorizedException('Token de sincronización inválido.');
-    }
+    // El header x-sync-token viaja CIFRADO (XOR+IV); se descifra y compara.
+    assertSyncToken(token, this.config.get<string>('SYNC_TOKEN', ''));
   }
 
   /** Estado del subsistema de sincronización. */

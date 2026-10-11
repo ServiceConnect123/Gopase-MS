@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
 import { FirebaseService } from '../firebase/firebase.service';
 import { recoverPassword } from './password.util';
 import { validatePasswordPolicy } from './password-policy.util';
@@ -34,6 +35,8 @@ export interface LoginResult {
     /** Nombre del conjunto (la app lo usa como "complex"). */
     conjunto?: string;
     mustChangePassword?: boolean;
+    /** JWT de sesión que el frontend adjunta como Bearer en las demás llamadas. */
+    token?: string;
   };
 }
 
@@ -46,6 +49,7 @@ export class AuthLoginService {
   constructor(
     private readonly firebase: FirebaseService,
     private readonly config: ConfigService,
+    private readonly jwt: JwtService,
     // Opcional: si el módulo de auditoría no estuviera registrado, el login
     // sigue funcionando igual (sin métricas de sesión ni evento de actividad).
     @Optional() @Inject(SESSION_TRACKER) private readonly sessionTracker?: SessionTracker,
@@ -191,6 +195,8 @@ export class AuthLoginService {
         conjunto: conjuntoNombre || undefined,
         detalle: { accion: 'Sesión', recurso: 'Inicio de sesión', rol: claims.rol || '' },
       });
+      // JWT de sesión: identidad + rol + conjunto (el guard lo verifica).
+      const token = this.jwt.sign({ sub: uid, rol: claims.rol || '', conjuntoId });
       return {
         success: true,
         user: {
@@ -202,6 +208,7 @@ export class AuthLoginService {
           conjuntoId,
           conjunto: conjuntoNombre,
           mustChangePassword: !!claims.mustChangePassword,
+          token,
         },
       };
     } catch (err: any) {
@@ -213,10 +220,11 @@ export class AuthLoginService {
         usuario: uid,
         detalle: { accion: 'Sesión', recurso: 'Inicio de sesión' },
       });
-      // devolvemos lo mínimo aunque falle la lectura de claims.
+      // devolvemos lo mínimo aunque falle la lectura de claims (token con solo uid).
+      const token = this.jwt.sign({ sub: uid });
       return {
         success: true,
-        user: { username: uid, uid, email },
+        user: { username: uid, uid, email, token },
       };
     }
   }

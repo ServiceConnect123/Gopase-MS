@@ -4,13 +4,14 @@ import {
   Headers,
   Post,
   Query,
-  UnauthorizedException,
 } from '@nestjs/common';
 import { ApiOperation, ApiProperty, ApiPropertyOptional, ApiQuery, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { Body } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AuthMigrationService } from './auth-migration.service';
 import { AuthLoginService } from './auth-login.service';
+import { assertSyncToken } from './sync-token.util';
+import { Public } from './public.decorator';
 
 class LoginDto {
   @ApiProperty({ example: 'wilmerhernandez', description: 'Nombre de usuario.' })
@@ -37,6 +38,9 @@ class SetPasswordDto {
  */
 @ApiTags('auth')
 @Controller('auth')
+// Todo /auth es público para el JwtAuthGuard: login no lleva token aún, y
+// migrate/set-password se protegen con x-sync-token (su propio mecanismo).
+@Public()
 export class AuthMigrationController {
   constructor(
     private readonly migration: AuthMigrationService,
@@ -45,10 +49,8 @@ export class AuthMigrationController {
   ) {}
 
   private assertAuthorized(token?: string): void {
-    const expected = this.config.get<string>('SYNC_TOKEN', '');
-    if (expected && token !== expected) {
-      throw new UnauthorizedException('Token inválido.');
-    }
+    // El header x-sync-token viaja CIFRADO (XOR+IV); se descifra y compara.
+    assertSyncToken(token, this.config.get<string>('SYNC_TOKEN', ''));
   }
 
   @ApiOperation({ summary: 'Estado del subsistema de migración de Auth' })
