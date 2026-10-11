@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
+import { validatePasswordPolicy } from '../auth/password-policy.util';
 
 /**
  * Perfil de usuario: LEE y ESCRIBE en Firebase (RTDB + Auth). NO usa Sheets.
@@ -106,8 +107,9 @@ export class ProfileService {
       }
 
       if (newPassword) {
-        if (newPassword.length < 6) {
-          return { success: false, message: 'La contraseña debe tener al menos 6 caracteres.' };
+        const policyError = validatePasswordPolicy(newPassword);
+        if (policyError) {
+          return { success: false, message: policyError };
         }
         await auth.updateUser(key, { password: newPassword });
         const record = await auth.getUser(key);

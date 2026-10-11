@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { FirebaseService } from '../firebase/firebase.service';
 import { recoverPassword } from './password.util';
+import { validatePasswordPolicy } from './password-policy.util';
 import { SessionTracker } from '../activity-audit/core/session-tracker';
 import { ActivityLogger } from '../activity-audit/core/activity-logger';
 import { SESSION_TRACKER, ACTIVITY_LOGGER } from '../activity-audit/integrations/nest/activity-audit.tokens';
@@ -141,8 +142,9 @@ export class AuthLoginService {
   async setPassword(username: string, newPassword: string): Promise<{ success: boolean; message?: string }> {
     const user = (username || '').toString().trim();
     if (!user) return { success: false, message: 'Usuario requerido' };
-    if (!newPassword || newPassword.length < 6) {
-      return { success: false, message: 'La contraseña debe tener al menos 6 caracteres.' };
+    const policyError = validatePasswordPolicy(newPassword);
+    if (policyError) {
+      return { success: false, message: policyError };
     }
     if (!this.firebase.isEnabled()) {
       return { success: false, message: 'Servicio de autenticación no disponible.' };
