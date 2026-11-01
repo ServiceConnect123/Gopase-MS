@@ -238,6 +238,10 @@ export class EventsService {
         pregunta: rest.pregunta ?? '',
         opciones: this.normalizeOpciones(rest.opciones),
         votos: this.normalizeVotos(rest.votos),
+        // Votaciones hechas en vivo (RTDB las guarda como objeto por push-id).
+        votacionesEnVivo: rest.votacionesEnVivo
+          ? Object.values(rest.votacionesEnVivo)
+          : [],
         dato_1: rest.id ?? '',
         dato_2: rest.titulo ?? '',
         dato_3: rest.descripcion ?? '',
@@ -557,6 +561,36 @@ export class EventsService {
     }
   }
 
+  /** Silencia a TODOS los participantes excepto, opcionalmente, al admin. */
+  async muteAll(
+    id: string,
+    exceptIdentity?: string,
+  ): Promise<{ success: boolean; message?: string; silenciados?: number }> {
+    const svc = this.roomService();
+    if (!svc) return { success: false, message: 'La videollamada no está configurada.' };
+    const evento = await this.loadEvento(id);
+    if (!evento) return { success: false, message: 'El evento no existe.' };
+    const room = this.roomName(evento);
+    try {
+      const participants = await svc.listParticipants(room);
+      let count = 0;
+      for (const p of participants) {
+        if (exceptIdentity && p.identity === exceptIdentity) continue;
+        for (const track of p.tracks || []) {
+          // Solo silencia audio; el video no se toca.
+          if ((track as any).type === 1 /* AUDIO */ || (track as any).source === 2 /* MICROPHONE */) {
+            await svc.mutePublishedTrack(room, p.identity, track.sid, true);
+            count++;
+          }
+        }
+      }
+      return { success: true, silenciados: count, message: `Se silenciaron ${count} pistas.` };
+    } catch (err: any) {
+      this.logger.error(`[events] muteAll falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo silenciar a todos.' };
+    }
+  }
+
   /** Expulsa a un participante de la sala. */
   async removeParticipant(
     id: string,
@@ -690,6 +724,56 @@ export class EventsService {
     } catch (err: any) {
       this.logger.error(`[events] stopHls falló: ${err?.message}`);
       return { success: false, message: err?.message || 'No se pudo detener la transmisión.' };
+    }
+  }
+
+  /**
+   * Guarda el resultado de una votación hecha EN VIVO durante la llamada en el
+   * registro del evento (array `votacionesEnVivo`). No interfiere con la
+   * votación "principal" del evento (campos votacion/opciones/votos).
+   */
+  async saveLivePoll(
+    id: string,
+    dto: {
+      pregunta?: string;
+      opciones: Array<{ id: string; texto: string }>;
+      resultados: Record<string, number>;
+      totalVotos?: number;
+    },
+  ): Promise<{ success: boolean; message?: string }> {
+    if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
+    const key = this.safeKey(id);
+    if (!key) return { success: false, message: 'ID requerido.' };
+    const opciones = this.normalizeOpciones(dto?.opciones);
+    if (opciones.length === 0) return { success: false, message: 'Faltan opciones.' };
+
+    const ref = this.firebase.db().ref(`${MIRROR_EVENTOS}/${key}`);
+    const snap = await ref.get();
+    if (!snap.exists()) return { success: false, message: 'El evento no existe.' };
+
+    const registro = {
+      id: Date.now().toString(),
+      pregunta: String(dto?.pregunta ?? ''),
+      // Resultado consolidado: cada opción con su conteo de votos.
+      resultados: opciones.map((o) => ({
+        opcionId: o.id,
+        texto: o.texto,
+        votos: Number(dto?.resultados?.[o.id] ?? 0),
+      })),
+      totalVotos: Number(
+        dto?.totalVotos ??
+          opciones.reduce((s, o) => s + Number(dto?.resultados?.[o.id] ?? 0), 0),
+      ),
+      fecha: new Date().toISOString(),
+    };
+
+    try {
+      // Append al array existente (push en un nodo lista).
+      await ref.child('votacionesEnVivo').push().set(registro);
+      return { success: true, message: 'Votación guardada en el evento.' };
+    } catch (err: any) {
+      this.logger.error(`[events] saveLivePoll ${key} falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo guardar la votación.' };
     }
   }
 
