@@ -32,6 +32,16 @@ interface WhatsappSession {
   flushSession: (() => Promise<void>) | null;
   connecting: boolean;
   consecutiveFailures: number;
+  /**
+   * Vinculación por CÓDIGO (pairing code) en vez de QR. Cuando `usePairing` es
+   * true y la sesión aún no está registrada, al conectar se solicita a WhatsApp
+   * un código de 8 caracteres para `pairingPhone` en lugar de esperar el QR.
+   */
+  usePairing: boolean;
+  /** Teléfono (solo dígitos, formato internacional) para el pairing code. */
+  pairingPhone: string | null;
+  /** Último código de emparejamiento emitido (8 caracteres) o null. */
+  pairingCode: string | null;
 }
 
 /**
@@ -51,8 +61,6 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
   /** Clave de la sesión por defecto (número global histórico). */
   static readonly DEFAULT_KEY = '__default__';
-  /** Umbral tras el cual se limpia la sesión y se fuerza un QR nuevo. */
-  private static readonly MAX_FAILURES_BEFORE_RESET = 5;
 
   /** Sesiones activas, indexadas por clave lógica (conjunto normalizado). */
   private readonly sessions = new Map<string, WhatsappSession>();
@@ -120,6 +128,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         flushSession: null,
         connecting: false,
         consecutiveFailures: 0,
+        usePairing: false,
+        pairingPhone: null,
+        pairingCode: null,
       };
       this.sessions.set(key, session);
     }
@@ -160,6 +171,74 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     if (!session.currentQr) return null;
     const pngDataUrl = await QRCode.toDataURL(session.currentQr);
     return { qr: session.currentQr, pngDataUrl };
+  }
+
+  /**
+   * Vinculación por CÓDIGO (pairing code) para el conjunto. Devuelve un código
+   * de 8 caracteres que el admin ingresa en su WhatsApp:
+   *   WhatsApp > Dispositivos vinculados > Vincular con número de teléfono.
+   *
+   * Pensado para cuando el admin abre la app EN EL MISMO teléfono donde tiene
+   * WhatsApp (no puede escanear su propio QR). Requiere el número en formato
+   * internacional (se normaliza a solo dígitos). Si ya está conectado, devuelve
+   * `ready: true` sin generar código.
+   */
+  async getPairingCode(
+    conjunto: string | null | undefined,
+    phone: string,
+  ): Promise<{ ready: boolean; code: string | null; message?: string }> {
+    const key = this.normalizeKey(conjunto);
+    const digits = String(phone ?? '').replace(/\D/g, '');
+    if (!digits || digits.length < 10) {
+      return { ready: false, code: null, message: 'Número de teléfono inválido.' };
+    }
+
+    const { session } = this.ensureSession(key);
+    if (session.ready) {
+      return { ready: true, code: null, message: 'WhatsApp ya está conectado.' };
+    }
+
+    // Si ya hay un código vigente para el MISMO número, reutilízalo (evita
+    // reiniciar el socket en cada poll del frontend).
+    if (session.usePairing && session.pairingPhone === digits && session.pairingCode) {
+      return { ready: false, code: session.pairingCode };
+    }
+
+    // Activa el modo pairing y reinicia el socket para que solicite el código
+    // en el próximo connect(). Limpiamos cualquier QR/estado previo.
+    session.usePairing = true;
+    session.pairingPhone = digits;
+    session.pairingCode = null;
+    session.currentQr = null;
+
+    // Fuerza una reconexión limpia (el handler connect() pedirá el código).
+    try {
+      session.sock?.ev.removeAllListeners('connection.update');
+      await session.sock?.end(undefined);
+    } catch {
+      // no-op
+    }
+    session.sock = null;
+    session.connecting = false;
+    this.connect(session).catch((e) =>
+      this.logger.error(`[${key}] Error conectando para pairing: ${e?.message}`),
+    );
+
+    // Espera a que el código esté disponible (lo genera connect() tras ~3s).
+    const maxMs = 15000;
+    const step = 1000;
+    let waited = 0;
+    while (waited < maxMs) {
+      if (session.ready) return { ready: true, code: null };
+      if (session.pairingCode) return { ready: false, code: session.pairingCode };
+      await new Promise((r) => setTimeout(r, step));
+      waited += step;
+    }
+    return {
+      ready: false,
+      code: null,
+      message: 'No se pudo generar el código aún. Intenta de nuevo en unos segundos.',
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -215,6 +294,33 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
     session.sock.ev.on('creds.update', saveCreds);
 
+    // Vinculación por CÓDIGO (pairing code): si se solicitó y la sesión aún no
+    // está registrada, pedimos el código a WhatsApp en vez de usar el QR. Debe
+    // hacerse recién creado el socket y ANTES de que se registre. Un pequeño
+    // delay da margen a que el socket inicialice el handshake.
+    if (session.usePairing && session.pairingPhone && !state.creds.registered) {
+      const sockRef = session.sock;
+      const phone = session.pairingPhone;
+      setTimeout(() => {
+        // Evita pedir el código si entretanto la sesión conectó o se recicló.
+        if (session.sock !== sockRef || session.ready) return;
+        sockRef
+          .requestPairingCode(phone)
+          .then((code) => {
+            session.pairingCode = code;
+            this.logger.log(
+              `[${session.key}] Código de emparejamiento generado para ${phone}: ${code}`,
+            );
+          })
+          .catch((e: any) => {
+            session.pairingCode = null;
+            this.logger.error(
+              `[${session.key}] No se pudo generar el código de emparejamiento: ${e?.message}`,
+            );
+          });
+      }, 3000);
+    }
+
     session.sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect, qr } = update;
 
@@ -230,6 +336,10 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         session.ready = true;
         session.currentQr = null;
         session.consecutiveFailures = 0;
+        // Vinculación completada: ya no se necesita el código ni el modo pairing.
+        session.pairingCode = null;
+        session.usePairing = false;
+        session.pairingPhone = null;
         this.logger.log(`[${session.key}] Conexión con WhatsApp establecida.`);
       }
 
@@ -239,20 +349,16 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         const loggedOut = statusCode === DisconnectReason.loggedOut;
         session.consecutiveFailures++;
 
+        // ÚNICO caso en que las credenciales ya no sirven: WhatsApp cerró el
+        // dispositivo vinculado (logout real, statusCode 401). Solo aquí se
+        // limpia la sesión para poder generar un QR nuevo. En cualquier otro
+        // escenario (timeouts, cold start de Render al despertar, reinicios,
+        // pérdidas de red, 5xx) las credenciales SIGUEN siendo válidas, así que
+        // NO se borran: solo se reconecta. Borrarlas era lo que obligaba a
+        // reescanear el QR y rompía la persistencia del vínculo.
         if (loggedOut) {
           this.logger.error(
-            `[${session.key}] Sesión cerrada (logout). Usa relogin para vincular otro número.`,
-          );
-          session.consecutiveFailures = 0;
-          return;
-        }
-
-        if (
-          session.consecutiveFailures >=
-          WhatsappService.MAX_FAILURES_BEFORE_RESET
-        ) {
-          this.logger.error(
-            `[${session.key}] Sesión inestable tras ${session.consecutiveFailures} intentos. Limpiando credenciales para regenerar QR...`,
+            `[${session.key}] WhatsApp cerró la sesión (logout). Limpiando credenciales para regenerar QR...`,
           );
           session.consecutiveFailures = 0;
           session.clearSession?.()
@@ -262,6 +368,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
               ),
             )
             .finally(() => {
+              // Reconecta para que getQr() pueda emitir un QR nuevo.
               setTimeout(
                 () => this.connect(session).catch((e) => this.logger.error(e)),
                 3000,
@@ -270,9 +377,13 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
           return;
         }
 
-        const delay = 5000 * session.consecutiveFailures;
+        // Backoff exponencial acotado (5s, 10s, 20s, 40s... máx 60s). Reintenta
+        // indefinidamente SIN borrar credenciales: la sesión se recupera sola
+        // cuando la red/servicio vuelve, aunque Render haya dormido el proceso.
+        const delay = Math.min(60000, 5000 * 2 ** (session.consecutiveFailures - 1));
         this.logger.warn(
-          `[${session.key}] Conexión cerrada (intento ${session.consecutiveFailures}). Reintentando en ${delay / 1000}s...`,
+          `[${session.key}] Conexión cerrada (intento ${session.consecutiveFailures}, code=${statusCode ?? 'n/a'}). ` +
+            `Reintentando en ${Math.round(delay / 1000)}s SIN borrar la sesión...`,
         );
         setTimeout(
           () => this.connect(session).catch((e) => this.logger.error(e)),
@@ -294,6 +405,11 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     );
     session.ready = false;
     session.currentQr = null;
+    // Relogin vuelve al método por defecto (QR). Si el admin quiere código,
+    // usará getPairingCode después.
+    session.usePairing = false;
+    session.pairingPhone = null;
+    session.pairingCode = null;
 
     try {
       await session.sock?.logout();

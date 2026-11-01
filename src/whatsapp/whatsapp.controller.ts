@@ -45,6 +45,38 @@ export class WhatsappController {
     return data;
   }
 
+  /**
+   * Devuelve un CÓDIGO de emparejamiento (8 caracteres) para vincular por
+   * número de teléfono, sin escanear QR. Útil cuando el admin abre la app en el
+   * mismo teléfono donde tiene WhatsApp.
+   *
+   * El admin lo ingresa en: WhatsApp > Dispositivos vinculados > Vincular con
+   * número de teléfono.
+   */
+  @ApiOperation({
+    summary: 'Código de emparejamiento por número (alternativa al QR)',
+    description:
+      'Genera un código de 8 caracteres para vincular WhatsApp sin QR. Requiere el número en formato internacional.',
+  })
+  @ApiQuery({ name: 'conjunto', required: false })
+  @ApiQuery({ name: 'phone', required: true, description: 'Número en formato internacional (ej: 573001112233)' })
+  @Get('pairing-code')
+  async pairingCode(
+    @Query('phone') phone: string,
+    @Query('conjunto') conjunto?: string,
+  ) {
+    if (!phone) {
+      return {
+        ready: false,
+        code: null,
+        conjunto: conjunto || null,
+        message: 'Falta el parámetro "phone" (número en formato internacional).',
+      };
+    }
+    const data = await this.whatsapp.getPairingCode(conjunto, phone);
+    return { ...data, conjunto: conjunto || null };
+  }
+
   /** Página HTML sencilla para escanear el QR desde el navegador. */
   @ApiOperation({ summary: 'Página HTML para escanear el QR (por conjunto)' })
   @ApiQuery({ name: 'conjunto', required: false })

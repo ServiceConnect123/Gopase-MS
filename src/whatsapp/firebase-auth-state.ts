@@ -190,8 +190,13 @@ export async function useFirebaseAuthState(
         },
       },
     },
+    // Las credenciales cambian pocas veces (vinculación inicial, rotaciones) y
+    // son CRÍTICAS para la persistencia: si el proceso muere (p. ej. Render
+    // reciclando el contenedor) antes de volcar el debounce, se perdería el
+    // vínculo recién hecho. Por eso se escriben de inmediato (flush), a
+    // diferencia de las keys/pre-keys que llegan en ráfagas y sí se agrupan.
     saveCreds: async () => {
-      scheduleWrite();
+      await flush();
     },
     clear,
     flush,

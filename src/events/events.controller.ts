@@ -44,6 +44,23 @@ export class EventsController {
     return this.events.update(id, body);
   }
 
+  @ApiOperation({ summary: 'Marcar asistencia a un evento' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        usuario: { type: 'string' },
+        nombre: { type: 'string' },
+        estado: { type: 'string', enum: ['asistio', 'no_asistio'] },
+      },
+      required: ['usuario', 'estado'],
+    },
+  })
+  @Post(':id/attendance')
+  async attendance(@Param('id') id: string, @Body() body: any) {
+    return this.events.markAttendance(id, body);
+  }
+
   @ApiOperation({ summary: 'Eliminar evento' })
   @Delete(':id')
   async remove(@Param('id') id: string) {
