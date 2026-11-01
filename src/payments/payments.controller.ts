@@ -272,6 +272,7 @@ export class PaymentsController {
       conjunto?: string;
       conjuntoId?: string;
       concepto?: string;
+      tipoRecaudo?: string;
     },
   ) {
     return this.payments.createPayments({
@@ -284,6 +285,7 @@ export class PaymentsController {
       conjunto: body.conjunto,
       conjuntoId: body.conjuntoId,
       concepto: body.concepto,
+      tipoRecaudo: body.tipoRecaudo,
     });
   }
 

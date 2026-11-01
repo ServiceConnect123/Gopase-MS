@@ -190,6 +190,14 @@ export class EventsController {
     return this.events.markAttendance(id, body);
   }
 
+  @ApiOperation({ summary: 'Finalizar o reabrir un evento (admin)' })
+  @ApiBody({ schema: { type: 'object', properties: { finalizado: { type: 'boolean' } } } })
+  @Post(':id/finalize')
+  async finalize(@Param('id') id: string, @Body() body: any) {
+    // Por defecto finaliza; enviar { finalizado: false } para reabrir.
+    return this.events.setFinalized(id, body?.finalizado !== false);
+  }
+
   @ApiOperation({ summary: 'Eliminar evento' })
   @Delete(':id')
   async remove(@Param('id') id: string) {
