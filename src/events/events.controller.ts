@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Put, Query, Req } from '@nestjs/common';
 import { ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { EventsService } from './events.service';
 
@@ -22,6 +22,7 @@ export class EventsController {
       type: 'object',
       properties: {
         id: { type: 'string' },
+        tipo: { type: 'string', enum: ['evento', 'votacion'], description: "Tipo (por defecto 'evento')" },
         titulo: { type: 'string' },
         descripcion: { type: 'string' },
         fecha: { type: 'string' },
@@ -29,6 +30,13 @@ export class EventsController {
         lugar: { type: 'string' },
         conjunto: { type: 'string', description: 'nombre del conjunto' },
         creador: { type: 'string' },
+        pregunta: { type: 'string', description: 'solo votación' },
+        opciones: { type: 'array', description: 'solo votación: [{id,texto}]' },
+        audiencia: { type: 'string', enum: ['todos', 'seleccion'], description: "Por defecto 'todos'" },
+        invitados: { type: 'array', description: "Usernames invitados (si audiencia='seleccion')" },
+        meetHabilitado: { type: 'boolean', description: 'Habilita la videollamada LiveKit' },
+        meetModo: { type: 'string', enum: ['reunion', 'streaming'] },
+        ponentes: { type: 'array', description: 'Usernames que pueden hablar/transmitir' },
       },
       required: ['titulo', 'fecha'],
     },
@@ -42,6 +50,102 @@ export class EventsController {
   @Put(':id')
   async update(@Param('id') id: string, @Body() body: any) {
     return this.events.update(id, body);
+  }
+
+  @ApiOperation({
+    summary: 'Token de acceso a la videollamada (LiveKit) del evento',
+    description:
+      'Devuelve { url, token, room, canPublish }. El rol de publicación depende de si es admin/ponente o del modo. Solo se emite a usuarios de la audiencia.',
+  })
+  @ApiQuery({ name: 'usuario', required: true })
+  @ApiQuery({ name: 'nombre', required: false })
+  @ApiQuery({ name: 'esAdmin', required: false, description: 'Fallback cuando el guard de auth está desactivado' })
+  @Get(':id/meet-token')
+  async meetToken(
+    @Param('id') id: string,
+    @Query('usuario') usuario: string,
+    @Req() req: any,
+    @Query('nombre') nombre?: string,
+    @Query('esAdmin') esAdminQuery?: string,
+  ) {
+    // Si el guard de auth está activo, la identidad/rol vienen del token verificado
+    // (fuente de confianza). Cuando el guard está desactivado no hay req.user, así
+    // que se usa el query (best-effort) hasta que el guard quede siempre activo.
+    const authUser = req?.user?.sub ? String(req.user.sub) : '';
+    const rol = String(req?.user?.rol || '');
+    const esAdmin = req?.user
+      ? rol === 'admin' || rol === 'superAdmin'
+      : esAdminQuery === 'true';
+    return this.events.createMeetToken(id, {
+      usuario: authUser || usuario,
+      nombre,
+      esAdmin,
+    });
+  }
+
+  // --- Moderación de la videollamada (solo admin) ---
+  @ApiOperation({ summary: 'Promover a ponente / degradar a espectador (admin)' })
+  @ApiBody({ schema: { type: 'object', properties: { usuario: { type: 'string' }, canPublish: { type: 'boolean' } }, required: ['usuario', 'canPublish'] } })
+  @Post(':id/meet/publish')
+  async meetSetPublish(@Param('id') id: string, @Body() body: any) {
+    return this.events.setParticipantPublish(id, String(body?.usuario || ''), body?.canPublish === true);
+  }
+
+  @ApiOperation({ summary: 'Silenciar a un participante (admin)' })
+  @ApiBody({ schema: { type: 'object', properties: { usuario: { type: 'string' } }, required: ['usuario'] } })
+  @Post(':id/meet/mute')
+  async meetMute(@Param('id') id: string, @Body() body: any) {
+    return this.events.muteParticipant(id, String(body?.usuario || ''));
+  }
+
+  @ApiOperation({ summary: 'Expulsar a un participante (admin)' })
+  @ApiBody({ schema: { type: 'object', properties: { usuario: { type: 'string' } }, required: ['usuario'] } })
+  @Post(':id/meet/remove')
+  async meetRemove(@Param('id') id: string, @Body() body: any) {
+    return this.events.removeParticipant(id, String(body?.usuario || ''));
+  }
+
+  // --- Grabación (acta en video) ---
+  @ApiOperation({ summary: 'Iniciar grabación de la videollamada (admin)' })
+  @Post(':id/meet/recording/start')
+  async meetRecStart(@Param('id') id: string) {
+    return this.events.startRecording(id);
+  }
+
+  @ApiOperation({ summary: 'Detener grabación de la videollamada (admin)' })
+  @Post(':id/meet/recording/stop')
+  async meetRecStop(@Param('id') id: string) {
+    return this.events.stopRecording(id);
+  }
+
+  // --- HLS (transmisión para espectadores masivos) ---
+  @ApiOperation({ summary: 'Iniciar transmisión HLS de la videollamada (admin)' })
+  @Post(':id/meet/hls/start')
+  async meetHlsStart(@Param('id') id: string) {
+    return this.events.startHls(id);
+  }
+
+  @ApiOperation({ summary: 'Detener transmisión HLS (admin)' })
+  @Post(':id/meet/hls/stop')
+  async meetHlsStop(@Param('id') id: string) {
+    return this.events.stopHls(id);
+  }
+
+  @ApiOperation({ summary: 'Registrar voto en una votación' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        usuario: { type: 'string' },
+        nombre: { type: 'string' },
+        opcionId: { type: 'string' },
+      },
+      required: ['usuario', 'opcionId'],
+    },
+  })
+  @Post(':id/vote')
+  async vote(@Param('id') id: string, @Body() body: any) {
+    return this.events.markVote(id, body);
   }
 
   @ApiOperation({ summary: 'Marcar asistencia a un evento' })

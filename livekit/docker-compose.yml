@@ -1,0 +1,34 @@
+# ==========================================================================
+# LiveKit self-hosted para las videollamadas de goPase (eventos)
+# ==========================================================================
+# Despliega un nodo de LiveKit + Redis. Pensado para un VPS con buen ancho de
+# banda (para 200-500 espectadores, el ancho de banda de SALIDA es lo crítico).
+#
+# Uso:
+#   1) Edita livekit.yaml (keys, dominio).
+#   2) Abre puertos en el firewall: 7880/tcp, 7881/tcp, 5349/tcp, 50000-60000/udp.
+#   3) docker compose up -d
+#
+# TLS: LiveKit necesita WSS (wss://) para que los navegadores/apps conecten. Lo
+# más simple es poner un reverse proxy (Caddy/Traefik/nginx) con Let's Encrypt
+# delante del puerto 7880, apuntando tu dominio (ej: meet.gopasehome.site).
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    networks: [livekit]
+
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    depends_on: [redis]
+    network_mode: host # necesario para el rango UDP de media; usa host networking
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+
+networks:
+  livekit:
+    driver: bridge
