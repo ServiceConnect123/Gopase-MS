@@ -105,6 +105,31 @@ export class EventsController {
     return this.events.removeParticipant(id, String(body?.usuario || ''));
   }
 
+  @ApiOperation({ summary: 'Silenciar a todos los participantes (admin)' })
+  @ApiBody({ schema: { type: 'object', properties: { excepto: { type: 'string', description: 'identity a NO silenciar (ej. el admin)' } } } })
+  @Post(':id/meet/mute-all')
+  async meetMuteAll(@Param('id') id: string, @Body() body: any) {
+    return this.events.muteAll(id, body?.excepto ? String(body.excepto) : undefined);
+  }
+
+  @ApiOperation({ summary: 'Guardar una votación hecha en vivo en el registro del evento (admin)' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        pregunta: { type: 'string' },
+        opciones: { type: 'array' },
+        resultados: { type: 'object', description: 'mapa opcionId -> conteo' },
+        totalVotos: { type: 'number' },
+      },
+      required: ['opciones', 'resultados'],
+    },
+  })
+  @Post(':id/meet/live-poll')
+  async meetLivePoll(@Param('id') id: string, @Body() body: any) {
+    return this.events.saveLivePoll(id, body);
+  }
+
   // --- Grabación (acta en video) ---
   @ApiOperation({ summary: 'Iniciar grabación de la videollamada (admin)' })
   @Post(':id/meet/recording/start')
