@@ -83,6 +83,54 @@ export class EventsController {
     });
   }
 
+  // --- Moderación de la videollamada (solo admin) ---
+  @ApiOperation({ summary: 'Promover a ponente / degradar a espectador (admin)' })
+  @ApiBody({ schema: { type: 'object', properties: { usuario: { type: 'string' }, canPublish: { type: 'boolean' } }, required: ['usuario', 'canPublish'] } })
+  @Post(':id/meet/publish')
+  async meetSetPublish(@Param('id') id: string, @Body() body: any) {
+    return this.events.setParticipantPublish(id, String(body?.usuario || ''), body?.canPublish === true);
+  }
+
+  @ApiOperation({ summary: 'Silenciar a un participante (admin)' })
+  @ApiBody({ schema: { type: 'object', properties: { usuario: { type: 'string' } }, required: ['usuario'] } })
+  @Post(':id/meet/mute')
+  async meetMute(@Param('id') id: string, @Body() body: any) {
+    return this.events.muteParticipant(id, String(body?.usuario || ''));
+  }
+
+  @ApiOperation({ summary: 'Expulsar a un participante (admin)' })
+  @ApiBody({ schema: { type: 'object', properties: { usuario: { type: 'string' } }, required: ['usuario'] } })
+  @Post(':id/meet/remove')
+  async meetRemove(@Param('id') id: string, @Body() body: any) {
+    return this.events.removeParticipant(id, String(body?.usuario || ''));
+  }
+
+  // --- Grabación (acta en video) ---
+  @ApiOperation({ summary: 'Iniciar grabación de la videollamada (admin)' })
+  @Post(':id/meet/recording/start')
+  async meetRecStart(@Param('id') id: string) {
+    return this.events.startRecording(id);
+  }
+
+  @ApiOperation({ summary: 'Detener grabación de la videollamada (admin)' })
+  @Post(':id/meet/recording/stop')
+  async meetRecStop(@Param('id') id: string) {
+    return this.events.stopRecording(id);
+  }
+
+  // --- HLS (transmisión para espectadores masivos) ---
+  @ApiOperation({ summary: 'Iniciar transmisión HLS de la videollamada (admin)' })
+  @Post(':id/meet/hls/start')
+  async meetHlsStart(@Param('id') id: string) {
+    return this.events.startHls(id);
+  }
+
+  @ApiOperation({ summary: 'Detener transmisión HLS (admin)' })
+  @Post(':id/meet/hls/stop')
+  async meetHlsStop(@Param('id') id: string) {
+    return this.events.stopHls(id);
+  }
+
   @ApiOperation({ summary: 'Registrar voto en una votación' })
   @ApiBody({
     schema: {

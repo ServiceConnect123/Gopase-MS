@@ -1,6 +1,15 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AccessToken } from 'livekit-server-sdk';
+import {
+  AccessToken,
+  RoomServiceClient,
+  EgressClient,
+  EncodedFileType,
+  EncodedFileOutput,
+  SegmentedFileOutput,
+  S3Upload,
+  GCPUpload,
+} from 'livekit-server-sdk';
 import { FirebaseService } from '../firebase/firebase.service';
 
 /**
@@ -25,6 +34,35 @@ export class EventsService {
   private roomName(evento: any): string {
     const conj = this.safeKey(evento?.conjunto || 'sin-conjunto').toLowerCase();
     return `gopase-${conj}-${this.safeKey(evento?.id || '')}`;
+  }
+
+  /** Credenciales LiveKit (host http(s), api key, secret). Null si falta algo. */
+  private livekitCreds(): { host: string; apiKey: string; apiSecret: string } | null {
+    const apiKey = this.config.get<string>('LIVEKIT_API_KEY', '');
+    const apiSecret = this.config.get<string>('LIVEKIT_API_SECRET', '');
+    const url = this.config.get<string>('LIVEKIT_URL', '');
+    if (!apiKey || !apiSecret || !url) return null;
+    // RoomService/Egress usan HTTP(S), no WSS: convertimos el esquema.
+    const host = url.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
+    return { host, apiKey, apiSecret };
+  }
+
+  private roomService(): RoomServiceClient | null {
+    const c = this.livekitCreds();
+    return c ? new RoomServiceClient(c.host, c.apiKey, c.apiSecret) : null;
+  }
+
+  private egressClient(): EgressClient | null {
+    const c = this.livekitCreds();
+    return c ? new EgressClient(c.host, c.apiKey, c.apiSecret) : null;
+  }
+
+  /** Carga el evento desde RTDB o null si no existe. */
+  private async loadEvento(id: string): Promise<any | null> {
+    const key = this.safeKey(id);
+    if (!key) return null;
+    const snap = await this.firebase.db().ref(`${MIRROR_EVENTOS}/${key}`).get();
+    return snap.exists() ? snap.val() : null;
   }
 
   private safeKey(raw: unknown): string {
@@ -463,6 +501,195 @@ export class EventsService {
     } catch (err: any) {
       this.logger.error(`[events] createMeetToken ${key} falló: ${err?.message}`);
       return { success: false, message: err?.message || 'No se pudo generar el acceso a la videollamada.' };
+    }
+  }
+
+  // ==========================================================================
+  // Moderación de la sala (solo admin). Actúan sobre LiveKit en vivo.
+  // ==========================================================================
+
+  /**
+   * Cambia el permiso de publicación de un participante (promover ponente o
+   * degradar a espectador). Solo admin. `canPublish` true = puede hablar.
+   */
+  async setParticipantPublish(
+    id: string,
+    targetIdentity: string,
+    canPublish: boolean,
+  ): Promise<{ success: boolean; message?: string }> {
+    const svc = this.roomService();
+    if (!svc) return { success: false, message: 'La videollamada no está configurada.' };
+    const evento = await this.loadEvento(id);
+    if (!evento) return { success: false, message: 'El evento no existe.' };
+    const room = this.roomName(evento);
+    try {
+      await svc.updateParticipant(room, targetIdentity, undefined, {
+        canPublish,
+        canSubscribe: true,
+        canPublishData: true,
+      });
+      return { success: true, message: canPublish ? 'Ponente habilitado.' : 'Vuelto a espectador.' };
+    } catch (err: any) {
+      this.logger.error(`[events] setParticipantPublish falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo actualizar el participante.' };
+    }
+  }
+
+  /** Silencia (mute) todas las pistas publicadas por un participante. */
+  async muteParticipant(
+    id: string,
+    targetIdentity: string,
+  ): Promise<{ success: boolean; message?: string }> {
+    const svc = this.roomService();
+    if (!svc) return { success: false, message: 'La videollamada no está configurada.' };
+    const evento = await this.loadEvento(id);
+    if (!evento) return { success: false, message: 'El evento no existe.' };
+    const room = this.roomName(evento);
+    try {
+      const p = await svc.getParticipant(room, targetIdentity);
+      for (const track of p.tracks || []) {
+        await svc.mutePublishedTrack(room, targetIdentity, track.sid, true);
+      }
+      return { success: true, message: 'Participante silenciado.' };
+    } catch (err: any) {
+      this.logger.error(`[events] muteParticipant falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo silenciar.' };
+    }
+  }
+
+  /** Expulsa a un participante de la sala. */
+  async removeParticipant(
+    id: string,
+    targetIdentity: string,
+  ): Promise<{ success: boolean; message?: string }> {
+    const svc = this.roomService();
+    if (!svc) return { success: false, message: 'La videollamada no está configurada.' };
+    const evento = await this.loadEvento(id);
+    if (!evento) return { success: false, message: 'El evento no existe.' };
+    const room = this.roomName(evento);
+    try {
+      await svc.removeParticipant(room, targetIdentity);
+      return { success: true, message: 'Participante expulsado.' };
+    } catch (err: any) {
+      this.logger.error(`[events] removeParticipant falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo expulsar.' };
+    }
+  }
+
+  // ==========================================================================
+  // Grabación (Egress a archivo) y HLS (Egress a segmentos). Requieren storage.
+  // ==========================================================================
+
+  /** Configura el destino de almacenamiento (S3 o GCP) desde env. */
+  private buildUpload(): S3Upload | GCPUpload | null {
+    const provider = this.config.get<string>('LIVEKIT_EGRESS_PROVIDER', '').toLowerCase();
+    if (provider === 's3') {
+      return new S3Upload({
+        accessKey: this.config.get<string>('LIVEKIT_S3_ACCESS_KEY', ''),
+        secret: this.config.get<string>('LIVEKIT_S3_SECRET', ''),
+        region: this.config.get<string>('LIVEKIT_S3_REGION', ''),
+        bucket: this.config.get<string>('LIVEKIT_S3_BUCKET', ''),
+        endpoint: this.config.get<string>('LIVEKIT_S3_ENDPOINT', '') || undefined,
+      });
+    }
+    if (provider === 'gcp') {
+      return new GCPUpload({
+        credentials: this.config.get<string>('LIVEKIT_GCP_CREDENTIALS', ''),
+        bucket: this.config.get<string>('LIVEKIT_GCP_BUCKET', ''),
+      });
+    }
+    return null;
+  }
+
+  /** Inicia la grabación (acta en video) de la sala. Solo admin. */
+  async startRecording(id: string): Promise<{ success: boolean; message?: string; egressId?: string }> {
+    const egress = this.egressClient();
+    if (!egress) return { success: false, message: 'La videollamada no está configurada.' };
+    const upload = this.buildUpload();
+    if (!upload) return { success: false, message: 'El almacenamiento de grabación no está configurado.' };
+    const evento = await this.loadEvento(id);
+    if (!evento) return { success: false, message: 'El evento no existe.' };
+    const room = this.roomName(evento);
+    const key = this.safeKey(id);
+
+    try {
+      const output = new EncodedFileOutput({
+        fileType: EncodedFileType.MP4,
+        filepath: `grabaciones/${room}-{time}.mp4`,
+        output: upload instanceof S3Upload ? { case: 's3', value: upload } : { case: 'gcp', value: upload },
+      });
+      const info = await egress.startRoomCompositeEgress(room, output);
+      // Guarda el egressId en el evento para poder detenerlo luego.
+      await this.firebase.db().ref(`${MIRROR_EVENTOS}/${key}/grabacionEgressId`).set(info.egressId);
+      return { success: true, egressId: info.egressId, message: 'Grabación iniciada.' };
+    } catch (err: any) {
+      this.logger.error(`[events] startRecording falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo iniciar la grabación.' };
+    }
+  }
+
+  /** Detiene la grabación en curso de la sala. Solo admin. */
+  async stopRecording(id: string): Promise<{ success: boolean; message?: string }> {
+    const egress = this.egressClient();
+    if (!egress) return { success: false, message: 'La videollamada no está configurada.' };
+    const evento = await this.loadEvento(id);
+    if (!evento) return { success: false, message: 'El evento no existe.' };
+    const egressId = evento.grabacionEgressId;
+    if (!egressId) return { success: false, message: 'No hay una grabación en curso.' };
+    const key = this.safeKey(id);
+    try {
+      await egress.stopEgress(egressId);
+      await this.firebase.db().ref(`${MIRROR_EVENTOS}/${key}/grabacionEgressId`).remove();
+      return { success: true, message: 'Grabación detenida. El archivo quedará disponible en el almacenamiento.' };
+    } catch (err: any) {
+      this.logger.error(`[events] stopRecording falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo detener la grabación.' };
+    }
+  }
+
+  /**
+   * Inicia una transmisión HLS de la sala (segmentos a storage) para que
+   * audiencias masivas vean sin entrar como participantes. Solo admin.
+   */
+  async startHls(id: string): Promise<{ success: boolean; message?: string; egressId?: string }> {
+    const egress = this.egressClient();
+    if (!egress) return { success: false, message: 'La videollamada no está configurada.' };
+    const upload = this.buildUpload();
+    if (!upload) return { success: false, message: 'El almacenamiento de HLS no está configurado.' };
+    const evento = await this.loadEvento(id);
+    if (!evento) return { success: false, message: 'El evento no existe.' };
+    const room = this.roomName(evento);
+    const key = this.safeKey(id);
+    try {
+      const output = new SegmentedFileOutput({
+        filenamePrefix: `hls/${room}`,
+        playlistName: `${room}.m3u8`,
+        output: upload instanceof S3Upload ? { case: 's3', value: upload } : { case: 'gcp', value: upload },
+      });
+      const info = await egress.startRoomCompositeEgress(room, { segments: output });
+      await this.firebase.db().ref(`${MIRROR_EVENTOS}/${key}/hlsEgressId`).set(info.egressId);
+      return { success: true, egressId: info.egressId, message: 'Transmisión HLS iniciada.' };
+    } catch (err: any) {
+      this.logger.error(`[events] startHls falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo iniciar la transmisión.' };
+    }
+  }
+
+  async stopHls(id: string): Promise<{ success: boolean; message?: string }> {
+    const egress = this.egressClient();
+    if (!egress) return { success: false, message: 'La videollamada no está configurada.' };
+    const evento = await this.loadEvento(id);
+    if (!evento) return { success: false, message: 'El evento no existe.' };
+    const egressId = evento.hlsEgressId;
+    if (!egressId) return { success: false, message: 'No hay una transmisión en curso.' };
+    const key = this.safeKey(id);
+    try {
+      await egress.stopEgress(egressId);
+      await this.firebase.db().ref(`${MIRROR_EVENTOS}/${key}/hlsEgressId`).remove();
+      return { success: true, message: 'Transmisión detenida.' };
+    } catch (err: any) {
+      this.logger.error(`[events] stopHls falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo detener la transmisión.' };
     }
   }
 

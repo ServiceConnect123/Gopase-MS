@@ -90,3 +90,47 @@ permisos de cámara y micrófono.
 - Tokens de acceso: https://docs.livekit.io/home/get-started/authentication/
 
 > Contenido basado en la documentación oficial de LiveKit; parafraseado para esta guía.
+
+## 7. Grabación (acta en video) y transmisión HLS — Egress
+
+Las funciones de **grabar la reunión** y **transmitir en HLS** usan el *Egress*
+de LiveKit, que necesita un **almacenamiento de objetos** (S3 o GCP) donde
+dejar los archivos. Sin storage configurado, esos botones avisan "no
+configurado" y el resto del meet funciona igual.
+
+### Variables (en el microservicio `wspsend-ms`)
+
+Elige proveedor con `LIVEKIT_EGRESS_PROVIDER` = `s3` o `gcp`:
+
+```
+LIVEKIT_EGRESS_PROVIDER=s3
+LIVEKIT_S3_ACCESS_KEY=...
+LIVEKIT_S3_SECRET=...
+LIVEKIT_S3_REGION=us-east-1
+LIVEKIT_S3_BUCKET=gopase-grabaciones
+LIVEKIT_S3_ENDPOINT=        # opcional (S3-compatible: R2, MinIO, etc.)
+```
+o
+```
+LIVEKIT_EGRESS_PROVIDER=gcp
+LIVEKIT_GCP_CREDENTIALS={...json de service account en una línea...}
+LIVEKIT_GCP_BUCKET=gopase-grabaciones
+```
+
+> Nota: con **LiveKit Cloud**, el Egress corre del lado de LiveKit y entrega
+> los archivos a TU bucket (las credenciales de S3/GCP son tuyas). Con
+> self-hosted, además debes habilitar el servicio de Egress en el servidor.
+
+### ⚠️ Costo
+
+**Egress (grabación y HLS) consume cuota/costo ADICIONAL** en LiveKit (aparte de
+los minutos de participantes), más el almacenamiento del bucket. Úsalo con
+criterio: típicamente grabar la asamblea completa y detenerla al terminar.
+
+### Qué guarda la app
+
+- Al iniciar grabación/HLS, el backend guarda `grabacionEgressId` / `hlsEgressId`
+  en el evento (para poder detenerlos). El archivo final queda en tu bucket con
+  prefijo `grabaciones/` o `hls/`. (El enlace público depende de la config de tu
+  bucket; si quieres el enlace guardado automáticamente en el evento, se puede
+  agregar un webhook de Egress más adelante.)
