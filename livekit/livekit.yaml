@@ -1,0 +1,44 @@
+# ==========================================================================
+# Configuración de LiveKit server (self-hosted) para las videollamadas de goPase
+# ==========================================================================
+# Doc oficial: https://docs.livekit.io/home/self-hosting/deployment/
+#
+# IMPORTANTE:
+#  - Reemplaza las API keys por valores propios (genéralas con:
+#      docker run --rm livekit/livekit-server generate-keys
+#    ) y usa EXACTAMENTE las mismas en el microservicio (LIVEKIT_API_KEY /
+#    LIVEKIT_API_SECRET).
+#  - Este archivo NO debe subirse con claves reales al repo. Deja placeholders.
+
+port: 7880
+
+rtc:
+  # Rango de puertos UDP para el tráfico de media. Deben estar ABIERTOS en el
+  # firewall del VPS. A mayor cantidad de participantes, más puertos.
+  port_range_start: 50000
+  port_range_end: 60000
+  # TCP de respaldo cuando el UDP está bloqueado (redes corporativas).
+  tcp_port: 7881
+  # IP pública del servidor (o déjalo en true para autodetección).
+  use_external_ip: true
+
+# Claves de API. kid -> secret. Genera las tuyas; estas son placeholders.
+keys:
+  REEMPLAZA_API_KEY: REEMPLAZA_API_SECRET_LARGO_Y_ALEATORIO
+
+# Redis es necesario para escalar a múltiples nodos. Para un solo nodo es
+# opcional, pero se recomienda para salas grandes (cientos de participantes).
+redis:
+  address: redis:6379
+
+# TURN embebido (atraviesa NAT/firewalls de clientes). Requiere dominio + TLS.
+turn:
+  enabled: true
+  domain: REEMPLAZA_TU_DOMINIO   # ej: meet.gopasehome.site
+  tls_port: 5349
+  # Si usas certificados propios (no Let's Encrypt automático), indícalos:
+  # cert_file: /etc/letsencrypt/live/REEMPLAZA_TU_DOMINIO/fullchain.pem
+  # key_file: /etc/letsencrypt/live/REEMPLAZA_TU_DOMINIO/privkey.pem
+
+logging:
+  level: info
