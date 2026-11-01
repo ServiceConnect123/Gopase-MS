@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
 import { PropertiesService } from '../properties/properties.service';
 import { ReportsService } from '../reports/reports.service';
+import { FundsService, DEFAULT_FUND_NAME } from '../funds/funds.service';
 
 /**
  * Lecturas y cálculos de la pantalla de Pagos, movidos del frontend al backend.
@@ -116,6 +117,18 @@ export interface FinanceSummary {
   /** Saldo acumulado de años anteriores (arrastre). */
   saldoInicial: number;
   totalUsers: number;
+  /** Desglose del año por tipo de recaudo (fondo). */
+  porFondo: Array<{
+    id: string;
+    nombre: string;
+    esDefault: boolean;
+    visibleParaPropietario: boolean;
+    metaMensual: number;
+    metaAnual: number;
+    recaudado: number;
+    gastado: number;
+    neto: number;
+  }>;
 }
 
 @Injectable()
@@ -126,6 +139,7 @@ export class PaymentsService {
     private readonly firebase: FirebaseService,
     private readonly properties: PropertiesService,
     private readonly reports: ReportsService,
+    private readonly funds: FundsService,
   ) {}
 
   private parseFechaIngreso(raw: any): { year: number; monthIndex: number } | null {
@@ -460,6 +474,8 @@ export class PaymentsService {
   private withPositionalAliases(p: Pago): any {
     return {
       ...p,
+      // Fondo del pago (compat: pagos antiguos sin tipo => Administración).
+      tipoRecaudo: (p as any).tipoRecaudo || 'Administración',
       dato_1: p.id ?? '',
       dato_2: p.usuario ?? '',
       dato_3: p.concepto ?? '',
@@ -467,6 +483,7 @@ export class PaymentsService {
       dato_5: p.fecha ?? '',
       dato_6: p.estado ?? '',
       dato_7: p.referencia ?? '',
+      dato_8: (p as any).tipoRecaudo || 'Administración',
     };
   }
 
@@ -715,12 +732,75 @@ export class PaymentsService {
       };
     });
 
+    // --- Desglose por FONDO (tipo de recaudo) del año seleccionado ---
+    // Recaudado = cuotas confirmadas por fecha del año + ingresos extra, por su
+    // fondo. Gastado = gastos del año por su fondo. Se cruza con el catálogo de
+    // fondos del conjunto (incluye meta y visibilidad).
+    const fondoDe = (s: unknown) => {
+      const v = String(s ?? '').trim();
+      return v || DEFAULT_FUND_NAME;
+    };
+    let catalogoFondos: any[] = [];
+    try {
+      catalogoFondos = await this.funds.list(conjunto || '');
+    } catch {
+      catalogoFondos = [];
+    }
+
+    // Acumuladores por nombre de fondo.
+    const recaudadoPorFondo = new Map<string, number>();
+    const gastadoPorFondo = new Map<string, number>();
+
+    for (const p of cuotasDelAnioPorFecha) {
+      const f = fondoDe((p as any).tipoRecaudo);
+      recaudadoPorFondo.set(f, (recaudadoPorFondo.get(f) || 0) + (parseFloat(String(p.valor)) || 0));
+    }
+    for (const r of extraYear) {
+      const f = fondoDe((r as any).fondo);
+      recaudadoPorFondo.set(f, (recaudadoPorFondo.get(f) || 0) + montoReporte(r));
+    }
+    for (const r of gastosYear) {
+      const f = fondoDe((r as any).fondo);
+      gastadoPorFondo.set(f, (gastadoPorFondo.get(f) || 0) + montoReporte(r));
+    }
+
+    // Une catálogo + fondos que aparezcan en los datos aunque no estén en el catálogo.
+    const nombresFondos = new Set<string>([
+      ...catalogoFondos.map((f) => String(f.nombre)),
+      ...recaudadoPorFondo.keys(),
+      ...gastadoPorFondo.keys(),
+    ]);
+
+    const porFondo = Array.from(nombresFondos).map((nombre) => {
+      const cat = catalogoFondos.find((f) => String(f.nombre).toLowerCase() === nombre.toLowerCase());
+      const recaudado = recaudadoPorFondo.get(nombre) || 0;
+      const gastado = gastadoPorFondo.get(nombre) || 0;
+      const metaMensual = Number(cat?.metaMensual) || 0;
+      return {
+        id: cat?.id || nombre,
+        nombre,
+        esDefault: cat?.esDefault === true || nombre.toLowerCase() === DEFAULT_FUND_NAME.toLowerCase(),
+        visibleParaPropietario: cat ? cat.visibleParaPropietario !== false : true,
+        metaMensual,
+        // Meta del año = meta mensual x 12 (para comparar contra lo recaudado en el año).
+        metaAnual: metaMensual * 12,
+        recaudado,
+        gastado,
+        neto: recaudado - gastado,
+      };
+    }).sort((a, b) => {
+      if (a.esDefault && !b.esDefault) return -1;
+      if (!a.esDefault && b.esDefault) return 1;
+      return a.nombre.localeCompare(b.nombre);
+    });
+
     return {
       monthlyData,
       recaudoPorMes,
       totals: { totalIncome, totalExpenses, totalAjuste, totalBalance, saldoCaja },
       saldoInicial,
       totalUsers,
+      porFondo,
     };
   }
 
@@ -745,6 +825,8 @@ export class PaymentsService {
     // Concepto libre (p. ej. pago de una reserva). Si viene, se crea UN pago con
     // ese concepto y se ignora `meses`.
     concepto?: string;
+    // Tipo de recaudo (fondo) al que se asigna el pago. Por defecto 'Administración'.
+    tipoRecaudo?: string;
   }): Promise<{ success: boolean; ids: string[]; pagos: Pago[] }> {
     const db = this.firebase.db();
     const hoy = new Date().toISOString().split('T')[0];
@@ -770,6 +852,8 @@ export class PaymentsService {
         referencia: input.referencia,
         conjunto: input.conjunto || '',
         conjuntoId: input.conjuntoId || '',
+        // Tipo de recaudo (fondo). Si no viene, 'Administración' por defecto.
+        tipoRecaudo: input.tipoRecaudo || 'Administración',
         // Marca de escritura por Firebase: la sync Sheets->RTDB no debe pisarlo.
         _fbWrite: true,
       };
@@ -790,7 +874,7 @@ export class PaymentsService {
     const snap = await ref.get();
     if (!snap.exists()) return { success: false, message: 'El pago no existe.' };
     const patch: Record<string, any> = { _fbWrite: true };
-    ['usuario', 'concepto', 'valor', 'fecha', 'estado', 'referencia'].forEach((f) => {
+    ['usuario', 'concepto', 'valor', 'fecha', 'estado', 'referencia', 'tipoRecaudo'].forEach((f) => {
       if ((changes as any)[f] !== undefined) patch[f] = String((changes as any)[f]);
     });
     await ref.update(patch);

@@ -34,6 +34,9 @@ export class ReportsService {
       tipo: dto.tipo ?? '',
       ubicacion: dto.ubicacion ?? '',
       estado: dto.estado ?? '',
+      // Fondo (tipo de recaudo) del que sale el gasto / al que entra el ingreso.
+      // Campo NOMBRADO aparte (dato_8 ya es el monto en gastos). Default: Administración.
+      fondo: dto.fondo ?? 'Administración',
       _fbWrite: true,
     };
   }
@@ -64,6 +67,8 @@ export class ReportsService {
         dato_7: rest.tipo ?? '',
         dato_8: rest.ubicacion ?? '',
         dato_9: rest.estado ?? '',
+        dato_10: rest.fondo ?? 'Administración',
+        fondo: rest.fondo ?? 'Administración',
       };
     });
   }
@@ -90,7 +95,7 @@ export class ReportsService {
     try {
       // Merge por campo presente (updateReport suele tocar solo el estado).
       const patch: Record<string, any> = { _fbWrite: true };
-      ['titulo', 'fecha', 'usuario', 'descripcion', 'conjunto', 'tipo', 'ubicacion', 'estado'].forEach((f) => {
+      ['titulo', 'fecha', 'usuario', 'descripcion', 'conjunto', 'tipo', 'ubicacion', 'estado', 'fondo'].forEach((f) => {
         const v = dto[f] ?? (f === 'usuario' ? dto.autor : undefined);
         if (v !== undefined) patch[f] = v;
       });
