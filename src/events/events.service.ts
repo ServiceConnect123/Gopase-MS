@@ -199,6 +199,9 @@ export class EventsService {
       meetHabilitado: dto.meetHabilitado === true || dto.meetHabilitado === 'true',
       meetModo: dto.meetModo === 'streaming' ? 'streaming' : 'reunion',
       ponentes: this.normalizeInvitados(dto.ponentes),
+      // Estado: un evento finalizado queda en solo-lectura (sin asistencia, voto,
+      // meet ni edición). Lo marca el admin; se preserva en update().
+      finalizado: dto.finalizado === true || dto.finalizado === 'true',
       // Puntos a tratar (lista) y asistencias (mapa por usuario). Se conservan
       // tal cual; en update() se preservan si el dto no los trae.
       puntos: this.normalizePuntos(dto.puntos),
@@ -232,6 +235,7 @@ export class EventsService {
         meetHabilitado: rest.meetHabilitado === true,
         meetModo: rest.meetModo === 'streaming' ? 'streaming' : 'reunion',
         ponentes: this.normalizeInvitados(rest.ponentes),
+        finalizado: rest.finalizado === true,
         // Normaliza las entidades hijas por si RTDB las devolvió como objeto.
         puntos: this.normalizePuntos(rest.puntos),
         asistencias: this.normalizeAsistencias(rest.asistencias),
@@ -275,11 +279,17 @@ export class EventsService {
     if (!snap.exists()) return { success: false, message: 'El evento no existe.' };
     try {
       const prev = snap.val() || {};
+      // Un evento finalizado no se puede editar.
+      if (prev.finalizado === true) {
+        return { success: false, message: 'El evento está finalizado y no se puede editar.' };
+      }
       // update() hace SET completo (reescribe). Para no perder las entidades
       // hijas, si el dto NO las trae, se conservan las existentes.
       const merged = {
         ...dto,
         id,
+        // 'finalizado' solo cambia por el endpoint dedicado, nunca desde update.
+        finalizado: prev.finalizado === true,
         tipo: dto.tipo !== undefined ? dto.tipo : prev.tipo,
         audiencia: dto.audiencia !== undefined ? dto.audiencia : prev.audiencia,
         invitados: dto.invitados !== undefined ? dto.invitados : prev.invitados,
@@ -338,6 +348,10 @@ export class EventsService {
     // llamada directa a la API no pueda saltarse la restricción.
     const evento = snap.val() || {};
 
+    if (evento.finalizado === true) {
+      return { success: false, message: 'El evento está finalizado.' };
+    }
+
     // Audiencia dirigida: solo los invitados pueden marcar asistencia.
     if (!this.puedeParticipar(evento, usuario)) {
       return { success: false, message: 'Este evento no está dirigido a ti.' };
@@ -393,6 +407,9 @@ export class EventsService {
     if (!snap.exists()) return { success: false, message: 'El evento no existe.' };
 
     const evento = snap.val() || {};
+    if (evento.finalizado === true) {
+      return { success: false, message: 'El evento está finalizado.' };
+    }
     if ((evento.tipo || 'evento') !== 'votacion') {
       return { success: false, message: 'Este evento no es una votación.' };
     }
@@ -468,6 +485,9 @@ export class EventsService {
     if (!snap.exists()) return { success: false, message: 'El evento no existe.' };
     const evento = snap.val() || {};
 
+    if (evento.finalizado === true) {
+      return { success: false, message: 'El evento está finalizado.' };
+    }
     if (evento.meetHabilitado !== true) {
       return { success: false, message: 'La videollamada no está habilitada para este evento.' };
     }
@@ -774,6 +794,32 @@ export class EventsService {
     } catch (err: any) {
       this.logger.error(`[events] saveLivePoll ${key} falló: ${err?.message}`);
       return { success: false, message: err?.message || 'No se pudo guardar la votación.' };
+    }
+  }
+
+  /**
+   * Finaliza (o reabre) un evento. Finalizado = solo lectura: no se marca
+   * asistencia ni voto, no se emite token de videollamada ni se puede editar.
+   */
+  async setFinalized(
+    id: string,
+    finalizado: boolean,
+  ): Promise<{ success: boolean; message?: string }> {
+    if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
+    const key = this.safeKey(id);
+    if (!key) return { success: false, message: 'ID requerido.' };
+    const ref = this.firebase.db().ref(`${MIRROR_EVENTOS}/${key}`);
+    const snap = await ref.get();
+    if (!snap.exists()) return { success: false, message: 'El evento no existe.' };
+    try {
+      await ref.child('finalizado').set(finalizado === true);
+      return {
+        success: true,
+        message: finalizado ? 'Evento finalizado.' : 'Evento reabierto.',
+      };
+    } catch (err: any) {
+      this.logger.error(`[events] setFinalized ${key} falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo actualizar el estado.' };
     }
   }
 
