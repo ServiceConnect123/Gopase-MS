@@ -32,14 +32,20 @@ export class FundsService {
   }
 
   private buildRecord(dto: any): Record<string, any> {
+    // El fondo por defecto (Administración) ES la caja general: nunca puede ser
+    // una caja separada.
+    const esDefault = dto.esDefault === true;
     return {
       id: String(dto.id),
       conjunto: String(dto.conjunto ?? ''),
       nombre: String(dto.nombre ?? ''),
-      esDefault: dto.esDefault === true,
+      esDefault,
       visibleParaPropietario:
         dto.visibleParaPropietario === undefined ? true : dto.visibleParaPropietario === true,
       metaMensual: Number(dto.metaMensual) || 0,
+      // cajaPropia: si true, el dinero de este fondo es una CAJA SEPARADA (saldo
+      // propio con arrastre, fuera de la caja general). El default nunca lo es.
+      cajaPropia: !esDefault && dto.cajaPropia === true,
       _fbWrite: true,
     };
   }
@@ -82,7 +88,11 @@ export class FundsService {
     return fondos
       .map((f) => {
         const { _fbWrite, ...rest } = f;
-        return rest;
+        return {
+          ...rest,
+          // Normaliza para fondos antiguos sin el campo. El default nunca es caja propia.
+          cajaPropia: rest.esDefault === true ? false : rest.cajaPropia === true,
+        };
       })
       // Default primero, luego por nombre.
       .sort((a, b) => {
@@ -124,6 +134,8 @@ export class FundsService {
       if (dto.nombre !== undefined && prev.esDefault !== true) patch.nombre = String(dto.nombre);
       if (dto.visibleParaPropietario !== undefined) patch.visibleParaPropietario = dto.visibleParaPropietario === true;
       if (dto.metaMensual !== undefined) patch.metaMensual = Number(dto.metaMensual) || 0;
+      // cajaPropia solo aplica a fondos NO default (Administración = caja general).
+      if (dto.cajaPropia !== undefined && prev.esDefault !== true) patch.cajaPropia = dto.cajaPropia === true;
       await ref.update(patch);
       return { success: true, message: 'Tipo de recaudo actualizado.' };
     } catch (err: any) {

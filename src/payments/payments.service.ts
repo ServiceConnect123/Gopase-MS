@@ -123,11 +123,26 @@ export interface FinanceSummary {
     nombre: string;
     esDefault: boolean;
     visibleParaPropietario: boolean;
+    /** true si el fondo es una caja separada (saldo propio). */
+    cajaPropia: boolean;
     metaMensual: number;
     metaAnual: number;
     recaudado: number;
     gastado: number;
     neto: number;
+  }>;
+  /**
+   * Cajas separadas (una por fondo con cajaPropia). Cada una con su saldo propio
+   * y arrastre, EXCLUIDA del saldoCaja general. Permite cuadre independiente.
+   */
+  cajas: Array<{
+    id: string;
+    nombre: string;
+    saldoInicial: number;
+    ingresos: number;
+    gastos: number;
+    ajuste: number;
+    saldoCaja: number;
   }>;
 }
 
@@ -635,6 +650,33 @@ export class PaymentsService {
     const montoReporte = (r: any) => parseFloat(String(r.ubicacion ?? r.dato_8 ?? 0)) || 0;
     const fechaReporte = (r: any) => String(r.fecha ?? r.dato_3 ?? '');
 
+    // --- Fondos / cajas separadas ---
+    // Catálogo de fondos del conjunto (incluye el flag cajaPropia). Con esto se
+    // separa la caja GENERAL (fondos normales) de cada CAJA PROPIA (fondo con
+    // saldo independiente). El fondo por defecto (Administración) es siempre la
+    // caja general.
+    let catalogoFondos: any[] = [];
+    try {
+      catalogoFondos = await this.funds.list(conjunto || '');
+    } catch {
+      catalogoFondos = [];
+    }
+    const normFondo = (s: unknown) => String(s ?? '').trim().toLowerCase();
+    const fondoDef = normFondo(DEFAULT_FUND_NAME);
+    // Nombres (lowercase) de fondos marcados como caja propia.
+    const cajaPropiaNames = new Set<string>(
+      catalogoFondos
+        .filter((f) => f.cajaPropia === true && normFondo(f.nombre) !== fondoDef)
+        .map((f) => normFondo(f.nombre)),
+    );
+    // Fondo de un pago / reporte (default Administración = caja general).
+    const fondoDePago = (p: any) => normFondo((p as any).tipoRecaudo) || fondoDef;
+    const fondoDeReporte = (r: any) => normFondo((r as any).fondo ?? r.dato_10) || fondoDef;
+    const esCajaPropiaFondo = (name: string) => cajaPropiaNames.has(name);
+    // Un movimiento cuenta para la caja GENERAL si su fondo NO es caja propia.
+    const pagoEsGeneral = (p: any) => !esCajaPropiaFondo(fondoDePago(p));
+    const reporteEsGeneral = (r: any) => !esCajaPropiaFondo(fondoDeReporte(r));
+
     // totalUsers = propietarios (criterio del cliente), del conjunto si aplica.
     const totalUsers = usuarios.filter((u) => {
       if ((u.rol || '') !== 'propietario') return false;
@@ -642,8 +684,14 @@ export class PaymentsService {
       return true;
     }).length;
 
-    // --- Saldo inicial (arrastre de años anteriores a `year`) ---
-    const pagosPrev = pagosConfirmados.filter((p) => {
+    // La caja GENERAL excluye los movimientos de fondos con caja propia.
+    const pagosGeneral = pagosConfirmados.filter(pagoEsGeneral);
+    const gastosGeneral = gastos.filter(reporteEsGeneral);
+    const extraGeneral = extra.filter(reporteEsGeneral);
+    const ajustesGeneral = ajustes.filter(reporteEsGeneral);
+
+    // --- Saldo inicial (arrastre de años anteriores a `year`) — solo general ---
+    const pagosPrev = pagosGeneral.filter((p) => {
       const y = this.extractYear(p.concepto || '');
       return y != null && y < year;
     });
@@ -655,15 +703,15 @@ export class PaymentsService {
           return y != null && y < year;
         })
         .reduce((s, r) => s + montoReporte(r), 0);
-    const saldoInicial = sumPrevPagos + sumPrev(extra) + sumPrev(ajustes) - sumPrev(gastos);
+    const saldoInicial = sumPrevPagos + sumPrev(extraGeneral) + sumPrev(ajustesGeneral) - sumPrev(gastosGeneral);
 
-    // --- Pagos/reportes del año seleccionado ---
-    const pagosYear = pagosConfirmados.filter((p) => (p.concepto || '').includes(String(year)));
+    // --- Pagos/reportes del año seleccionado (caja general) ---
+    const pagosYear = pagosGeneral.filter((p) => (p.concepto || '').includes(String(year)));
     const inYear = (arr: any[]) =>
       arr.filter((r) => fechaReporte(r).includes(String(year)));
-    const gastosYear = inYear(gastos);
-    const extraYear = inYear(extra);
-    const ajustesYear = inYear(ajustes);
+    const gastosYear = inYear(gastosGeneral);
+    const extraYear = inYear(extraGeneral);
+    const ajustesYear = inYear(ajustesGeneral);
 
     // --- Desglose mensual ---
     const monthlyData: FinanceMonth[] = MONTHS.map((monthFull, idx) => {
@@ -716,10 +764,12 @@ export class PaymentsService {
 
     // --- Recaudo por mes de INGRESO (según la fecha del pago, no el concepto) ---
     // Cuotas confirmadas cuya FECHA cae en el año seleccionado (independiente del
-    // mes que paga el propietario) + ingresos extra por su fecha.
+    // mes que paga el propietario) + ingresos extra por su fecha. Incluye TODO el
+    // dinero recibido (general + cajas propias): es una vista de ingresos, no de saldo.
     const cuotasDelAnioPorFecha = pagosConfirmados.filter(
       (p) => this.extractYear(String(p.fecha || '')) === year,
     );
+    const extraDelAnio = inYear(extra); // todos los ingresos extra del año (incl. cajas propias)
     const recaudoPorMes: RecaudoMes[] = MONTHS.map((monthFull, idx) => {
       const cuotas = cuotasDelAnioPorFecha
         .filter((p) => this.monthOfFecha(String(p.fecha || '')) === idx)
@@ -727,7 +777,7 @@ export class PaymentsService {
       const count = cuotasDelAnioPorFecha.filter(
         (p) => this.monthOfFecha(String(p.fecha || '')) === idx,
       ).length;
-      const extra = extraYear
+      const extra = extraDelAnio
         .filter((r) => this.monthOfFecha(fechaReporte(r)) === idx)
         .reduce((s, r) => s + montoReporte(r), 0);
       return {
@@ -743,32 +793,27 @@ export class PaymentsService {
     // --- Desglose por FONDO (tipo de recaudo) del año seleccionado ---
     // Recaudado = cuotas confirmadas por fecha del año + ingresos extra, por su
     // fondo. Gastado = gastos del año por su fondo. Se cruza con el catálogo de
-    // fondos del conjunto (incluye meta y visibilidad).
-    const fondoDe = (s: unknown) => {
-      const v = String(s ?? '').trim();
-      return v || DEFAULT_FUND_NAME;
-    };
-    let catalogoFondos: any[] = [];
-    try {
-      catalogoFondos = await this.funds.list(conjunto || '');
-    } catch {
-      catalogoFondos = [];
-    }
+    // fondos del conjunto (incluye meta y visibilidad). Aquí se consideran TODOS
+    // los fondos (general y cajas propias) usando el nombre canónico del fondo.
+    const nombreFondoPago = (p: any) => (String((p as any).tipoRecaudo ?? '').trim() || DEFAULT_FUND_NAME);
+    const nombreFondoReporte = (r: any) => (String((r as any).fondo ?? r.dato_10 ?? '').trim() || DEFAULT_FUND_NAME);
 
-    // Acumuladores por nombre de fondo.
+    // Acumuladores por nombre de fondo (del año seleccionado).
     const recaudadoPorFondo = new Map<string, number>();
     const gastadoPorFondo = new Map<string, number>();
+    const extraYearAll = inYear(extra);
+    const gastosYearAll = inYear(gastos);
 
     for (const p of cuotasDelAnioPorFecha) {
-      const f = fondoDe((p as any).tipoRecaudo);
+      const f = nombreFondoPago(p);
       recaudadoPorFondo.set(f, (recaudadoPorFondo.get(f) || 0) + (parseFloat(String(p.valor)) || 0));
     }
-    for (const r of extraYear) {
-      const f = fondoDe((r as any).fondo);
+    for (const r of extraYearAll) {
+      const f = nombreFondoReporte(r);
       recaudadoPorFondo.set(f, (recaudadoPorFondo.get(f) || 0) + montoReporte(r));
     }
-    for (const r of gastosYear) {
-      const f = fondoDe((r as any).fondo);
+    for (const r of gastosYearAll) {
+      const f = nombreFondoReporte(r);
       gastadoPorFondo.set(f, (gastadoPorFondo.get(f) || 0) + montoReporte(r));
     }
 
@@ -784,11 +829,13 @@ export class PaymentsService {
       const recaudado = recaudadoPorFondo.get(nombre) || 0;
       const gastado = gastadoPorFondo.get(nombre) || 0;
       const metaMensual = Number(cat?.metaMensual) || 0;
+      const esDefault = cat?.esDefault === true || nombre.toLowerCase() === DEFAULT_FUND_NAME.toLowerCase();
       return {
         id: cat?.id || nombre,
         nombre,
-        esDefault: cat?.esDefault === true || nombre.toLowerCase() === DEFAULT_FUND_NAME.toLowerCase(),
+        esDefault,
         visibleParaPropietario: cat ? cat.visibleParaPropietario !== false : true,
+        cajaPropia: !esDefault && esCajaPropiaFondo(normFondo(nombre)),
         metaMensual,
         // Meta del año = meta mensual x 12 (para comparar contra lo recaudado en el año).
         metaAnual: metaMensual * 12,
@@ -802,6 +849,52 @@ export class PaymentsService {
       return a.nombre.localeCompare(b.nombre);
     });
 
+    // --- Cajas separadas (una por fondo con cajaPropia) con saldo y arrastre ---
+    // Cada caja acumula: cuotas confirmadas (por concepto del año) + ingresos
+    // extra − gastos + ajustes, de su propio fondo, con arrastre de años previos.
+    const cajas = catalogoFondos
+      .filter((f) => f.cajaPropia === true && normFondo(f.nombre) !== fondoDef)
+      .map((f) => {
+        const nombre = String(f.nombre);
+        const target = normFondo(nombre);
+        const pagosDe = pagosConfirmados.filter((p) => fondoDePago(p) === target);
+        const extraDe = extra.filter((r) => fondoDeReporte(r) === target);
+        const gastosDe = gastos.filter((r) => fondoDeReporte(r) === target);
+        const ajustesDe = ajustes.filter((r) => fondoDeReporte(r) === target);
+
+        // Arrastre (años < year): pagos por concepto; reportes por fecha.
+        const prevPagos = pagosDe
+          .filter((p) => { const y = this.extractYear(p.concepto || ''); return y != null && y < year; })
+          .reduce((s, p) => s + (parseFloat(String(p.valor)) || 0), 0);
+        const sumPrevDe = (arr: any[]) =>
+          arr.filter((r) => { const y = this.extractYear(fechaReporte(r)); return y != null && y < year; })
+             .reduce((s, r) => s + montoReporte(r), 0);
+        const saldoInicialCaja = prevPagos + sumPrevDe(extraDe) + sumPrevDe(ajustesDe) - sumPrevDe(gastosDe);
+
+        // Movimiento del año seleccionado.
+        const pagosAnio = pagosDe
+          .filter((p) => (p.concepto || '').includes(String(year)))
+          .reduce((s, p) => s + (parseFloat(String(p.valor)) || 0), 0);
+        const inYearSumDe = (arr: any[]) =>
+          arr.filter((r) => fechaReporte(r).includes(String(year)))
+             .reduce((s, r) => s + montoReporte(r), 0);
+        const ingresosAnio = pagosAnio + inYearSumDe(extraDe);
+        const gastosAnioCaja = inYearSumDe(gastosDe);
+        const ajusteAnioCaja = inYearSumDe(ajustesDe);
+        const saldoCajaPropia = saldoInicialCaja + ingresosAnio - gastosAnioCaja + ajusteAnioCaja;
+
+        return {
+          id: f.id || nombre,
+          nombre,
+          saldoInicial: saldoInicialCaja,
+          ingresos: ingresosAnio,
+          gastos: gastosAnioCaja,
+          ajuste: ajusteAnioCaja,
+          saldoCaja: saldoCajaPropia,
+        };
+      })
+      .sort((a, b) => a.nombre.localeCompare(b.nombre));
+
     return {
       monthlyData,
       recaudoPorMes,
@@ -809,6 +902,7 @@ export class PaymentsService {
       saldoInicial,
       totalUsers,
       porFondo,
+      cajas,
     };
   }
 
