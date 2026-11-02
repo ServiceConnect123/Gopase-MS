@@ -8,10 +8,11 @@ import { PlansService } from './plans.service';
 export class PlansController {
   constructor(private readonly plans: PlansService) {}
 
-  @ApiOperation({ summary: 'Catálogo de planes (siembra los base si faltan)' })
+  @ApiOperation({ summary: 'Catálogo de planes (base + especiales del conjunto si se pasa)' })
+  @ApiQuery({ name: 'conjunto', required: false, description: 'Filtra especiales por conjunto dueño' })
   @Get()
-  async list() {
-    const data = await this.plans.list();
+  async list(@Query('conjunto') conjunto?: string) {
+    const data = await this.plans.list(conjunto || '');
     return { success: true, data };
   }
 
@@ -31,6 +32,7 @@ export class PlansController {
         nombre: { type: 'string' },
         baseId: { type: 'string', enum: ['basico', 'medio', 'premium'] },
         precioMensual: { type: 'number' },
+        conjunto: { type: 'string', description: 'conjunto dueño (solo él lo verá)' },
         moneda: { type: 'string', example: 'COP' },
         descripcion: { type: 'string' },
         descuentoAnual: { type: 'number', example: 0.1 },

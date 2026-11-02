@@ -117,6 +117,9 @@ export class PlansService {
       esBase: dto.esBase === true,
       esEspecial: dto.esEspecial === true,
       baseId: String(dto.baseId ?? ''),
+      // Conjunto dueño de un plan ESPECIAL. Los planes base no tienen conjunto
+      // (visibles para todos). Un especial solo es visible para su conjunto.
+      conjunto: String(dto.conjunto ?? ''),
       _fbWrite: true,
     };
   }
@@ -130,6 +133,7 @@ export class PlansService {
       modulos: this.normList(rest.modulos),
       esBase: rest.esBase === true,
       esEspecial: rest.esEspecial === true,
+      conjunto: String(rest.conjunto ?? ''),
     };
   }
 
@@ -150,12 +154,22 @@ export class PlansService {
     }
   }
 
-  /** Lista el catálogo de planes (siembra los base si faltan). */
-  async list(): Promise<any[]> {
+  /**
+   * Lista el catálogo de planes (siembra los base si faltan).
+   * - Sin `conjunto`: devuelve TODOS (uso del superAdmin en vista global).
+   * - Con `conjunto`: devuelve los base + solo los ESPECIALES de ese conjunto
+   *   (un plan especial solo es visible para el conjunto al que se creó).
+   */
+  async list(conjunto?: string): Promise<any[]> {
     if (!this.firebase.isEnabled()) throw new Error('Servicio no disponible.');
     await this.ensureBase();
     const snap = await this.firebase.db().ref(MIRROR_PLANES).get();
-    const all = snap.exists() ? (Object.values(snap.val() || {}) as any[]) : [];
+    let all = snap.exists() ? (Object.values(snap.val() || {}) as any[]) : [];
+    const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
+    const target = norm(conjunto);
+    if (target) {
+      all = all.filter((p) => p.esBase === true || norm(p.conjunto) === target);
+    }
     return all.map((p) => this.strip(p)).sort((a, b) => {
       // Base primero (por precio), luego los especiales.
       if (a.esBase !== b.esBase) return a.esBase ? -1 : 1;
@@ -165,7 +179,7 @@ export class PlansService {
 
   /** Crea un plan ESPECIAL a partir de un plan base (clona módulos + precio custom). */
   async createEspecial(dto: {
-    nombre: string; baseId: string; precioMensual: number; moneda?: string; descripcion?: string; descuentoAnual?: number;
+    nombre: string; baseId: string; precioMensual: number; conjunto?: string; moneda?: string; descripcion?: string; descuentoAnual?: number;
   }): Promise<{ success: boolean; message?: string; id?: string }> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
     if (!String(dto?.nombre ?? '').trim()) return { success: false, message: 'El nombre es requerido.' };
@@ -188,6 +202,8 @@ export class PlansService {
       esBase: false,
       esEspecial: true,
       baseId: dto.baseId || '',
+      // Dueño del plan especial: solo este conjunto lo verá en su catálogo.
+      conjunto: dto.conjunto || '',
     });
     try {
       await this.firebase.db().ref(`${MIRROR_PLANES}/${this.safeKey(id)}`).set(record);
