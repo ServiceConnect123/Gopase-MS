@@ -33,7 +33,9 @@ export class BillingController {
       properties: {
         id: { type: 'string' },
         conjunto: { type: 'string' },
-        monto: { type: 'number', description: 'monto libre según el plan del conjunto' },
+        monto: { type: 'number', description: 'monto transferido (pagado) ahora' },
+        montoObjetivo: { type: 'number', description: 'monto que debe pagar (precio del plan)' },
+        planIdSolicitado: { type: 'string', description: 'si es una solicitud de cambio/activación de plan' },
         moneda: { type: 'string', example: 'COP' },
         periodo: { type: 'string', example: '2026-02' },
         concepto: { type: 'string' },
@@ -49,14 +51,14 @@ export class BillingController {
     return this.billing.create(body);
   }
 
-  @ApiOperation({ summary: 'Confirmar/Rechazar una factura (superAdmin)' })
+  @ApiOperation({ summary: 'Confirmar/Rechazar/Devolver una factura (superAdmin)' })
   @ApiBody({
     schema: {
       type: 'object',
       properties: {
-        estado: { type: 'string', enum: ['confirmada', 'rechazada'] },
+        estado: { type: 'string', enum: ['confirmada', 'rechazada', 'devuelta'] },
         revisadoPor: { type: 'string' },
-        nota: { type: 'string' },
+        nota: { type: 'string', description: 'motivo; en devuelta, el faltante' },
       },
       required: ['estado'],
     },
@@ -64,6 +66,22 @@ export class BillingController {
   @Post(':id/review')
   async review(@Param('id') id: string, @Body() body: any) {
     return this.billing.review(id, body);
+  }
+
+  @ApiOperation({ summary: 'Anexar comprobante del pago restante (admin, factura devuelta)' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        comprobanteUrl: { type: 'string' },
+        montoAdicional: { type: 'number', description: 'monto del pago restante anexado' },
+      },
+      required: ['comprobanteUrl'],
+    },
+  })
+  @Post(':id/comprobante')
+  async addComprobante(@Param('id') id: string, @Body() body: any) {
+    return this.billing.addComprobante(id, body);
   }
 
   @ApiOperation({ summary: 'Eliminar factura' })
