@@ -99,6 +99,7 @@ export class DriveService {
     fileName: string,
     folderId?: string,
     mimeType = 'image/jpeg',
+    folderName?: string,
   ): Promise<{ success: boolean; fileUrl?: string; directLink?: string; message?: string }> {
     if (!this.scriptUrl) return { success: false, message: 'Drive no configurado en el backend (SCRIPT_URL).' };
     if (!base64Image) return { success: false, message: 'Imagen vacía.' };
@@ -112,6 +113,9 @@ export class DriveService {
         image: clean,
         fileName: fileName || `comprobante_${Date.now()}.jpg`,
         folderId: folderId || '',
+        // Si no hay folderId, el Apps Script puede usar/crear una carpeta por
+        // NOMBRE (folderName). Si ambos vienen vacíos, cae en la raíz del script.
+        folderName: folderName || '',
         mimeType,
       });
       if (data?.status === 'success') {

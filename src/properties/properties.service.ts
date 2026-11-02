@@ -47,9 +47,12 @@ export interface PropertySecrets {
 const MIRROR_CONJUNTOS = 'mirror/conjuntos';
 
 // Campos no sensibles del conjunto (registro normal).
+// diasGraciaPropietario: días del mes que el admin da a los propietarios para
+// pagar la cuota del mes anterior antes de marcarlos en mora (default 10).
 const BASIC_FIELDS = [
   'nombre', 'direccion', 'tipo', 'descripcion', 'cuotaMonto', 'moneda', 'driveFolderId',
   'llaveBreB', 'adminUsuario', 'adminNombre', 'adminWhatsapp', 'notifActivo',
+  'diasGraciaPropietario',
 ] as const;
 
 @Injectable()
@@ -131,6 +134,53 @@ export class PropertiesService {
     } catch (e: any) {
       this.logger.warn(`getSecretsByConjunto(${raw}) falló: ${e?.message}`);
       return null;
+    }
+  }
+
+  /**
+   * Días de gracia que el conjunto le da a sus PROPIETARIOS para pagar la cuota
+   * del mes anterior (antes de marcarlos en mora). Configurable por el admin;
+   * default 10. Acepta conjunto por id o nombre. Se acota a un rango sensato.
+   */
+  async getDiasGraciaPropietario(conjunto: string, fallback = 10): Promise<number> {
+    try {
+      if (!this.firebase.isEnabled() || !String(conjunto || '').trim()) return fallback;
+      const found = await this.findConjunto(conjunto);
+      const raw = found?.value?.diasGraciaPropietario;
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 0) return fallback;
+      // Tope defensivo: 0..28 (el día del mes donde aplica la gracia).
+      return Math.min(28, Math.round(n));
+    } catch {
+      return fallback;
+    }
+  }
+
+  /**
+   * Configura los días de gracia de la cuota de los propietarios para un
+   * conjunto (por id o nombre). Lo usa el ADMIN del conjunto desde su pantalla
+   * de recaudo. Acota el valor a 0..28.
+   */
+  async setDiasGraciaPropietario(
+    conjunto: string,
+    dias: number,
+  ): Promise<{ success: boolean; message?: string; diasGraciaPropietario?: number }> {
+    if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
+    if (!String(conjunto || '').trim()) return { success: false, message: 'Conjunto requerido.' };
+    const n = Number(dias);
+    if (!Number.isFinite(n) || n < 0) return { success: false, message: 'Los días de gracia deben ser 0 o más.' };
+    const value = Math.min(28, Math.round(n));
+    const found = await this.findConjunto(conjunto);
+    if (!found) return { success: false, message: 'El conjunto no existe.' };
+    try {
+      await this.firebase.db().ref(`${MIRROR_CONJUNTOS}/${found.key}`).update({
+        diasGraciaPropietario: value,
+        _fbWrite: true,
+      });
+      return { success: true, diasGraciaPropietario: value };
+    } catch (err: any) {
+      this.logger.error(`[properties] setDiasGraciaPropietario ${conjunto} falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo guardar.' };
     }
   }
 

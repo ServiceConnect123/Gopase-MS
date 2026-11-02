@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { SheetsModule } from '../sheets/sheets.module';
 import { FirebaseModule } from '../firebase/firebase.module';
+import { BillingModule } from '../billing/billing.module';
 import { AuthMigrationService } from './auth-migration.service';
 import { AuthLoginService } from './auth-login.service';
 import { AuthMigrationController } from './auth-migration.controller';
@@ -11,6 +12,7 @@ import { AuthMigrationController } from './auth-migration.controller';
   imports: [
     SheetsModule,
     FirebaseModule,
+    BillingModule,
     // JWT propio de la app: firma los tokens de sesión que emite el login y los
     // verifica el guard. El secreto va por env (JWT_SECRET); expiración 30 días
     // (la app no tiene flujo de refresh y no queremos re-login frecuente).
