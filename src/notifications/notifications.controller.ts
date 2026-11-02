@@ -86,6 +86,26 @@ class SendReceiptDto {
   conjunto?: string;
 }
 
+class NotifyNewsDto {
+  @ApiPropertyOptional({ description: 'Título de la noticia (para el log).' })
+  titulo?: string;
+
+  @ApiProperty({ description: 'Texto a enviar (caption si hay imagen). Soporta {nombre}.' })
+  texto: string;
+
+  @ApiPropertyOptional({ description: 'URL de la imagen a adjuntar (Drive).' })
+  imageUrl?: string;
+
+  @ApiProperty({ type: [DebtorDto], description: 'Destinatarios de la noticia.' })
+  destinatarios: DebtorDto[];
+
+  @ApiPropertyOptional({
+    description: 'Conjunto del admin. Enruta el envío a su sesión de WhatsApp vinculada.',
+    example: 'Villa Mayra',
+  })
+  conjunto?: string;
+}
+
 @ApiTags('notifications')
 @Controller('notifications')
 // Público para el JwtAuthGuard: subsistema de WhatsApp/cold-start (status, ping,
@@ -196,5 +216,24 @@ export class NotificationsController {
   @Post('send-receipt')
   async sendReceipt(@Body() body: SendReceiptDto) {
     return this.notifications.sendReceipt(body);
+  }
+
+  /**
+   * Difunde una noticia del conjunto por WhatsApp (imagen opcional + texto como
+   * caption) a una lista de destinatarios. Fire-and-forget: responde de
+   * inmediato y envía con pausa entre mensajes.
+   */
+  @ApiOperation({ summary: 'Difunde una noticia del conjunto por WhatsApp' })
+  @Post('notify-news')
+  notifyNews(@Body() body: NotifyNewsDto) {
+    const total = (body?.destinatarios || []).filter((d) => d && d.telefono).length;
+    this.notifications
+      .notifyNews(body)
+      .catch((e) => console.error('Error en notifyNews:', e?.message));
+    return {
+      ok: true,
+      total,
+      message: `Noticia en proceso: se enviarán ${total} mensajes con pausa entre cada uno.`,
+    };
   }
 }

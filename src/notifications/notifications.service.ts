@@ -276,6 +276,62 @@ export class NotificationsService implements OnModuleInit {
   }
 
   /**
+   * Difunde una NOTICIA del conjunto por WhatsApp a una lista de destinatarios.
+   * Envía la imagen (si viene) con el texto como caption; si no hay imagen,
+   * manda solo texto. Pausa entre mensajes para no ser bloqueado por WhatsApp.
+   * El texto soporta el placeholder {nombre}.
+   */
+  async notifyNews(payload: {
+    titulo?: string;
+    texto: string;
+    imageUrl?: string;
+    destinatarios: Array<{ nombre: string; telefono: string }>;
+    conjunto?: string;
+  }): Promise<{ ok: boolean; enviados: number; fallidos: number; total: number; message: string }> {
+    const lista = (payload?.destinatarios || []).filter((d) => d && d.telefono);
+    const total = lista.length;
+    if (total === 0) {
+      return { ok: true, enviados: 0, fallidos: 0, total: 0, message: 'No hay destinatarios con teléfono.' };
+    }
+
+    const conjunto = payload?.conjunto;
+    const imageUrl = String(payload?.imageUrl ?? '').trim();
+    const base = String(payload?.texto ?? '').trim() || String(payload?.titulo ?? 'Nueva noticia del conjunto.');
+    const delayMs = Number(this.config.get<string>('WHATSAPP_MESSAGE_DELAY_MS', '4000'));
+
+    const ready = await this.waitForWhatsapp(conjunto);
+    if (!ready) {
+      return {
+        ok: false, enviados: 0, fallidos: total, total,
+        message: 'WhatsApp no está conectado. Intenta de nuevo en un momento.',
+      };
+    }
+
+    let enviados = 0;
+    let fallidos = 0;
+    for (let i = 0; i < lista.length; i++) {
+      const d = lista[i];
+      const texto = base.replace(/\{nombre\}/g, d.nombre || '');
+      let ok = false;
+      if (imageUrl) {
+        // sendImage degrada a texto si no logra obtener la imagen (ver whatsapp.service).
+        ok = await this.whatsapp.sendImage(d.telefono, { imageUrl, caption: texto }, conjunto);
+      } else {
+        ok = await this.whatsapp.sendMessage(d.telefono, texto, conjunto);
+      }
+      if (ok) enviados++;
+      else fallidos++;
+      if (i < lista.length - 1) await this.sleep(delayMs);
+    }
+
+    this.logger.log(`Noticia por WhatsApp: ${enviados}/${total} enviados, ${fallidos} fallidos.`);
+    return {
+      ok: true, enviados, fallidos, total,
+      message: `Se enviaron ${enviados} de ${total} mensajes.`,
+    };
+  }
+
+  /**
    * Envía el recibo a un propietario por WhatsApp.
    * Espera a que la conexión esté lista (cold start de Render).
    *
