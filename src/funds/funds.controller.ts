@@ -26,6 +26,7 @@ export class FundsController {
         nombre: { type: 'string' },
         visibleParaPropietario: { type: 'boolean' },
         metaMensual: { type: 'number' },
+        cajaPropia: { type: 'boolean', description: 'si true, es una caja separada (saldo propio)' },
       },
       required: ['conjunto', 'nombre'],
     },
