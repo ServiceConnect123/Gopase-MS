@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Cron } from '@nestjs/schedule';
 import { FirebaseService } from '../firebase/firebase.service';
 import { PlansService } from '../plans/plans.service';
 
@@ -18,9 +19,13 @@ import { PlansService } from '../plans/plans.service';
  *   creadoPor, creadoPorNombre, creadoEn, revisadoPor, revisadoEn, nota
  */
 const MIRROR_FACTURAS = 'mirror/facturas';
+const MIRROR_CONJUNTOS = 'mirror/conjuntos';
 
 export const FACTURA_ESTADOS = ['pendiente', 'confirmada', 'rechazada', 'devuelta'] as const;
 export type FacturaEstado = (typeof FACTURA_ESTADOS)[number];
+
+/** Días de gracia dentro del mes para pagar antes de bloquear el conjunto. */
+const DIAS_GRACIA = 10;
 
 @Injectable()
 export class BillingService {
@@ -65,6 +70,10 @@ export class BillingService {
     return (FACTURA_ESTADOS as readonly string[]).includes(s) ? (s as FacturaEstado) : 'pendiente';
   }
 
+  private normCiclo(raw: unknown): 'mensual' | 'anual' {
+    return String(raw ?? '').trim().toLowerCase() === 'anual' ? 'anual' : 'mensual';
+  }
+
   private normComprobantes(raw: any, fallbackUrl?: string): string[] {
     let list: string[] = [];
     if (Array.isArray(raw)) list = raw.map((v) => String(v ?? '').trim()).filter(Boolean);
@@ -86,6 +95,9 @@ export class BillingService {
       moneda: String(dto.moneda ?? 'COP'),
       periodo: String(dto.periodo ?? ''),
       concepto: String(dto.concepto ?? ''),
+      // Ciclo de la suscripción que paga esta factura: 'mensual' (+1 mes) o
+      // 'anual' (+12 meses, con 10% de descuento ya reflejado en el monto).
+      ciclo: this.normCiclo(dto.ciclo),
       estado: this.normEstado(dto.estado),
       // Comprobante(s): se conserva comprobanteUrl (el primero) por compatibilidad
       // y la lista completa en comprobantes[] (incluye los anexados por restante).
@@ -124,6 +136,7 @@ export class BillingService {
         montoPagado: Number(rest.montoPagado ?? rest.monto) || 0,
         comprobantes: this.normComprobantes(rest.comprobantes, rest.comprobanteUrl),
         planIdSolicitado: String(rest.planIdSolicitado ?? ''),
+        ciclo: this.normCiclo(rest.ciclo),
       };
     });
   }
@@ -187,9 +200,10 @@ export class BillingService {
       // Al CONFIRMAR una factura de cambio/activación de plan, se asigna el plan
       // solicitado al conjunto automáticamente.
       let planMsg = '';
+      let subMsg = '';
       if (nuevo === 'confirmada') {
-        const planId = String(factura.planIdSolicitado ?? '').trim();
         const conjunto = String(factura.conjunto ?? '').trim();
+        const planId = String(factura.planIdSolicitado ?? '').trim();
         if (planId && conjunto) {
           try {
             const r = await this.plans.assign(conjunto, planId);
@@ -198,13 +212,29 @@ export class BillingService {
             planMsg = ` (No se pudo asignar el plan: ${e?.message})`;
           }
         }
+        // Cualquier factura confirmada extiende la suscripción del conjunto
+        // según su ciclo (mensual +1 mes / anual +12 meses) y lo desbloquea.
+        if (conjunto) {
+          try {
+            const ciclo = this.normCiclo(factura.ciclo);
+            const r = await this.extenderSuscripcion(conjunto, ciclo);
+            if (r.success) {
+              const meses = ciclo === 'anual' ? 12 : 1;
+              subMsg = ` Suscripción extendida ${meses} mes(es) (hasta ${String(r.pagadoHasta).slice(0, 10)}).`;
+            } else {
+              subMsg = ` (No se pudo extender la suscripción: ${r.message})`;
+            }
+          } catch (e: any) {
+            subMsg = ` (No se pudo extender la suscripción: ${e?.message})`;
+          }
+        }
       }
 
       const base =
         nuevo === 'confirmada' ? 'Factura confirmada.'
         : nuevo === 'rechazada' ? 'Factura rechazada.'
         : 'Factura devuelta: el admin puede anexar el pago restante.';
-      return { success: true, message: base + planMsg };
+      return { success: true, message: base + planMsg + subMsg };
     } catch (err: any) {
       this.logger.error(`[billing] review ${key} falló: ${err?.message}`);
       return { success: false, message: err?.message || 'No se pudo actualizar la factura.' };
@@ -261,6 +291,229 @@ export class BillingService {
     } catch (err: any) {
       this.logger.error(`[billing] delete ${key} falló: ${err?.message}`);
       return { success: false, message: err?.message || 'No se pudo eliminar la factura.' };
+    }
+  }
+
+  // ===========================================================================
+  // SUSCRIPCIÓN DEL CONJUNTO (control de pago SaaS)
+  //
+  // Cada conjunto (mirror/conjuntos/{key}) guarda:
+  //   pagadoHasta  (ISO date, YYYY-MM-DD): hasta cuándo está pago.
+  //   bloqueado    (bool): true si venció el pago y pasaron los días de gracia.
+  //
+  // Regla de acceso: un conjunto está AL DÍA si hoy <= pagadoHasta, O si estamos
+  // dentro de los primeros DIAS_GRACIA días del mes en curso (gracia para pagar).
+  //
+  // Arranque seguro: los conjuntos SIN pagadoHasta (los que ya existían antes de
+  // montar este cobro) arrancan con pagadoHasta = fin del PRÓXIMO mes, para no
+  // bloquear a nadie ahora. La validación real empieza el mes siguiente.
+  // ===========================================================================
+
+  /** Primer día del mes a las 00:00 (hora local del servidor). */
+  private inicioMes(d: Date): Date {
+    return new Date(d.getFullYear(), d.getMonth(), 1);
+  }
+
+  /** Último día del mes (a las 23:59:59) de la fecha dada. */
+  private finMes(d: Date): Date {
+    return new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
+  }
+
+  /** Suma `n` meses a una fecha conservando el día (ajusta fin de mes). */
+  private sumarMeses(d: Date, n: number): Date {
+    const r = new Date(d.getTime());
+    const dia = r.getDate();
+    r.setDate(1);
+    r.setMonth(r.getMonth() + n);
+    const ultimo = new Date(r.getFullYear(), r.getMonth() + 1, 0).getDate();
+    r.setDate(Math.min(dia, ultimo));
+    return r;
+  }
+
+  private toISODate(d: Date): string {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
+  private parseDate(raw: unknown): Date | null {
+    const s = String(raw ?? '').trim();
+    if (!s) return null;
+    const d = new Date(s.length <= 10 ? `${s}T23:59:59` : s);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  /** Busca el nodo del conjunto (por id o nombre). */
+  private async findConjunto(conjunto: string): Promise<{ key: string; value: any } | null> {
+    const snap = await this.firebase.db().ref(MIRROR_CONJUNTOS).get();
+    if (!snap.exists()) return null;
+    const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
+    const target = norm(conjunto);
+    const all = snap.val() || {};
+    for (const k of Object.keys(all)) {
+      const v = all[k];
+      if (norm(v.id) === target || norm(v.nombre) === target) return { key: k, value: v };
+    }
+    return null;
+  }
+
+  /**
+   * Decide si un conjunto está al día dado su pagadoHasta y la fecha actual.
+   * Al día si: hoy <= pagadoHasta, o estamos en los primeros DIAS_GRACIA del mes.
+   */
+  private estaAlDia(pagadoHasta: Date | null, hoy: Date): boolean {
+    if (hoy.getDate() <= DIAS_GRACIA) return true; // gracia de inicio de mes
+    if (!pagadoHasta) return false;
+    return hoy.getTime() <= pagadoHasta.getTime();
+  }
+
+  /**
+   * Garantiza que el conjunto tenga pagadoHasta. Si no lo tiene (conjunto previo
+   * al cobro), lo inicializa al fin del PRÓXIMO mes (arranque seguro) y lo
+   * persiste. Devuelve el nodo del conjunto con su pagadoHasta efectivo.
+   */
+  private async ensureDefaultSuscripcion(
+    found: { key: string; value: any },
+  ): Promise<{ pagadoHasta: Date; seedeado: boolean }> {
+    const actual = this.parseDate(found.value?.pagadoHasta);
+    if (actual) return { pagadoHasta: actual, seedeado: false };
+    // Arranque seguro: fin del próximo mes.
+    const ahora = new Date();
+    const finProximo = this.finMes(this.sumarMeses(this.inicioMes(ahora), 1));
+    try {
+      await this.firebase.db().ref(`${MIRROR_CONJUNTOS}/${found.key}`).update({
+        pagadoHasta: this.toISODate(finProximo),
+        bloqueado: false,
+        _fbWrite: true,
+      });
+    } catch (e: any) {
+      this.logger.warn(`[billing] ensureDefaultSuscripcion ${found.key}: ${e?.message}`);
+    }
+    return { pagadoHasta: finProximo, seedeado: true };
+  }
+
+  /**
+   * Estado de suscripción de un conjunto (lo consume la app y el login).
+   * Aplica arranque seguro si el conjunto no tenía pagadoHasta.
+   */
+  async getEstadoSuscripcion(conjunto: string): Promise<{
+    success: boolean;
+    conjunto: string;
+    alDia: boolean;
+    bloqueado: boolean;
+    pagadoHasta: string;
+    diasGracia: number;
+    message?: string;
+  }> {
+    const base = {
+      success: true,
+      conjunto: String(conjunto ?? ''),
+      alDia: true,
+      bloqueado: false,
+      pagadoHasta: '',
+      diasGracia: DIAS_GRACIA,
+    };
+    if (!this.firebase.isEnabled()) return { ...base, success: false, message: 'Servicio no disponible.' };
+    if (!String(conjunto ?? '').trim()) return { ...base, success: false, message: 'Conjunto requerido.' };
+    const found = await this.findConjunto(conjunto);
+    if (!found) {
+      // Conjunto desconocido: no bloquear (fail-open), pero avisar.
+      return { ...base, message: 'Conjunto no encontrado.' };
+    }
+    const { pagadoHasta } = await this.ensureDefaultSuscripcion(found);
+    const hoy = new Date();
+    const alDia = this.estaAlDia(pagadoHasta, hoy);
+    return {
+      ...base,
+      alDia,
+      bloqueado: !alDia,
+      pagadoHasta: this.toISODate(pagadoHasta),
+    };
+  }
+
+  /**
+   * Extiende la suscripción del conjunto al confirmar una factura.
+   * El nuevo pagadoHasta = max(hoy, pagadoHasta actual) + (1 o 12) meses.
+   * También limpia bloqueado.
+   */
+  async extenderSuscripcion(
+    conjunto: string,
+    ciclo: 'mensual' | 'anual',
+  ): Promise<{ success: boolean; message?: string; pagadoHasta?: string }> {
+    if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
+    const found = await this.findConjunto(conjunto);
+    if (!found) return { success: false, message: 'El conjunto no existe.' };
+    const hoy = new Date();
+    const actual = this.parseDate(found.value?.pagadoHasta);
+    const desde = actual && actual.getTime() > hoy.getTime() ? actual : hoy;
+    const meses = ciclo === 'anual' ? 12 : 1;
+    const nuevo = this.finMes(this.sumarMeses(desde, meses));
+    try {
+      await this.firebase.db().ref(`${MIRROR_CONJUNTOS}/${found.key}`).update({
+        pagadoHasta: this.toISODate(nuevo),
+        bloqueado: false,
+        _fbWrite: true,
+      });
+      return { success: true, pagadoHasta: this.toISODate(nuevo) };
+    } catch (err: any) {
+      this.logger.error(`[billing] extenderSuscripcion ${conjunto} falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo extender la suscripción.' };
+    }
+  }
+
+  /**
+   * Recorre todos los conjuntos y actualiza su flag `bloqueado` según su
+   * pagadoHasta (+ gracia). Idempotente. Lo ejecuta el cron diario y se puede
+   * disparar manualmente para pruebas.
+   */
+  async recomputarBloqueos(): Promise<{ success: boolean; revisados: number; bloqueados: number; message?: string }> {
+    if (!this.firebase.isEnabled()) return { success: false, revisados: 0, bloqueados: 0, message: 'Servicio no disponible.' };
+    const ref = this.firebase.db().ref(MIRROR_CONJUNTOS);
+    const snap = await ref.get();
+    if (!snap.exists()) return { success: true, revisados: 0, bloqueados: 0 };
+    const all = snap.val() || {};
+    const hoy = new Date();
+    let revisados = 0;
+    let bloqueados = 0;
+    for (const key of Object.keys(all)) {
+      const v = all[key] || {};
+      revisados++;
+      let pagadoHasta = this.parseDate(v.pagadoHasta);
+      const updates: Record<string, any> = {};
+      // Arranque seguro para conjuntos sin pagadoHasta.
+      if (!pagadoHasta) {
+        pagadoHasta = this.finMes(this.sumarMeses(this.inicioMes(hoy), 1));
+        updates.pagadoHasta = this.toISODate(pagadoHasta);
+      }
+      const alDia = this.estaAlDia(pagadoHasta, hoy);
+      const deberiaBloquear = !alDia;
+      if (deberiaBloquear) bloqueados++;
+      if (v.bloqueado !== deberiaBloquear) updates.bloqueado = deberiaBloquear;
+      if (Object.keys(updates).length > 0) {
+        updates._fbWrite = true;
+        try {
+          await ref.child(key).update(updates);
+        } catch (e: any) {
+          this.logger.warn(`[billing] recomputarBloqueos ${key}: ${e?.message}`);
+        }
+      }
+    }
+    this.logger.log(`[billing] recomputarBloqueos: ${revisados} conjuntos, ${bloqueados} bloqueados.`);
+    return { success: true, revisados, bloqueados };
+  }
+
+  /**
+   * Cron diario (03:00). Marca/desmarca conjuntos bloqueados según su pago.
+   * La expresión se puede sobreescribir con BILLING_CRON (default 3am diario).
+   */
+  @Cron(process.env.BILLING_CRON || '0 3 * * *')
+  async cronRecomputarBloqueos(): Promise<void> {
+    if (!this.firebase.isEnabled()) return;
+    try {
+      await this.recomputarBloqueos();
+    } catch (e: any) {
+      this.logger.error(`[billing] cron recomputarBloqueos falló: ${e?.message}`);
     }
   }
 }

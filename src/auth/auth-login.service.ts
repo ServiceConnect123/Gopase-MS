@@ -7,6 +7,7 @@ import { validatePasswordPolicy } from './password-policy.util';
 import { SessionTracker } from '../activity-audit/core/session-tracker';
 import { ActivityLogger } from '../activity-audit/core/activity-logger';
 import { SESSION_TRACKER, ACTIVITY_LOGGER } from '../activity-audit/integrations/nest/activity-audit.tokens';
+import { BillingService } from '../billing/billing.service';
 
 /**
  * Login por backend contra Firebase Auth (estrategia A1).
@@ -37,6 +38,14 @@ export interface LoginResult {
     mustChangePassword?: boolean;
     /** JWT de sesión que el frontend adjunta como Bearer en las demás llamadas. */
     token?: string;
+    /** Estado de suscripción del conjunto del usuario. */
+    suscripcion?: {
+      alDia: boolean;
+      bloqueado: boolean;
+      pagadoHasta: string;
+      /** Si el conjunto está bloqueado pero el usuario es admin: 'facturacion'. */
+      accesoRestringido?: 'facturacion' | '';
+    };
   };
 }
 
@@ -50,6 +59,7 @@ export class AuthLoginService {
     private readonly firebase: FirebaseService,
     private readonly config: ConfigService,
     private readonly jwt: JwtService,
+    private readonly billing: BillingService,
     // Opcional: si el módulo de auditoría no estuviera registrado, el login
     // sigue funcionando igual (sin métricas de sesión ni evento de actividad).
     @Optional() @Inject(SESSION_TRACKER) private readonly sessionTracker?: SessionTracker,
@@ -182,8 +192,44 @@ export class AuthLoginService {
       const record = await this.firebase.auth().getUser(uid);
       const claims = (record.customClaims || {}) as Record<string, any>;
       const conjuntoId = claims.conjuntoId || '';
+      const rol = String(claims.rol || '').trim();
       // Resolver el NOMBRE del conjunto (la app usa el nombre como "complex").
       const conjuntoNombre = await this.resolveConjuntoNombre(conjuntoId);
+
+      // ----- Control de pago SaaS (suscripción del conjunto) -----
+      // El superAdmin nunca se bloquea. Para los demás, si el conjunto está
+      // bloqueado por falta de pago:
+      //   - admin del conjunto: puede entrar, pero SOLO a Facturación (para pagar).
+      //   - propietario/vigilante/otros: login rechazado (suspensión por pago).
+      const esSuperAdmin = rol.toLowerCase() === 'superadmin';
+      let suscripcion:
+        | { alDia: boolean; bloqueado: boolean; pagadoHasta: string; accesoRestringido?: 'facturacion' | '' }
+        | undefined;
+      if (!esSuperAdmin && conjuntoNombre) {
+        try {
+          const est = await this.billing.getEstadoSuscripcion(conjuntoNombre);
+          const esAdmin = rol.toLowerCase() === 'admin';
+          if (est.bloqueado && !esAdmin) {
+            // Propietario/vigilante: no entra mientras el conjunto esté suspendido.
+            this.logger.warn(`[login] bloqueado por suscripción: usuario=${uid} conjunto=${conjuntoNombre} rol=${rol}`);
+            return {
+              success: false,
+              message:
+                'El conjunto está suspendido por falta de pago. Contacta al administrador para regularizar la suscripción.',
+            };
+          }
+          suscripcion = {
+            alDia: est.alDia,
+            bloqueado: est.bloqueado,
+            pagadoHasta: est.pagadoHasta,
+            accesoRestringido: est.bloqueado && esAdmin ? 'facturacion' : '',
+          };
+        } catch (e: any) {
+          // Fail-open: si no se puede evaluar la suscripción, no bloqueamos el login.
+          this.logger.warn(`[login] no se pudo evaluar suscripción de ${conjuntoNombre}: ${e?.message}`);
+        }
+      }
+
       // Métrica de sesión: login exitoso, con el conjunto ya resuelto.
       // Fire-and-forget: NO bloquea ni rompe el login aunque la auditoría falle.
       this.sessionTracker?.trackLogin(uid, conjuntoNombre || undefined);
@@ -209,6 +255,7 @@ export class AuthLoginService {
           conjunto: conjuntoNombre,
           mustChangePassword: !!claims.mustChangePassword,
           token,
+          suscripcion,
         },
       };
     } catch (err: any) {

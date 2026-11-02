@@ -36,6 +36,7 @@ export class BillingController {
         monto: { type: 'number', description: 'monto transferido (pagado) ahora' },
         montoObjetivo: { type: 'number', description: 'monto que debe pagar (precio del plan)' },
         planIdSolicitado: { type: 'string', description: 'si es una solicitud de cambio/activación de plan' },
+        ciclo: { type: 'string', enum: ['mensual', 'anual'], description: 'ciclo de la suscripción' },
         moneda: { type: 'string', example: 'COP' },
         periodo: { type: 'string', example: '2026-02' },
         concepto: { type: 'string' },
@@ -88,5 +89,18 @@ export class BillingController {
   @Delete(':id')
   async remove(@Param('id') id: string) {
     return this.billing.remove(id);
+  }
+
+  @ApiOperation({ summary: 'Estado de suscripción de un conjunto (alDia/bloqueado/pagadoHasta)' })
+  @ApiQuery({ name: 'conjunto', required: true })
+  @Get('subscription')
+  async subscription(@Query('conjunto') conjunto: string) {
+    return this.billing.getEstadoSuscripcion(conjunto || '');
+  }
+
+  @ApiOperation({ summary: 'Recalcular bloqueos de todos los conjuntos (manual, para pruebas del cron)' })
+  @Post('subscription/recompute')
+  async recompute() {
+    return this.billing.recomputarBloqueos();
   }
 }
