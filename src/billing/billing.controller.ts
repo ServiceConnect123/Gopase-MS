@@ -8,6 +8,12 @@ import { BillingService } from './billing.service';
 export class BillingController {
   constructor(private readonly billing: BillingService) {}
 
+  @ApiOperation({ summary: 'Config de facturación (carpeta de Drive para comprobantes)' })
+  @Get('config')
+  config() {
+    return { success: true, driveFolderId: this.billing.getDriveFolderId() };
+  }
+
   @ApiOperation({ summary: 'Lista de facturas (opcionalmente por conjunto)' })
   @ApiQuery({ name: 'conjunto', required: false })
   @Get()

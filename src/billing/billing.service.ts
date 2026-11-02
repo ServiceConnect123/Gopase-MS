@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { FirebaseService } from '../firebase/firebase.service';
 
 /**
@@ -24,10 +25,27 @@ export type FacturaEstado = (typeof FACTURA_ESTADOS)[number];
 export class BillingService {
   private readonly logger = new Logger(BillingService.name);
 
-  constructor(private readonly firebase: FirebaseService) {}
+  constructor(
+    private readonly firebase: FirebaseService,
+    private readonly config: ConfigService,
+  ) {}
 
   private safeKey(raw: unknown): string {
     return String(raw ?? '').trim().replace(/[.#$/\[\]]/g, '_');
+  }
+
+  /**
+   * Carpeta de Drive donde se guardan los comprobantes de FACTURACIÓN (pagos de
+   * los conjuntos hacia el superAdmin). Se configura con la env
+   * BILLING_DRIVE_FOLDER_ID. Acepta un id o una URL de carpeta; se extrae el id.
+   * Si no está definida, se devuelve vacío (el comprobante cae en la raíz del
+   * Apps Script, igual que antes).
+   */
+  getDriveFolderId(): string {
+    const raw = String(this.config.get<string>('BILLING_DRIVE_FOLDER_ID', '') || '').trim();
+    if (!raw) return '';
+    const m = raw.match(/folders\/([a-zA-Z0-9_-]+)/);
+    return m ? m[1] : raw;
   }
 
   private normEstado(raw: unknown): FacturaEstado {
