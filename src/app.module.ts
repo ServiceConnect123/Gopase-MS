@@ -19,6 +19,7 @@ import { AgreementsModule } from './agreements/agreements.module';
 import { GuestsModule } from './guests/guests.module';
 import { FundsModule } from './funds/funds.module';
 import { PqrsModule } from './pqrs/pqrs.module';
+import { CommunityReportsModule } from './community-reports/community-reports.module';
 import { APP_INTERCEPTOR, APP_GUARD } from '@nestjs/core';
 import { ActivityAuditModule } from './activity-audit/integrations/nest/activity-audit.module';
 import { AuditInterceptor } from './activity-audit/integrations/nest/audit.interceptor';
@@ -62,6 +63,7 @@ import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
     GuestsModule,
     FundsModule,
     PqrsModule,
+    CommunityReportsModule,
   ],
   providers: [
     // Cifrado de payload (ofuscación). Va PRIMERO para descifrar el request
