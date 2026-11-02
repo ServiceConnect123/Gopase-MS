@@ -20,6 +20,7 @@ export class DriveController {
         image: { type: 'string', description: 'Imagen en base64 (con o sin prefijo data:)' },
         fileName: { type: 'string' },
         folderId: { type: 'string', description: 'driveFolderId del conjunto' },
+        folderName: { type: 'string', description: 'Nombre de carpeta a usar/crear si no hay folderId' },
         mimeType: { type: 'string', example: 'image/jpeg' },
       },
       required: ['image', 'fileName'],
@@ -27,13 +28,14 @@ export class DriveController {
   })
   @Post('upload')
   async upload(
-    @Body() body: { image: string; fileName: string; folderId?: string; mimeType?: string },
+    @Body() body: { image: string; fileName: string; folderId?: string; folderName?: string; mimeType?: string },
   ) {
     return this.drive.uploadImage(
       body.image,
       body.fileName || `comprobante_${Date.now()}.jpg`,
       body.folderId,
       body.mimeType || (String(body.fileName || '').endsWith('.png') ? 'image/png' : 'image/jpeg'),
+      body.folderName,
     );
   }
 

@@ -48,6 +48,16 @@ export class BillingService {
     return m ? m[1] : raw;
   }
 
+  /**
+   * Nombre de carpeta por defecto para los comprobantes de facturación. Se usa
+   * cuando NO hay BILLING_DRIVE_FOLDER_ID: el Apps Script busca (o crea) una
+   * carpeta con este nombre y sube ahí. Configurable con BILLING_DRIVE_FOLDER_NAME.
+   */
+  getDriveFolderName(): string {
+    const raw = String(this.config.get<string>('BILLING_DRIVE_FOLDER_NAME', '') || '').trim();
+    return raw || 'goPase Facturacion';
+  }
+
   private normEstado(raw: unknown): FacturaEstado {
     const s = String(raw ?? '').trim().toLowerCase();
     return (FACTURA_ESTADOS as readonly string[]).includes(s) ? (s as FacturaEstado) : 'pendiente';

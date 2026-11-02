@@ -11,7 +11,11 @@ export class BillingController {
   @ApiOperation({ summary: 'Config de facturación (carpeta de Drive para comprobantes)' })
   @Get('config')
   config() {
-    return { success: true, driveFolderId: this.billing.getDriveFolderId() };
+    return {
+      success: true,
+      driveFolderId: this.billing.getDriveFolderId(),
+      driveFolderName: this.billing.getDriveFolderName(),
+    };
   }
 
   @ApiOperation({ summary: 'Lista de facturas (opcionalmente por conjunto)' })
