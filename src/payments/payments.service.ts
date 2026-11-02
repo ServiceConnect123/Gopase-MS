@@ -334,9 +334,10 @@ export class PaymentsService {
    * Regla de "al día" (definida con el usuario):
    *   - Debe tener pagados M-2 y M-1 (meses ya vencidos).
    *   - El mes actual (M) NO es obligatorio todavía (está en curso).
-   *   - GRACIA: si M-1 no está pagado pero estamos dentro de los primeros 10
-   *     días del mes actual, se considera al día (plazo para pagar el mes
-   *     anterior). Pasados los 10 días, no tener M-1 pagado = en mora.
+   *   - GRACIA: si M-1 no está pagado pero estamos dentro de los primeros N
+   *     días del mes actual (N = diasGraciaPropietario del conjunto, default
+   *     10), se considera al día (plazo para pagar el mes anterior). Pasados
+   *     esos días, no tener M-1 pagado = en mora.
    *   - Meses anteriores a la fecha de ingreso del propietario = "N/A" (no
    *     exigibles) y no cuentan para la mora.
    */
@@ -345,6 +346,7 @@ export class PaymentsService {
     generadoEl: string;
     diaDelMes: number;
     graciaActiva: boolean;
+    diasGracia: number;
     meses: { idx: number; anio: number; label: string }[];
     propietarios: {
       nombre: string;
@@ -365,7 +367,12 @@ export class PaymentsService {
 
     const now = new Date();
     const diaDelMes = now.getDate();
-    const graciaActiva = diaDelMes <= 10;
+    // Días de gracia configurables por conjunto (default 10). En vista global
+    // de superAdmin (sin conjunto) se usa el default.
+    const diasGracia = conjunto
+      ? await this.properties.getDiasGraciaPropietario(conjunto, 10)
+      : 10;
+    const graciaActiva = diaDelMes <= diasGracia;
 
     // Los 3 meses relevantes (del más antiguo al actual), con su año propio.
     const relMonth = (offset: number) => {
@@ -408,7 +415,7 @@ export class PaymentsService {
       const actual = estadoMes(u, mesM);
 
       // Al día: M-2 cubierto (Pagado o N/A) y M-1 cubierto (Pagado o N/A), con
-      // gracia de 10 días para M-1 Pendiente.
+      // gracia (diasGracia) para M-1 Pendiente.
       const m2Ok = m2 === 'Pagado' || m2 === 'N/A';
       const m1Ok = m1 === 'Pagado' || m1 === 'N/A' || (m1 === 'Pendiente' && graciaActiva);
       const alDia = m2Ok && m1Ok;
@@ -434,6 +441,7 @@ export class PaymentsService {
       generadoEl: now.toISOString().split('T')[0],
       diaDelMes,
       graciaActiva,
+      diasGracia,
       meses,
       propietarios,
       totalAlDia: propietarios.filter((p) => p.alDia).length,

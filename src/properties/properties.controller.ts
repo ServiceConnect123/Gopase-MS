@@ -7,6 +7,7 @@ import {
   Param,
   Post,
   Put,
+  Query,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -39,6 +40,29 @@ export class PropertiesController {
   async list() {
     const data = await this.properties.listPublic();
     return { success: true, data };
+  }
+
+  @ApiOperation({ summary: 'Días de gracia de la cuota de los propietarios de un conjunto (por nombre o id)' })
+  @Get('owner-grace')
+  async getOwnerGrace(@Query('conjunto') conjunto: string) {
+    const dias = await this.properties.getDiasGraciaPropietario(conjunto || '', 10);
+    return { success: true, conjunto: conjunto || '', diasGraciaPropietario: dias };
+  }
+
+  @ApiOperation({ summary: 'Configurar días de gracia de la cuota de los propietarios (admin del conjunto)' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        conjunto: { type: 'string', description: 'nombre o id del conjunto' },
+        diasGraciaPropietario: { type: 'number', example: 10 },
+      },
+      required: ['conjunto', 'diasGraciaPropietario'],
+    },
+  })
+  @Put('owner-grace')
+  async setOwnerGrace(@Body() body: { conjunto: string; diasGraciaPropietario: number }) {
+    return this.properties.setDiasGraciaPropietario(body?.conjunto || '', Number(body?.diasGraciaPropietario));
   }
 
   @ApiOperation({ summary: 'Configuración completa de un conjunto (superAdmin; incluye claves)' })
@@ -97,6 +121,7 @@ export class PropertiesController {
         adminNombre: { type: 'string' },
         adminWhatsapp: { type: 'string' },
         notifActivo: { type: 'string' },
+        diasGraciaPropietario: { type: 'number', description: 'días de gracia de la cuota de propietarios (0..28)' },
       },
     },
   })
