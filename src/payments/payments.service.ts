@@ -1059,17 +1059,37 @@ export class PaymentsService {
     conjunto: string;
     imageBase64: string;
     soloExtraerMonto?: boolean;
+    // Fondo (tipo de recaudo) al que se paga. Si tiene cuentaRecaudo propia, esa
+    // es la cuenta de destino esperada; si no, la llave Bre-B del conjunto.
+    tipoRecaudo?: string;
+    // true => valida que el destino del comprobante coincida con la cuenta
+    // esperada (corre análisis forense aunque no se pida el forense completo).
+    validarDestino?: boolean;
   }): Promise<{ success: boolean; message?: string; monto?: number; analysis?: any }> {
     if (!input.imageBase64) return { success: false, message: 'Imagen vacía.' };
     const secrets = await this.properties.getSecretsByConjunto(input.conjunto);
     const geminiKey = secrets?.geminiKey || '';
     if (!geminiKey) return { success: false, message: 'El conjunto no tiene Gemini configurado.' };
     const llaveBreB = secrets?.llaveBreB || '';
+
+    // Cuenta de destino esperada: la del FONDO (cuentaRecaudo) si tiene una
+    // propia; si no, la llave Bre-B del conjunto.
+    let cuentaEsperada = llaveBreB;
+    if (String(input.tipoRecaudo || '').trim()) {
+      try {
+        const fondos = await this.funds.list(input.conjunto || '');
+        const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
+        const fondo = fondos.find((f: any) => norm(f.nombre) === norm(input.tipoRecaudo));
+        const cuentaFondo = String(fondo?.cuentaRecaudo || '').trim();
+        if (cuentaFondo) cuentaEsperada = cuentaFondo;
+      } catch { /* si falla, se usa la llave del conjunto */ }
+    }
+
     const image = input.imageBase64.includes(',') ? input.imageBase64.split(',').pop()! : input.imageBase64;
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${geminiKey}`;
 
-    // Modo admin: solo extraer el monto.
-    if (input.soloExtraerMonto) {
+    // Modo admin: solo extraer el monto (salvo que se pida validar destino).
+    if (input.soloExtraerMonto && !input.validarDestino) {
       try {
         const resp = await fetch(url, {
           method: 'POST',
@@ -1110,7 +1130,7 @@ Definiciones:
 
 4. nivelRiesgo: "alto" si estás bastante seguro de edición o generación por IA; "medio" si hay indicios claros pero no concluyentes; "bajo" si parece auténtico.
 
-5. destinatarioCorrecto: ${llaveBreB ? `true si el destinatario/llave/número del comprobante contiene o coincide con "${llaveBreB}". false si es diferente o no se puede verificar.` : 'true (no hay llave configurada para verificar).'}
+5. destinatarioCorrecto: ${cuentaEsperada ? `true si la cuenta/llave/número de DESTINO del comprobante (a quién se transfirió) contiene o coincide con "${cuentaEsperada}". Compara ignorando espacios y guiones. false si es claramente diferente o no se puede verificar.` : 'true (no hay cuenta configurada para verificar).'}
 
 6. monto: valor entero total pagado en pesos colombianos. En Colombia el punto es separador de miles y la coma decimales. Ej: "60.000,00"=60000, "$120.000"=120000, "1.200.000"=1200000. Solo el número entero sin puntos ni comas. Si no lo identificas, 0.
 
@@ -1146,7 +1166,8 @@ Sé conservador: si NO hay evidencia real de manipulación, marca esAutentico=tr
           nivelRiesgo: analysis.nivelRiesgo || (analysis.esAutentico ? 'bajo' : 'medio'),
           destinatarioCorrecto: !!analysis.destinatarioCorrecto,
           motivo: analysis.motivo || '',
-          checkedDestinatario: !!llaveBreB,
+          checkedDestinatario: !!cuentaEsperada,
+          cuentaEsperada,
         },
       };
     } catch (e: any) {

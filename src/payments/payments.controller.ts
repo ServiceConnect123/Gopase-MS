@@ -342,13 +342,15 @@ export class PaymentsController {
         conjunto: { type: 'string' },
         imageBase64: { type: 'string' },
         soloExtraerMonto: { type: 'boolean' },
+        tipoRecaudo: { type: 'string', description: 'fondo al que se paga (para validar la cuenta de destino)' },
+        validarDestino: { type: 'boolean', description: 'valida que el destino del comprobante coincida con la cuenta del fondo/conjunto' },
       },
       required: ['conjunto', 'imageBase64'],
     },
   })
   @Post('analyze-receipt')
   async analyzeReceipt(
-    @Body() body: { conjunto: string; imageBase64: string; soloExtraerMonto?: boolean },
+    @Body() body: { conjunto: string; imageBase64: string; soloExtraerMonto?: boolean; tipoRecaudo?: string; validarDestino?: boolean },
   ) {
     return this.payments.analyzeReceipt(body);
   }
