@@ -156,7 +156,7 @@ export class PropertiesController {
         adminNombre: { type: 'string' },
         adminWhatsapp: { type: 'string' },
         notifActivo: { type: 'string' },
-        diasGraciaPropietario: { type: 'number', description: 'días de gracia de la cuota de propietarios (0..28)' },
+        diasGraciaPropietario: { type: 'number', description: 'días de gracia corridos de la cuota de propietarios (0..180)' },
       },
     },
   })

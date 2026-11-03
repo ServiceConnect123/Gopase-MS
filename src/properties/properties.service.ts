@@ -47,8 +47,9 @@ export interface PropertySecrets {
 const MIRROR_CONJUNTOS = 'mirror/conjuntos';
 
 // Campos no sensibles del conjunto (registro normal).
-// diasGraciaPropietario: días del mes que el admin da a los propietarios para
-// pagar la cuota del mes anterior antes de marcarlos en mora (default 10).
+// diasGraciaPropietario: días CORRIDOS que el admin da a los propietarios para
+// pagar cada cuota (desde el 1° del mes siguiente) antes de marcarlos en mora
+// (default 10, tope 180).
 const BASIC_FIELDS = [
   'nombre', 'direccion', 'tipo', 'descripcion', 'cuotaMonto', 'moneda', 'driveFolderId',
   'llaveBreB', 'adminUsuario', 'adminNombre', 'adminWhatsapp', 'notifActivo',
@@ -139,8 +140,9 @@ export class PropertiesService {
 
   /**
    * Días de gracia que el conjunto le da a sus PROPIETARIOS para pagar la cuota
-   * del mes anterior (antes de marcarlos en mora). Configurable por el admin;
-   * default 10. Acepta conjunto por id o nombre. Se acota a un rango sensato.
+   * del mes anterior (antes de marcarlos en mora). Son días CORRIDOS desde que
+   * la cuota se vuelve exigible. Configurable por el admin; default 10. Acepta
+   * conjunto por id o nombre. Se acota a 0..180.
    */
   async getDiasGraciaPropietario(conjunto: string, fallback = 10): Promise<number> {
     try {
@@ -149,17 +151,17 @@ export class PropertiesService {
       const raw = found?.value?.diasGraciaPropietario;
       const n = Number(raw);
       if (!Number.isFinite(n) || n < 0) return fallback;
-      // Tope defensivo: 0..28 (el día del mes donde aplica la gracia).
-      return Math.min(28, Math.round(n));
+      // Días de gracia CORRIDOS. Tope defensivo: 0..180 (hasta 6 meses).
+      return Math.min(180, Math.round(n));
     } catch {
       return fallback;
     }
   }
 
   /**
-   * Configura los días de gracia de la cuota de los propietarios para un
-   * conjunto (por id o nombre). Lo usa el ADMIN del conjunto desde su pantalla
-   * de recaudo. Acota el valor a 0..28.
+   * Configura los días de gracia (corridos) de la cuota de los propietarios para
+   * un conjunto (por id o nombre). Lo usa el ADMIN desde su pantalla de recaudo.
+   * Acota el valor a 0..180.
    */
   async setDiasGraciaPropietario(
     conjunto: string,
@@ -169,7 +171,7 @@ export class PropertiesService {
     if (!String(conjunto || '').trim()) return { success: false, message: 'Conjunto requerido.' };
     const n = Number(dias);
     if (!Number.isFinite(n) || n < 0) return { success: false, message: 'Los días de gracia deben ser 0 o más.' };
-    const value = Math.min(28, Math.round(n));
+    const value = Math.min(180, Math.round(n));
     const found = await this.findConjunto(conjunto);
     if (!found) return { success: false, message: 'El conjunto no existe.' };
     try {
