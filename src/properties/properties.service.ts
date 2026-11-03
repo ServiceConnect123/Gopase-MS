@@ -47,9 +47,9 @@ export interface PropertySecrets {
 const MIRROR_CONJUNTOS = 'mirror/conjuntos';
 
 // Campos no sensibles del conjunto (registro normal).
-// diasGraciaPropietario: días CORRIDOS que el admin da a los propietarios para
-// pagar cada cuota (desde el 1° del mes siguiente) antes de marcarlos en mora
-// (default 10, tope 180).
+// diasGraciaPropietario: días (desde el 1° del mes actual) en los que el
+// propietario que pagó los 2 meses anteriores sigue "al día" aunque no haya
+// pagado el mes en curso (default 10, tope 180).
 const BASIC_FIELDS = [
   'nombre', 'direccion', 'tipo', 'descripcion', 'cuotaMonto', 'moneda', 'driveFolderId',
   'llaveBreB', 'adminUsuario', 'adminNombre', 'adminWhatsapp', 'notifActivo',
@@ -140,9 +140,9 @@ export class PropertiesService {
 
   /**
    * Días de gracia que el conjunto le da a sus PROPIETARIOS para pagar la cuota
-   * del mes anterior (antes de marcarlos en mora). Son días CORRIDOS desde que
-   * la cuota se vuelve exigible. Configurable por el admin; default 10. Acepta
-   * conjunto por id o nombre. Se acota a 0..180.
+   * mes en curso, contados desde el 1° del mes actual (si ya pagó los 2 meses
+   * anteriores). Configurable por el admin; default 10. Acepta conjunto por id o
+   * nombre. Se acota a 0..180.
    */
   async getDiasGraciaPropietario(conjunto: string, fallback = 10): Promise<number> {
     try {
