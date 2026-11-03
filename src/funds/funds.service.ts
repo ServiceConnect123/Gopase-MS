@@ -46,6 +46,9 @@ export class FundsService {
       // cajaPropia: si true, el dinero de este fondo es una CAJA SEPARADA (saldo
       // propio con arrastre, fuera de la caja general). El default nunca lo es.
       cajaPropia: !esDefault && dto.cajaPropia === true,
+      // Cuenta/llave de recaudo propia de este fondo (Bre-B o nº de cuenta). Si
+      // está vacía, se usa la llave Bre-B del conjunto. Texto libre.
+      cuentaRecaudo: String(dto.cuentaRecaudo ?? '').trim(),
       _fbWrite: true,
     };
   }
@@ -92,6 +95,7 @@ export class FundsService {
           ...rest,
           // Normaliza para fondos antiguos sin el campo. El default nunca es caja propia.
           cajaPropia: rest.esDefault === true ? false : rest.cajaPropia === true,
+          cuentaRecaudo: String(rest.cuentaRecaudo ?? '').trim(),
         };
       })
       // Default primero, luego por nombre.
@@ -136,6 +140,7 @@ export class FundsService {
       if (dto.metaMensual !== undefined) patch.metaMensual = Number(dto.metaMensual) || 0;
       // cajaPropia solo aplica a fondos NO default (Administración = caja general).
       if (dto.cajaPropia !== undefined && prev.esDefault !== true) patch.cajaPropia = dto.cajaPropia === true;
+      if (dto.cuentaRecaudo !== undefined) patch.cuentaRecaudo = String(dto.cuentaRecaudo ?? '').trim();
       await ref.update(patch);
       return { success: true, message: 'Tipo de recaudo actualizado.' };
     } catch (err: any) {
