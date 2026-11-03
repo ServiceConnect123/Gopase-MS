@@ -184,6 +184,52 @@ export class PropertiesService {
     }
   }
 
+  // Campos que el ADMIN del conjunto puede ver/editar desde su Configuración.
+  // NO incluye claves sensibles (mercadoPagoKey/geminiKey/driveFolderId/plan) ni
+  // el nombre (clave de relación; es de solo lectura).
+  private readonly ADMIN_FIELDS = [
+    'descripcion', 'direccion', 'pais', 'departamento', 'ciudad',
+    'cuotaMonto', 'moneda', 'llaveBreB',
+    'adminUsuario', 'adminNombre', 'adminWhatsapp', 'notifActivo',
+  ] as const;
+
+  /**
+   * Config del conjunto para el ADMIN (por nombre o id). Solo campos no
+   * sensibles + el nombre (solo lectura). Nunca expone claves.
+   */
+  async getAdminConfig(conjunto: string): Promise<any | null> {
+    if (!this.firebase.isEnabled()) return null;
+    if (!String(conjunto || '').trim()) return null;
+    const found = await this.findConjunto(conjunto);
+    if (!found) return null;
+    const c = found.value || {};
+    const out: Record<string, any> = { id: String(c.id ?? ''), nombre: c.nombre ?? '' };
+    this.ADMIN_FIELDS.forEach((f) => { out[f] = c[f] ?? (f === 'moneda' ? 'COP' : ''); });
+    return out;
+  }
+
+  /**
+   * Guarda SOLO los campos permitidos al admin (whitelist). No toca el nombre
+   * ni las claves/_secrets. Acepta conjunto por nombre o id.
+   */
+  async updateAdminConfig(conjunto: string, dto: any): Promise<{ success: boolean; message?: string }> {
+    if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
+    if (!String(conjunto || '').trim()) return { success: false, message: 'Conjunto requerido.' };
+    const found = await this.findConjunto(conjunto);
+    if (!found) return { success: false, message: 'El conjunto no existe.' };
+    try {
+      const patch: Record<string, any> = { _fbWrite: true };
+      this.ADMIN_FIELDS.forEach((f) => {
+        if (dto[f] !== undefined) patch[f] = dto[f];
+      });
+      await this.firebase.db().ref(`${MIRROR_CONJUNTOS}/${found.key}`).update(patch);
+      return { success: true, message: 'Configuración del conjunto actualizada.' };
+    } catch (err: any) {
+      this.logger.error(`[properties] updateAdminConfig ${conjunto} falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo actualizar.' };
+    }
+  }
+
   /**
    * Configuración COMPLETA de un conjunto para la pantalla de edición
    * (superAdmin). Incluye las claves sensibles. Este endpoint es administrativo.
