@@ -294,8 +294,48 @@ export class PaymentsService {
         status = 'Disponible'; color = '#2196F3'; icon = 'add-circle-outline';
       }
 
-      return { month, status, color, icon, payment, count: userPayments.length, payments: userPayments };
+      // Se exponen el pago y sus alias con tipoRecaudo normalizado (para que la
+      // UI pueda mostrar el fondo de cada mes).
+      return {
+        month,
+        status,
+        color,
+        icon,
+        payment: payment ? this.withPositionalAliases(payment) : null,
+        count: userPayments.length,
+        payments: userPayments.map((p) => this.withPositionalAliases(p)),
+      };
     });
+  }
+
+  /**
+   * Desglose de lo pagado (confirmado) por un propietario en el año, agrupado por
+   * TIPO DE RECAUDO (fondo). Para mini-gráficas del usuario. Normaliza el fondo
+   * (pagos antiguos sin tipo => 'Administración').
+   */
+  async getOwnerFundBreakdown(username: string, year: number): Promise<{
+    username: string;
+    year: number;
+    fondos: { fondo: string; total: number; count: number }[];
+    total: number;
+  }> {
+    const pagosAll = await this.readCollection<Pago>('pagos');
+    const pagos = this.filterPagosByYear(pagosAll, year).filter(
+      (p) => p.usuario === username && String(p.estado || '').toLowerCase() === 'confirmado',
+    );
+    const porFondo = new Map<string, { total: number; count: number }>();
+    let total = 0;
+    for (const p of pagos) {
+      const fondo = String((p as any).tipoRecaudo || 'Administración').trim() || 'Administración';
+      const valor = parseFloat(String(p.valor)) || 0;
+      const prev = porFondo.get(fondo) || { total: 0, count: 0 };
+      porFondo.set(fondo, { total: prev.total + valor, count: prev.count + 1 });
+      total += valor;
+    }
+    const fondos = Array.from(porFondo.entries())
+      .map(([fondo, v]) => ({ fondo, total: v.total, count: v.count }))
+      .sort((a, b) => b.total - a.total);
+    return { username, year, fondos, total };
   }
 
   /**
