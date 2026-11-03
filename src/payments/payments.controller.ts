@@ -151,6 +151,18 @@ export class PaymentsController {
     return { success: true, data };
   }
 
+  @ApiOperation({ summary: 'Desglose de lo pagado por un propietario por tipo de recaudo (fondo)' })
+  @ApiQuery({ name: 'username', required: true })
+  @ApiQuery({ name: 'year', required: false, type: Number })
+  @Get('owner-fund-breakdown')
+  async ownerFundBreakdown(@Query('username') username: string, @Query('year') year?: string) {
+    const data = await this.payments.getOwnerFundBreakdown(
+      username || '',
+      year ? parseInt(year, 10) : new Date().getFullYear(),
+    );
+    return { success: true, data };
+  }
+
   @ApiOperation({
     summary: 'Reporte "al día" de todos los propietarios (meses M-2, M-1 y actual + regla de gracia 10 días)',
   })
