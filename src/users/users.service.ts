@@ -39,6 +39,8 @@ export interface UserDTO {
   placa2?: string;
   fechaIngreso?: string;
   conjuntoId?: string;
+  /** IDs de etiquetas asignadas al usuario (las gestiona el admin). */
+  etiquetas?: string[];
 }
 
 const MIRROR_USERS = 'mirror/usuarios';
@@ -105,6 +107,7 @@ export class UsersService {
       const { _fbWrite, ...rest } = u;
       return {
         ...rest,
+        etiquetas: Array.isArray(rest.etiquetas) ? rest.etiquetas : [],
         dato_1: rest.usuario ?? rest.id ?? '',
         dato_2: rest.email ?? '',
         dato_4: rest.nombre ?? '',
@@ -139,6 +142,7 @@ export class UsersService {
       placa1: dto.placa1 || '',
       placa2: dto.placa2 || '',
       fechaIngreso: dto.fechaIngreso || '',
+      etiquetas: Array.isArray(dto.etiquetas) ? dto.etiquetas : [],
       _fbWrite: true,
     };
   }
@@ -232,6 +236,8 @@ export class UsersService {
       setIf('placa1', dto.placa1);
       setIf('placa2', dto.placa2);
       setIf('fechaIngreso', dto.fechaIngreso);
+      // Etiquetas (array de ids). Solo se tocan si el DTO las incluye.
+      if (Array.isArray(dto.etiquetas)) patch.etiquetas = dto.etiquetas;
 
       await ref.update(patch);
 

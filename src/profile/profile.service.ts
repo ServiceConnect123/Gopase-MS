@@ -26,6 +26,8 @@ export interface ProfileData {
   parcela?: string;
   placa1?: string;
   placa2?: string;
+  /** IDs de etiquetas asignadas (solo lectura para el propietario). */
+  etiquetas?: string[];
 }
 
 const MIRROR_USERS = 'mirror/usuarios';
@@ -64,6 +66,7 @@ export class ProfileService {
       parcela: u.parcela || '',
       placa1: u.placa1 || '',
       placa2: u.placa2 || '',
+      etiquetas: Array.isArray(u.etiquetas) ? u.etiquetas : [],
     };
   }
 
