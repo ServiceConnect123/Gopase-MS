@@ -27,6 +27,7 @@ export class FundsController {
         visibleParaPropietario: { type: 'boolean' },
         metaMensual: { type: 'number' },
         cajaPropia: { type: 'boolean', description: 'si true, es una caja separada (saldo propio)' },
+        cuentaRecaudo: { type: 'string', description: 'llave Bre-B / nº de cuenta propia de este fondo (opcional)' },
       },
       required: ['conjunto', 'nombre'],
     },

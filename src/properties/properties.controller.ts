@@ -11,7 +11,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ApiBody, ApiOperation, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import { ApiBody, ApiOperation, ApiQuery, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { PropertiesService } from './properties.service';
 
 /**
@@ -63,6 +63,41 @@ export class PropertiesController {
   @Put('owner-grace')
   async setOwnerGrace(@Body() body: { conjunto: string; diasGraciaPropietario: number }) {
     return this.properties.setDiasGraciaPropietario(body?.conjunto || '', Number(body?.diasGraciaPropietario));
+  }
+
+  @ApiOperation({ summary: 'Config del conjunto para el admin (por nombre; sin claves sensibles)' })
+  @ApiQuery({ name: 'conjunto', required: true })
+  @Get('admin-config')
+  async getAdminConfig(@Query('conjunto') conjunto: string) {
+    const data = await this.properties.getAdminConfig(conjunto || '');
+    return { success: !!data, data };
+  }
+
+  @ApiOperation({ summary: 'Guardar config del conjunto (admin; solo campos no sensibles)' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        conjunto: { type: 'string', description: 'nombre o id del conjunto' },
+        descripcion: { type: 'string' },
+        direccion: { type: 'string' },
+        pais: { type: 'string' },
+        departamento: { type: 'string' },
+        ciudad: { type: 'string' },
+        cuotaMonto: { type: 'string' },
+        moneda: { type: 'string' },
+        llaveBreB: { type: 'string' },
+        adminUsuario: { type: 'string' },
+        adminNombre: { type: 'string' },
+        adminWhatsapp: { type: 'string' },
+        notifActivo: { type: 'string' },
+      },
+      required: ['conjunto'],
+    },
+  })
+  @Put('admin-config')
+  async updateAdminConfig(@Body() body: any) {
+    return this.properties.updateAdminConfig(body?.conjunto || '', body);
   }
 
   @ApiOperation({ summary: 'Configuración completa de un conjunto (superAdmin; incluye claves)' })
@@ -121,7 +156,7 @@ export class PropertiesController {
         adminNombre: { type: 'string' },
         adminWhatsapp: { type: 'string' },
         notifActivo: { type: 'string' },
-        diasGraciaPropietario: { type: 'number', description: 'días de gracia de la cuota de propietarios (0..28)' },
+        diasGraciaPropietario: { type: 'number', description: 'días de gracia corridos de la cuota de propietarios (0..180)' },
       },
     },
   })
