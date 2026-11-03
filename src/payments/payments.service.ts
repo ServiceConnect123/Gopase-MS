@@ -343,21 +343,18 @@ export class PaymentsService {
 
   /**
    * Reporte "al día" de TODOS los propietarios. Muestra 3 columnas de contexto
-   * (M-2, M-1, mes actual) pero el estado "al día / en mora" se calcula con
-   * DÍAS DE GRACIA CORRIDOS:
+   * (M-2, M-1, mes actual) y calcula "al día / en mora" así:
    *
-   *   - Cada cuota mensual se vuelve exigible el 1° del MES SIGUIENTE a su mes.
-   *     Ej: la cuota de marzo empieza a contar el 1 de abril.
-   *   - El plazo (gracia) es N días CORRIDOS (N = diasGraciaPropietario del
-   *     conjunto, default 10). Deadline = 1° del mes siguiente + N días.
-   *   - Un mes impago está EN MORA si hoy > su deadline. Si hoy <= deadline,
-   *     todavía está dentro del plazo (al día).
-   *   - El propietario está "al día" si NINGÚN mes exigible impago pasó su
-   *     deadline. Se revisan los últimos 18 meses (cubre N grandes, p. ej. 180).
-   *   - El mes en curso no es exigible todavía (su mes siguiente aún no llega).
+   *   - Se exige tener pagados los DOS meses anteriores al actual: M-1 y M-2.
+   *     Si falta alguno (y es exigible según su ingreso) => EN MORA inmediata.
+   *   - El mes ACTUAL no se exige todavía: hay una GRACIA de N días CORRIDOS
+   *     contados desde el 1° del MES ACTUAL (N = diasGraciaPropietario, default
+   *     10, tope 180). Mientras hoy <= (1° del mes actual + N días) y tenga M-1
+   *     y M-2 cubiertos, está al día aunque no haya pagado el mes actual.
+   *   - Pasada esa gracia, si tampoco pagó el mes actual => en mora.
    *   - Meses anteriores al ingreso del propietario = "N/A" (no exigibles).
    *
-   * Así N puede ser 10, 45, 60, etc. (no limitado al día del mes).
+   * Así N puede ser 10, 45, 60, ... hasta 180 días desde el 1° del mes actual.
    */
   async getAlDiaReport(conjunto: string, isSuperAdmin = false): Promise<{
     conjunto: string;
@@ -391,25 +388,11 @@ export class PaymentsService {
       ? await this.properties.getDiasGraciaPropietario(conjunto, 10)
       : 10;
 
-    // Deadline de una cuota (mes idx/anio): 1° del mes SIGUIENTE + diasGracia.
-    // Un mes impago está en mora si hoy supera su deadline.
+    // Gracia del MES ACTUAL: vigente mientras hoy <= (1° del mes actual + N días).
     const hoyMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    const deadlinePasado = (idx: number, anio: number): boolean => {
-      const inicioAtraso = new Date(anio, idx + 1, 1); // 1° del mes siguiente
-      const deadline = new Date(inicioAtraso.getFullYear(), inicioAtraso.getMonth(), inicioAtraso.getDate() + diasGracia);
-      return hoyMs > deadline.getTime();
-    };
-    // El mes en curso aún no es exigible (su "mes siguiente" no ha llegado).
-    const esExigible = (idx: number, anio: number): boolean => {
-      const inicioAtraso = new Date(anio, idx + 1, 1);
-      return hoyMs >= inicioAtraso.getTime();
-    };
-    // `graciaActiva` (compat): true si el último mes vencido todavía está dentro
-    // del plazo (no ha pasado su deadline).
-    const graciaActiva = (() => {
-      const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      return !deadlinePasado(prev.getMonth(), prev.getFullYear());
-    })();
+    const inicioMesActual = new Date(now.getFullYear(), now.getMonth(), 1);
+    const finGracia = new Date(inicioMesActual.getFullYear(), inicioMesActual.getMonth(), 1 + diasGracia);
+    const graciaActiva = hoyMs <= finGracia.getTime();
 
     // Los 3 meses relevantes (del más antiguo al actual), con su año propio.
     const relMonth = (offset: number) => {
@@ -420,9 +403,6 @@ export class PaymentsService {
     const mesM1 = relMonth(1);
     const mesM = relMonth(0);
     const meses = [mesM2, mesM1, mesM];
-    // Ventana de meses a evaluar para la mora (18 meses hacia atrás), para cubrir
-    // valores grandes de gracia sin depender solo de M-2/M-1.
-    const ventana = Array.from({ length: 18 }, (_, k) => relMonth(k));
 
     // Pagos cacheados por año (isPaidMonth filtra sobre pagos ya de ese año).
     const pagosPorAnio = new Map<number, Pago[]>();
@@ -454,14 +434,14 @@ export class PaymentsService {
       const m1 = estadoMes(u, mesM1);
       const actual = estadoMes(u, mesM);
 
-      // En mora si existe ALGÚN mes exigible, impago y con su deadline vencido
-      // (dentro de la ventana de 18 meses, respetando la fecha de ingreso).
-      const enMora = ventana.some((mes) => {
-        if (!esExigible(mes.idx, mes.anio)) return false; // mes en curso: no exigible
-        const estado = estadoMes(u, mes); // 'Pagado' | 'Pendiente' | 'N/A'
-        if (estado !== 'Pendiente') return false; // pagado o no aplica
-        return deadlinePasado(mes.idx, mes.anio); // impago y fuera de plazo => mora
-      });
+      // Al día:
+      //  - M-2 y M-1 cubiertos (Pagado o N/A). Si falta alguno => mora inmediata.
+      //  - El mes actual solo se exige pasada la gracia: si no pagó el actual y
+      //    ya venció la gracia del mes en curso => mora.
+      const m2Ok = m2 === 'Pagado' || m2 === 'N/A';
+      const m1Ok = m1 === 'Pagado' || m1 === 'N/A';
+      const actualOk = actual === 'Pagado' || actual === 'N/A' || graciaActiva;
+      const alDia = m2Ok && m1Ok && actualOk;
 
       return {
         nombre: u.nombre || u.usuario,
@@ -470,7 +450,7 @@ export class PaymentsService {
         m2,
         m1,
         actual,
-        alDia: !enMora,
+        alDia,
       };
     });
 
