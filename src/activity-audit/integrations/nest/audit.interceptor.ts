@@ -67,10 +67,10 @@ export class AuditInterceptor implements NestInterceptor {
       tap({
         next: () => this.emit(req, method, path, start, 200),
         error: (e) => {
-          const status = e?.status ?? 500;
-          // Solo los fallos de servidor (5xx) son errores técnicos: se reportan
-          // y su id queda en el log. Los 4xx (validación/permiso) no.
-          this.emit(req, method, path, start, status, status >= 500 ? e : undefined);
+          const status = e?.status ?? e?.getStatus?.() ?? 500;
+          // Se reporta CUALQUIER error (5xx = error, 4xx = warning en Sentry) y su
+          // id queda en el log para cruzar monitoreo y Sentry.
+          this.emit(req, method, path, start, status, e);
         },
       }),
     );

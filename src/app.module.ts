@@ -25,7 +25,8 @@ import { BillingModule } from './billing/billing.module';
 import { PlansModule } from './plans/plans.module';
 import { TagsModule } from './tags/tags.module';
 import { APP_INTERCEPTOR, APP_GUARD, APP_FILTER } from '@nestjs/core';
-import { SentryModule, SentryGlobalFilter } from '@sentry/nestjs/setup';
+import { SentryModule } from '@sentry/nestjs/setup';
+import { AllErrorsSentryFilter } from './activity-audit/adapters/sentry/all-errors-sentry.filter';
 import { ActivityAuditModule } from './activity-audit/integrations/nest/activity-audit.module';
 import { AuditInterceptor } from './activity-audit/integrations/nest/audit.interceptor';
 import { SentryErrorReporter } from './activity-audit/adapters/sentry/sentry-error-reporter';
@@ -97,9 +98,10 @@ import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
     TagsModule,
   ],
   providers: [
-    // Reporta a Sentry las excepciones no controladas (los 4xx de HttpException
-    // no se reportan) y deja que Nest siga respondiendo igual que antes.
-    { provide: APP_FILTER, useClass: SentryGlobalFilter },
+    // Reporta a Sentry TODO error: excepciones no controladas y también las
+    // HttpException (4xx como warning, 5xx como error). Nest sigue respondiendo
+    // igual que antes.
+    { provide: APP_FILTER, useClass: AllErrorsSentryFilter },
     // Cifrado de payload (ofuscación). Va PRIMERO para descifrar el request
     // antes de que el AuditInterceptor lea el body, y cifrar la respuesta al
     // final. Controlado por PAYLOAD_ENCRYPTION_ENABLED (passthrough si off).

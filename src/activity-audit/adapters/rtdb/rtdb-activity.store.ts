@@ -4,7 +4,7 @@
 
 import type { Database } from 'firebase-admin/database';
 import type { ActivityStore } from '../../core/ports';
-import type { ActivityLog, ActivityQuery } from '../../core/types';
+import type { ActivityLog, ActivityQuery, ActivityScanQuery } from '../../core/types';
 
 /**
  * Persiste logs de actividad en Realtime Database bajo una ruta dedicada.
@@ -77,6 +77,36 @@ export class RtdbActivityStore implements ActivityStore {
     // Más recientes primero y recorte al límite.
     results.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
     return results.slice(0, limit);
+  }
+
+  /**
+   * Lee TODA la actividad de los últimos `dias` días (sin el límite de `query`)
+   * para agregaciones. Filtra por conjunto/ambiente en memoria y corta al llegar
+   * a `maxEventos` para no agotar memoria (`truncado = true`).
+   */
+  async scan(filter: ActivityScanQuery): Promise<{ logs: ActivityLog[]; truncado: boolean }> {
+    const db = this.getDb();
+    const dias = Math.min(Math.max(filter.dias ?? 14, 1), 14);
+    const maxEventos = Math.min(Math.max(filter.maxEventos ?? 20000, 1), 50000);
+    const logs: ActivityLog[] = [];
+    let truncado = false;
+
+    for (const day of recentDays(dias)) {
+      const snap = await db.ref(`${this.basePath}/${day}`).get();
+      if (!snap.exists()) continue;
+      const val = snap.val() as Record<string, RawLog>;
+      for (const [id, raw] of Object.entries(val)) {
+        if (filter.conjunto && (raw.conjunto || '') !== filter.conjunto) continue;
+        if (filter.ambiente && (raw.ambiente || '') !== filter.ambiente) continue;
+        if (logs.length >= maxEventos) {
+          truncado = true;
+          break;
+        }
+        logs.push(fromRaw(raw, id, day));
+      }
+      if (truncado) break;
+    }
+    return { logs, truncado };
   }
 
   /** Elimina un log puntual: /{basePath}/{day}/{id}. Idempotente. */

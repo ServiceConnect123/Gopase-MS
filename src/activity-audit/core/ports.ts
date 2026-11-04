@@ -7,6 +7,7 @@
 import type {
   ActivityLog,
   ActivityQuery,
+  ActivityScanQuery,
   ErrorContext,
   ErrorIssueQuery,
   ErrorIssueResult,
@@ -20,6 +21,11 @@ export interface ActivityStore {
   append(log: ActivityLog): Promise<void>;
   /** Consulta logs recientes con filtros opcionales (conjunto/usuario). */
   query(filter: ActivityQuery): Promise<ActivityLog[]>;
+  /**
+   * Recorre TODA la actividad de la ventana (sin el límite de `query`) para
+   * agregaciones. Devuelve también si se truncó por `maxEventos`.
+   */
+  scan(filter: ActivityScanQuery): Promise<{ logs: ActivityLog[]; truncado: boolean }>;
   /** Elimina un log puntual por su día (YYYY-MM-DD) e id de push. */
   remove(day: string, id: string): Promise<void>;
   /** Elimina en masa los logs que cumplen el filtro. Devuelve cuántos borró. */

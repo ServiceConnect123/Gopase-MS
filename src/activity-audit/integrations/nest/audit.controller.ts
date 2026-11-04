@@ -122,6 +122,55 @@ export class AuditController {
     return { success: true, data };
   }
 
+  @Get('summary')
+  @UseGuards(SuperAdminGuard)
+  @ApiOperation({
+    summary: 'Resumen de actividad de un conjunto: módulos más usados, acciones por día y usuarios activos. Solo superAdmin.',
+    description:
+      'Agrega la actividad de los últimos `dias` (1-14, por defecto 14; es la ventana que conserva la consulta). ' +
+      'El "módulo" se deriva del recurso/vista del log. Cacheado 60 s.',
+  })
+  @ApiQuery({ name: 'conjunto', required: true, description: 'Nombre del conjunto (igual que en los logs).' })
+  @ApiQuery({ name: 'dias', required: false, example: 14 })
+  @ApiQuery({ name: 'ambiente', required: false, description: "'qa' | 'prod'. Vacío = todos." })
+  async activitySummary(
+    @Query('conjunto') conjunto?: string,
+    @Query('dias') dias?: string,
+    @Query('ambiente') ambiente?: string,
+  ) {
+    if (!conjunto) return { success: false, data: null, message: 'conjunto es obligatorio.' };
+    const data = await this.activity.summary({
+      conjunto,
+      ambiente: ambiente || undefined,
+      dias: dias ? parseInt(dias, 10) || undefined : undefined,
+    });
+    if (!data) return { success: false, data: null, message: 'No se pudo calcular el resumen.' };
+    return { success: true, data };
+  }
+
+  @Get('openings')
+  @UseGuards(SuperAdminGuard)
+  @ApiOperation({
+    summary: 'Aperturas de la app por usuario y por día (Monitoreo > Sesiones). Solo superAdmin.',
+    description: 'Cuenta los eventos "Abrió la app" de los últimos `dias` (1-14). Sin `conjunto` agrega todos. Cacheado 60 s.',
+  })
+  @ApiQuery({ name: 'conjunto', required: false })
+  @ApiQuery({ name: 'dias', required: false, example: 14 })
+  @ApiQuery({ name: 'ambiente', required: false, description: "'qa' | 'prod'. Vacío = todos." })
+  async appOpenings(
+    @Query('conjunto') conjunto?: string,
+    @Query('dias') dias?: string,
+    @Query('ambiente') ambiente?: string,
+  ) {
+    const data = await this.activity.openings({
+      conjunto: conjunto || undefined,
+      ambiente: ambiente || undefined,
+      dias: dias ? parseInt(dias, 10) || undefined : undefined,
+    });
+    if (!data) return { success: false, data: null, message: 'No se pudo calcular las aperturas.' };
+    return { success: true, data };
+  }
+
   @Delete('activity')
   @ApiOperation({ summary: 'Elimina en masa logs de actividad por filtro (conjunto/usuario/ambiente).' })
   @ApiQuery({ name: 'conjunto', required: false })

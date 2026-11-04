@@ -28,6 +28,8 @@ export interface Pago {
   referencia: string;
   /** Marca de "duplicado validado por el admin" (no vuelve al reporte). */
   dupOk?: boolean;
+  /** Fecha/hora de creación del registro (ISO). Vacía en pagos antiguos. */
+  createdAt?: string;
 }
 
 interface Usuario {
@@ -1004,6 +1006,7 @@ export class PaymentsService {
         conjuntoId: input.conjuntoId || '',
         // Tipo de recaudo (fondo). Si no viene, 'Administración' por defecto.
         tipoRecaudo: input.tipoRecaudo || 'Administración',
+        createdAt: new Date().toISOString(),
         // Marca de escritura por Firebase: la sync Sheets->RTDB no debe pisarlo.
         _fbWrite: true,
       };
@@ -1418,7 +1421,8 @@ Secciones: Inicio (resumen), Pagos (registrar/confirmar pagos y ver morosos), ` 
         updates[`mirror/pagos/${this.safeKey(id)}`] = {
           id, usuario: input.usuario, usuarioId: input.usuario, concepto,
           valor: String(monto), fecha: hoy, estado: 'Procesando',
-          referencia: externalReference, conjunto: input.conjunto || '', _fbWrite: true,
+          referencia: externalReference, conjunto: input.conjunto || '',
+          createdAt: new Date().toISOString(), _fbWrite: true,
         };
       };
       if (meses.length > 0) {

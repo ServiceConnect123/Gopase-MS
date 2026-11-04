@@ -105,6 +105,8 @@ export class SyncService {
       fecha: row.dato_5 ?? '',
       estado: row.dato_6 ?? '',
       referencia: row.dato_7 ?? '',
+      // Columna de auditoría de Sheets (la llena el Apps Script).
+      createdAt: row.fecha_creacion ?? '',
     };
   }
 
@@ -127,6 +129,8 @@ export class SyncService {
       placa1: row.dato_11 ?? '',
       placa2: row.dato_12 ?? '',
       fechaIngreso: row.dato_13 ?? '',
+      // Columna de auditoría de Sheets (la llena el Apps Script).
+      createdAt: row.fecha_creacion ?? '',
     };
   }
 
