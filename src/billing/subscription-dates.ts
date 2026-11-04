@@ -1,7 +1,14 @@
 // ==========================================
 // billing · fechas de cobro de un conjunto
 // ==========================================
-// Única fuente de verdad de "cuándo debe pagar" y "cuándo se corta el acceso".
+// Única fuente de verdad de "cuándo debe pagar" y "cuándo se corta el acceso"
+// de un CONJUNTO por la suscripción a GoPase (lo que el conjunto le paga a la app).
+//
+// OJO: NO es la regla de los PROPIETARIOS. La cuota de administración que paga cada
+// propietario al conjunto es otra cosa y vive en payments.service (getAlDiaReport):
+// mensual, exige los 2 meses anteriores pagados y su gracia es configurable por
+// conjunto (diasGraciaPropietario, 10 a 180 días desde el 1° del mes).
+//
 // La usan BillingService (para bloquear) y PropertiesService (para mostrar), de
 // modo que lo que ve el superAdmin y el administrador es exactamente lo que se aplica.
 //
@@ -16,7 +23,10 @@
 //   gracia  -> pagadoHasta < hoy <= vencimiento  (debe pagar, aún tiene acceso)
 //   vencido -> hoy > vencimiento                 (acceso cortado)
 
-/** Días que se le dejan al conjunto para pagar después de la fecha de pago. */
+/**
+ * Días que se le dejan al CONJUNTO para pagar su suscripción a GoPase después de la
+ * fecha de pago. Fijos para todos. No confundir con `diasGraciaPropietario`.
+ */
 export const DIAS_GRACIA = 10;
 
 export type FaseCobro = 'al_dia' | 'gracia' | 'vencido';

@@ -46,8 +46,11 @@ export interface PropertyPublic {
   fechaPago: string;
   /** Último día con acceso (fechaPago + días de gracia). Después se corta. */
   vencimiento: string;
-  /** Días de gracia que se le dejan para pagar después de la fecha de pago. */
-  diasGracia: number;
+  /**
+   * Días que se le dejan al conjunto para pagar su SUSCRIPCIÓN a GoPase después de
+   * la fecha de pago. No es `diasGraciaPropietario` (gracia de la cuota de los propietarios).
+   */
+  diasGraciaSuscripcion: number;
   bloqueado: boolean;
   creadoEn: string;
 }
@@ -120,7 +123,7 @@ export class PropertiesService {
         // Mismo cálculo que usa el bloqueo (billing/subscription-dates).
         fechaPago: cobroDeConjunto(c)?.fechaPago ?? '',
         vencimiento: cobroDeConjunto(c)?.vencimiento ?? '',
-        diasGracia: DIAS_GRACIA,
+        diasGraciaSuscripcion: DIAS_GRACIA,
         bloqueado: c.bloqueado === true,
         creadoEn: String(c.creadoEn ?? ''),
       };
