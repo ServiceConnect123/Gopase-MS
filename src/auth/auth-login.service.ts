@@ -45,6 +45,16 @@ export interface LoginResult {
       pagadoHasta: string;
       /** Si el conjunto está bloqueado pero el usuario es admin: 'facturacion'. */
       accesoRestringido?: 'facturacion' | '';
+      /** Prueba gratis (autoregistro): true mientras no haya un pago confirmado. */
+      trial?: boolean;
+      trialHasta?: string;
+      /** Días que quedan de prueba (0 si no aplica o ya venció). */
+      diasRestantes?: number;
+      /** Día en que le toca pagar y último día con acceso (después se corta). */
+      fechaPago?: string;
+      vencimiento?: string;
+      /** Debe pagar pero aún conserva el acceso (dentro de los días de gracia). */
+      enGracia?: boolean;
     };
   };
 }
@@ -203,7 +213,7 @@ export class AuthLoginService {
       //   - propietario/vigilante/otros: login rechazado (suspensión por pago).
       const esSuperAdmin = rol.toLowerCase() === 'superadmin';
       let suscripcion:
-        | { alDia: boolean; bloqueado: boolean; pagadoHasta: string; accesoRestringido?: 'facturacion' | '' }
+        | NonNullable<NonNullable<LoginResult['user']>['suscripcion']>
         | undefined;
       if (!esSuperAdmin && conjuntoNombre) {
         try {
@@ -223,6 +233,12 @@ export class AuthLoginService {
             bloqueado: est.bloqueado,
             pagadoHasta: est.pagadoHasta,
             accesoRestringido: est.bloqueado && esAdmin ? 'facturacion' : '',
+            trial: est.trial,
+            trialHasta: est.trialHasta,
+            diasRestantes: est.diasRestantes,
+            fechaPago: est.fechaPago,
+            vencimiento: est.vencimiento,
+            enGracia: est.enGracia,
           };
         } catch (e: any) {
           // Fail-open: si no se puede evaluar la suscripción, no bloqueamos el login.

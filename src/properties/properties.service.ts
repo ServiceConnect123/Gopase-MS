@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
 import { SheetsService } from '../sheets/sheets.service';
+import { DIAS_GRACIA, cobroDeConjunto } from '../billing/subscription-dates';
 
 /**
  * CRUD de propiedades (conjuntos) contra Firebase (RTDB mirror/conjuntos).
@@ -32,6 +33,23 @@ export interface PropertyPublic {
   hasMercadoPago: boolean;
   hasBreB: boolean;
   hasGemini: boolean;
+  // --- Suscripción (no sensible). Vacíos en conjuntos anteriores al autoregistro. ---
+  /** 'pendiente' | 'prueba' | 'activo' | 'suspendido'. */
+  estado: string;
+  planId: string;
+  /** 'mensual' | 'anual' (el ciclo que eligió al registrarse). */
+  ciclo: string;
+  trial: boolean;
+  trialHasta: string;
+  pagadoHasta: string;
+  /** Día en que le toca pagar (último día cubierto + 1), YYYY-MM-DD. '' si aún no hay fechas. */
+  fechaPago: string;
+  /** Último día con acceso (fechaPago + días de gracia). Después se corta. */
+  vencimiento: string;
+  /** Días de gracia que se le dejan para pagar después de la fecha de pago. */
+  diasGracia: number;
+  bloqueado: boolean;
+  creadoEn: string;
 }
 
 export interface PropertySecrets {
@@ -93,6 +111,18 @@ export class PropertiesService {
         hasMercadoPago: !!secrets.mercadoPagoKey,
         hasBreB: !!c.llaveBreB,
         hasGemini: !!secrets.geminiKey,
+        estado: String(c.estado ?? ''),
+        planId: String(c.planId ?? ''),
+        ciclo: String(c.ciclo ?? ''),
+        trial: c.trial === true,
+        trialHasta: String(c.trialHasta ?? ''),
+        pagadoHasta: String(c.pagadoHasta ?? ''),
+        // Mismo cálculo que usa el bloqueo (billing/subscription-dates).
+        fechaPago: cobroDeConjunto(c)?.fechaPago ?? '',
+        vencimiento: cobroDeConjunto(c)?.vencimiento ?? '',
+        diasGracia: DIAS_GRACIA,
+        bloqueado: c.bloqueado === true,
+        creadoEn: String(c.creadoEn ?? ''),
       };
     });
   }

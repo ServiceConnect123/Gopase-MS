@@ -24,8 +24,8 @@ const MIRROR_CONJUNTOS = 'mirror/conjuntos';
 export const FACTURA_ESTADOS = ['pendiente', 'confirmada', 'rechazada', 'devuelta'] as const;
 export type FacturaEstado = (typeof FACTURA_ESTADOS)[number];
 
-/** Días de gracia dentro del mes para pagar antes de bloquear el conjunto. */
-const DIAS_GRACIA = 10;
+
+import { DIAS_GRACIA, calcCobro, baseDeCobro, type FaseCobro } from './subscription-dates';
 
 @Injectable()
 export class BillingService {
@@ -301,8 +301,10 @@ export class BillingService {
   //   pagadoHasta  (ISO date, YYYY-MM-DD): hasta cuándo está pago.
   //   bloqueado    (bool): true si venció el pago y pasaron los días de gracia.
   //
-  // Regla de acceso: un conjunto está AL DÍA si hoy <= pagadoHasta, O si estamos
-  // dentro de los primeros DIAS_GRACIA días del mes en curso (gracia para pagar).
+  // Regla de acceso (ver subscription-dates.ts):
+  //   fechaPago   = pagadoHasta + 1 día
+  //   vencimiento = fechaPago + DIAS_GRACIA (10) días
+  //   Con acceso hasta el vencimiento (inclusive); pasado ese día se corta.
   //
   // Arranque seguro: los conjuntos SIN pagadoHasta (los que ya existían antes de
   // montar este cobro) arrancan con pagadoHasta = fin del PRÓXIMO mes, para no
@@ -359,13 +361,33 @@ export class BillingService {
   }
 
   /**
-   * Decide si un conjunto está al día dado su pagadoHasta y la fecha actual.
-   * Al día si: hoy <= pagadoHasta, o estamos en los primeros DIAS_GRACIA del mes.
+   * ¿Conserva el acceso? Sí mientras no haya pasado el VENCIMIENTO
+   * (pagadoHasta + 1 + DIAS_GRACIA días), es decir, al día o dentro de la gracia.
    */
   private estaAlDia(pagadoHasta: Date | null, hoy: Date): boolean {
-    if (hoy.getDate() <= DIAS_GRACIA) return true; // gracia de inicio de mes
     if (!pagadoHasta) return false;
-    return hoy.getTime() <= pagadoHasta.getTime();
+    return calcCobro(pagadoHasta, hoy).fase !== 'vencido';
+  }
+
+  /**
+   * ¿Conserva el acceso un conjunto concreto? Misma regla para todos: acceso
+   * hasta el vencimiento (fecha de pago + DIAS_GRACIA). Durante la prueba gratis
+   * el último día cubierto es `trialHasta`; después, `pagadoHasta`.
+   */
+  private estaAlDiaConjunto(v: any, pagadoHasta: Date | null, hoy: Date): boolean {
+    return this.estaAlDia(baseDeCobro(v) ?? pagadoHasta, hoy);
+  }
+
+  /**
+   * Días calendario que faltan para `hasta` (0 si vence hoy o ya venció). Se
+   * compara por día, no por hora: `hasta` se interpreta a las 23:59 del último día
+   * (sigue vigente todo ese día), lo que con horas daría un día de más.
+   */
+  private diasRestantes(hasta: Date | null, hoy: Date): number {
+    if (!hasta) return 0;
+    const a = new Date(hasta.getFullYear(), hasta.getMonth(), hasta.getDate()).getTime();
+    const b = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate()).getTime();
+    return Math.max(0, Math.round((a - b) / 86_400_000));
   }
 
   /**
@@ -404,6 +426,24 @@ export class BillingService {
     bloqueado: boolean;
     pagadoHasta: string;
     diasGracia: number;
+    /** 'pendiente' | 'prueba' | 'activo' | 'suspendido' ('' en conjuntos anteriores al autoregistro). */
+    estado: string;
+    /** true mientras el conjunto está en prueba gratis (aún sin pago confirmado). */
+    trial: boolean;
+    trialHasta: string;
+    /** Días que quedan de prueba (0 si no aplica o ya venció). */
+    diasRestantes: number;
+    /** YYYY-MM-DD: día en que le toca pagar (último día cubierto + 1). */
+    fechaPago: string;
+    /** YYYY-MM-DD: último día con acceso (fechaPago + diasGracia). Después se corta. */
+    vencimiento: string;
+    /** 'al_dia' (cubierto), 'gracia' (debe pagar, aún con acceso) o 'vencido' (cortado). */
+    fase: FaseCobro;
+    enGracia: boolean;
+    /** Días de hoy a la fecha de pago (negativo si ya pasó). */
+    diasParaPago: number;
+    /** Días de hoy al vencimiento (0 = vence hoy, negativo = ya venció). */
+    diasParaVencimiento: number;
     message?: string;
   }> {
     const base = {
@@ -413,6 +453,16 @@ export class BillingService {
       bloqueado: false,
       pagadoHasta: '',
       diasGracia: DIAS_GRACIA,
+      estado: '',
+      trial: false,
+      trialHasta: '',
+      diasRestantes: 0,
+      fechaPago: '',
+      vencimiento: '',
+      fase: 'al_dia' as FaseCobro,
+      enGracia: false,
+      diasParaPago: 0,
+      diasParaVencimiento: 0,
     };
     if (!this.firebase.isEnabled()) return { ...base, success: false, message: 'Servicio no disponible.' };
     if (!String(conjunto ?? '').trim()) return { ...base, success: false, message: 'Conjunto requerido.' };
@@ -423,12 +473,26 @@ export class BillingService {
     }
     const { pagadoHasta } = await this.ensureDefaultSuscripcion(found);
     const hoy = new Date();
-    const alDia = this.estaAlDia(pagadoHasta, hoy);
+    const alDia = this.estaAlDiaConjunto(found.value, pagadoHasta, hoy);
+    const enPrueba = found.value?.trial === true;
+    const trialHasta = enPrueba ? this.parseDate(found.value?.trialHasta) ?? pagadoHasta : null;
+    const cobro = calcCobro(baseDeCobro(found.value) ?? pagadoHasta, hoy);
     return {
       ...base,
       alDia,
       bloqueado: !alDia,
       pagadoHasta: this.toISODate(pagadoHasta),
+      // Si el cron aún no lo marcó, un conjunto vencido se informa ya como suspendido.
+      estado: !alDia ? 'suspendido' : String(found.value?.estado ?? ''),
+      trial: enPrueba,
+      trialHasta: trialHasta ? this.toISODate(trialHasta) : '',
+      diasRestantes: enPrueba ? this.diasRestantes(trialHasta, hoy) : 0,
+      fechaPago: cobro.fechaPago,
+      vencimiento: cobro.vencimiento,
+      fase: cobro.fase,
+      enGracia: cobro.fase === 'gracia',
+      diasParaPago: cobro.diasParaPago,
+      diasParaVencimiento: cobro.diasParaVencimiento,
     };
   }
 
@@ -453,6 +517,9 @@ export class BillingService {
       await this.firebase.db().ref(`${MIRROR_CONJUNTOS}/${found.key}`).update({
         pagadoHasta: this.toISODate(nuevo),
         bloqueado: false,
+        // Un pago confirmado saca al conjunto de la prueba gratis.
+        trial: false,
+        estado: 'activo',
         _fbWrite: true,
       });
       return { success: true, pagadoHasta: this.toISODate(nuevo) };
@@ -486,10 +553,19 @@ export class BillingService {
         pagadoHasta = this.finMes(this.sumarMeses(this.inicioMes(hoy), 1));
         updates.pagadoHasta = this.toISODate(pagadoHasta);
       }
-      const alDia = this.estaAlDia(pagadoHasta, hoy);
+      const alDia = this.estaAlDiaConjunto(v, pagadoHasta, hoy);
       const deberiaBloquear = !alDia;
       if (deberiaBloquear) bloqueados++;
       if (v.bloqueado !== deberiaBloquear) updates.bloqueado = deberiaBloquear;
+      // El estado visible para el superAdmin sigue al bloqueo (solo en conjuntos
+      // que ya tienen estado): vencido => suspendido; si se regulariza, vuelve
+      // a prueba/pendiente (sigue en prueba) o activo.
+      if (v.estado) {
+        if (deberiaBloquear && v.estado !== 'suspendido') updates.estado = 'suspendido';
+        else if (!deberiaBloquear && v.estado === 'suspendido') {
+          updates.estado = v.trial === true ? (v.planId ? 'prueba' : 'pendiente') : 'activo';
+        }
+      }
       if (Object.keys(updates).length > 0) {
         updates._fbWrite = true;
         try {

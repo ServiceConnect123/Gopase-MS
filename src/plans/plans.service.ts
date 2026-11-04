@@ -277,6 +277,17 @@ export class PlansService {
     return null;
   }
 
+  /**
+   * Plan BASE (no especial) por id, o null. Lo usa el autoregistro: un conjunto
+   * nuevo solo puede elegir entre los planes del catálogo público.
+   */
+  async getBasePlan(planId: string): Promise<any | null> {
+    if (!this.firebase.isEnabled() || !String(planId ?? '').trim()) return null;
+    await this.ensureBase();
+    const plan = await this.getById(planId);
+    return plan && plan.esEspecial !== true ? plan : null;
+  }
+
   /** Asigna un plan a un conjunto (guarda planId en su nodo). */
   async assign(conjunto: string, planId: string): Promise<{ success: boolean; message?: string }> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };

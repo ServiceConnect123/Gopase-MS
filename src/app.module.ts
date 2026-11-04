@@ -24,6 +24,7 @@ import { NoticiasModule } from './noticias/noticias.module';
 import { BillingModule } from './billing/billing.module';
 import { PlansModule } from './plans/plans.module';
 import { TagsModule } from './tags/tags.module';
+import { OnboardingModule } from './onboarding/onboarding.module';
 import { APP_INTERCEPTOR, APP_GUARD, APP_FILTER } from '@nestjs/core';
 import { SentryModule } from '@sentry/nestjs/setup';
 import { AllErrorsSentryFilter } from './activity-audit/adapters/sentry/all-errors-sentry.filter';
@@ -96,6 +97,7 @@ import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
     BillingModule,
     PlansModule,
     TagsModule,
+    OnboardingModule,
   ],
   providers: [
     // Reporta a Sentry TODO error: excepciones no controladas y también las
