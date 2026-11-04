@@ -143,6 +143,8 @@ export class UsersService {
       placa2: dto.placa2 || '',
       fechaIngreso: dto.fechaIngreso || '',
       etiquetas: Array.isArray(dto.etiquetas) ? dto.etiquetas : [],
+      // Fecha de creación (ISO). Solo se escribe al crear; update() no la toca.
+      createdAt: new Date().toISOString(),
       _fbWrite: true,
     };
   }

@@ -14,6 +14,9 @@ export class NoopActivityStore implements ActivityStore {
   async query(): Promise<[]> {
     return [];
   }
+  async scan(): Promise<{ logs: []; truncado: boolean }> {
+    return { logs: [], truncado: false };
+  }
   async remove(): Promise<void> {
     /* no-op: auditoría deshabilitada */
   }

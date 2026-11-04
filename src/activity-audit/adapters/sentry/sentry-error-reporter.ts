@@ -10,6 +10,7 @@
 import * as Sentry from '@sentry/nestjs';
 import type { ErrorReporter } from '../../core/ports';
 import type { ActivityLog, ErrorContext, RequestContext } from '../../core/types';
+import { markReported } from './reported-errors';
 
 export class SentryErrorReporter implements ErrorReporter {
   breadcrumb(log: ActivityLog): void {
@@ -37,6 +38,9 @@ export class SentryErrorReporter implements ErrorReporter {
     return Sentry.withScope((scope) => {
       scope.setUser({ id: ctx.usuario, username: ctx.usuario });
       scope.setTag('vista', ctx.vista);
+      if (ctx.statusCode) scope.setTag('http_status', String(ctx.statusCode));
+      // 5xx (o sin status) = error; 4xx (validación, permisos, no encontrado) = warning.
+      scope.setLevel(ctx.statusCode && ctx.statusCode < 500 ? 'warning' : 'error');
       if (ctx.conjunto) scope.setTag('conjunto', ctx.conjunto);
       if (ctx.ambiente) scope.setTag('ambiente', ctx.ambiente);
       scope.setContext('actividad', {
@@ -44,7 +48,9 @@ export class SentryErrorReporter implements ErrorReporter {
         usuario: ctx.usuario,
         conjunto: ctx.conjunto,
         ambiente: ctx.ambiente,
+        statusCode: ctx.statusCode,
       });
+      markReported(error);
       return Sentry.captureException(error);
     });
   }
