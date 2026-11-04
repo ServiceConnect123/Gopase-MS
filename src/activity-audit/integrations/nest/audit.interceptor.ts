@@ -40,6 +40,17 @@ export class AuditInterceptor implements NestInterceptor {
     const method = String(req?.method || 'GET').toUpperCase();
     const path = String(req?.route?.path ?? req?.originalUrl ?? req?.url ?? '');
 
+    // Etiqueta la petición (usuario/conjunto/rol) para que cualquier error
+    // posterior —incluso en lecturas GET— llegue a Sentry con quién lo sufrió.
+    if (!path.startsWith('/audit')) {
+      const who = resolveWho(req);
+      this.activity.bindRequest({
+        usuario: who.usuario !== 'anonimo' ? who.usuario : undefined,
+        conjunto: who.conjunto,
+        rol: req?.user?.rol || req?.user?.role || undefined,
+      });
+    }
+
     // Solo se auditan ESCRITURAS significativas (crear/editar/eliminar). Las
     // lecturas (GET) no se registran para no inundar el log. Tampoco se audita
     // el propio módulo de auditoría (evita auto-registro en bucle).
@@ -55,25 +66,35 @@ export class AuditInterceptor implements NestInterceptor {
     return next.handle().pipe(
       tap({
         next: () => this.emit(req, method, path, start, 200),
-        error: (e) => this.emit(req, method, path, start, e?.status ?? 500),
+        error: (e) => {
+          const status = e?.status ?? 500;
+          // Solo los fallos de servidor (5xx) son errores técnicos: se reportan
+          // y su id queda en el log. Los 4xx (validación/permiso) no.
+          this.emit(req, method, path, start, status, status >= 500 ? e : undefined);
+        },
       }),
     );
   }
 
-  private emit(req: any, method: string, path: string, start: number, statusCode: number): void {
+  private emit(
+    req: any,
+    method: string,
+    path: string,
+    start: number,
+    statusCode: number,
+    error?: unknown,
+  ): void {
     try {
       const { accion, recurso } = describe(method, path);
       // Vista legible para el monitoreo, p. ej. "Eliminó Pago" / "Creó Propietario".
       const vista = `${accion} ${recurso}`;
-      const usuario =
-        req?.user?.uid || req?.user?.username || req?.body?.usuario || req?.body?.username || 'anonimo';
-      const conjunto =
-        req?.user?.conjunto || req?.body?.conjunto || req?.query?.conjunto || undefined;
+      const { usuario, conjunto } = resolveWho(req);
 
       this.activity.log({
         vista,
-        usuario: String(usuario),
-        conjunto: conjunto ? String(conjunto) : undefined,
+        usuario,
+        conjunto,
+        error,
         detalle: {
           accion,
           recurso,
@@ -95,6 +116,14 @@ export class AuditInterceptor implements NestInterceptor {
       /* el interceptor nunca debe romper el request */
     }
   }
+}
+
+/** Quién hace la petición: usuario y conjunto (del JWT o, si no, del body/query). */
+function resolveWho(req: any): { usuario: string; conjunto?: string } {
+  const usuario =
+    req?.user?.uid || req?.user?.username || req?.body?.usuario || req?.body?.username || 'anonimo';
+  const conjunto = req?.user?.conjunto || req?.body?.conjunto || req?.query?.conjunto || undefined;
+  return { usuario: String(usuario), conjunto: conjunto ? String(conjunto) : undefined };
 }
 
 /**

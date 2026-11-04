@@ -22,6 +22,30 @@ adapters/    rtdb (Firebase RTDB) · memory (no-op para modo deshabilitado)
 integrations/nest  DynamicModule + interceptor + controller
 ```
 
+## Errores técnicos (puerto `ErrorReporter`, opcional)
+
+Cruza la auditoría con una herramienta de errores (hoy Sentry). Cada actividad
+se anota como migaja de pan y, si `ActivityInput.error` viene informado, se
+reporta y su id queda en `meta.errorEventId` (el error en sí no se persiste).
+El `AuditInterceptor` reporta solo los 5xx. Sin reporter (o sin `SENTRY_DSN`)
+no pasa nada: el módulo funciona igual.
+
+```ts
+ActivityAuditModule.forRoot({ credentials, errorReporter: new SentryErrorReporter() });
+```
+
+`SentryErrorReporter` requiere `@sentry/nestjs` como peerDependency.
+
+### Lectura de errores (`ErrorIssueSource`)
+
+- `GET /audit/errors?ambiente=&periodo=&estado=&limit=` — errores agrupados.
+- `GET /audit/errors/event/:eventId` — URL del issue para un `meta.errorEventId`.
+
+Ambos exigen rol `superAdmin` **en el servidor** (`SuperAdminGuard`, lee
+`req.user.rol` del JWT; falla cerrado). Por eso requieren `AUTH_GUARD_ENABLED=true`.
+Se activan pasando `issueSource: new SentryIssuesClient({...})` (env
+`SENTRY_AUTH_TOKEN`, scope `event:read`); sin él responden `configured: false`.
+
 ## Aislamiento (requisito clave)
 
 La persistencia vive en un **proyecto Firebase SEPARADO** del transaccional.

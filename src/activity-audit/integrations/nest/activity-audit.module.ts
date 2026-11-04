@@ -5,15 +5,21 @@
 import { DynamicModule, Logger, Module } from '@nestjs/common';
 import { ActivityLogger } from '../../core/activity-logger';
 import { SessionTracker } from '../../core/session-tracker';
-import { systemClock, type AuditLogger } from '../../core/ports';
+import {
+  systemClock,
+  type AuditLogger,
+  type ErrorIssueSource,
+  type ErrorReporter,
+} from '../../core/ports';
 import { NoopActivityStore, NoopSessionStore } from '../../adapters/memory/noop.store';
+import { NoopErrorReporter } from '../../adapters/memory/noop-error-reporter';
 import {
   createLazyAuditDatabase,
   type AuditFirebaseCredentials,
 } from '../../adapters/rtdb/audit-firebase.provider';
 import { RtdbActivityStore } from '../../adapters/rtdb/rtdb-activity.store';
 import { RtdbSessionStore } from '../../adapters/rtdb/rtdb-session.store';
-import { ACTIVITY_LOGGER, SESSION_TRACKER } from './activity-audit.tokens';
+import { ACTIVITY_LOGGER, ERROR_ISSUE_SOURCE, SESSION_TRACKER } from './activity-audit.tokens';
 import { AuditController } from './audit.controller';
 
 export interface ActivityAuditOptions {
@@ -26,6 +32,17 @@ export interface ActivityAuditOptions {
    * cada log para poder separar registros de prueba de los de producción.
    */
   environment?: string;
+  /**
+   * Reporter de errores técnicos (p. ej. SentryErrorReporter). Opcional: si no
+   * se indica se usa uno no-op y el módulo se comporta como antes.
+   */
+  errorReporter?: ErrorReporter;
+  /**
+   * Fuente de lectura de errores técnicos (p. ej. SentryIssuesClient) para el
+   * endpoint GET /audit/errors. Opcional: sin ella el endpoint responde
+   * configured=false.
+   */
+  issueSource?: ErrorIssueSource;
 }
 
 /**
@@ -62,12 +79,14 @@ export class ActivityAuditModule {
             clock: systemClock,
             logger: auditLogger,
             environment: options.environment,
+            reporter: options.errorReporter ?? new NoopErrorReporter(),
           }),
         },
         {
           provide: SESSION_TRACKER,
           useValue: new SessionTracker({ store: sessionStore, clock: systemClock, logger: auditLogger }),
         },
+        { provide: ERROR_ISSUE_SOURCE, useValue: options.issueSource ?? null },
       ],
       exports: [ACTIVITY_LOGGER, SESSION_TRACKER],
     };

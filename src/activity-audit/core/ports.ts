@@ -7,6 +7,10 @@
 import type {
   ActivityLog,
   ActivityQuery,
+  ErrorContext,
+  ErrorIssueQuery,
+  ErrorIssueResult,
+  RequestContext,
   SessionQuery,
   SessionSummary,
 } from './types';
@@ -32,6 +36,29 @@ export interface SessionStore {
   get(usuario: string): Promise<SessionSummary | null>;
   /** Lista resúmenes de sesión (para la vista de monitoreo). */
   list(filter: SessionQuery): Promise<SessionSummary[]>;
+}
+
+/**
+ * Puerto de salida: herramienta de errores/trazas técnicas (Sentry u otra).
+ * Todos los métodos deben ser síncronos, baratos y NO lanzar.
+ */
+export interface ErrorReporter {
+  /** Anota una actividad como migaja de pan (contexto previo a un error). */
+  breadcrumb(log: ActivityLog): void;
+  /** Reporta un error técnico. Devuelve el id del evento, si se registró. */
+  captureError(error: unknown, ctx: ErrorContext): string | undefined;
+  /** Etiqueta la petición en curso (usuario/conjunto/rol) para errores posteriores. */
+  setRequestContext(ctx: RequestContext): void;
+}
+
+/**
+ * Puerto de salida (solo lectura): consulta los errores técnicos ya agrupados
+ * en la herramienta de errores, para mostrarlos dentro del monitoreo.
+ */
+export interface ErrorIssueSource {
+  list(query: ErrorIssueQuery): Promise<ErrorIssueResult>;
+  /** Resuelve el id de un evento a la URL de su issue. undefined si no se encuentra. */
+  resolveEventUrl(eventId: string): Promise<string | undefined>;
 }
 
 /** Reloj inyectable (testeable, sin acoplar a Date.now). */
