@@ -1,3 +1,5 @@
+// Sentry debe inicializarse antes que cualquier otro import (instrumentación).
+import './instrument';
 import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
@@ -62,7 +64,8 @@ async function bootstrap() {
       }
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'x-api-key', 'x-sync-token', 'accept', 'Authorization', 'X-Enc'],
+    // sentry-trace / baggage: propagación de trazas app -> API (Sentry).
+    allowedHeaders: ['Content-Type', 'x-api-key', 'x-sync-token', 'accept', 'Authorization', 'X-Enc', 'sentry-trace', 'baggage'],
   });
 
   // Swagger / OpenAPI en /docs (y el JSON en /docs-json).

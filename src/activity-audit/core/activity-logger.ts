@@ -2,8 +2,8 @@
 // activity-audit · core · ActivityLogger (caso de uso)
 // ==========================================
 
-import type { ActivityStore, Clock, AuditLogger } from './ports';
-import type { ActivityInput, ActivityLog, ActivityQuery } from './types';
+import type { ActivityStore, Clock, AuditLogger, ErrorReporter } from './ports';
+import type { ActivityInput, ActivityLog, ActivityQuery, RequestContext } from './types';
 import { fireAndForget, runSafe } from './fail-safe';
 
 export interface ActivityLoggerDeps {
@@ -12,6 +12,8 @@ export interface ActivityLoggerDeps {
   logger: AuditLogger;
   /** Entorno de ejecución a estampar por defecto en cada log (p. ej. 'qa' | 'prod'). */
   environment?: string;
+  /** Reporter de errores técnicos (opcional). Sin él, el comportamiento no cambia. */
+  reporter?: ErrorReporter;
 }
 
 /**
@@ -24,6 +26,7 @@ export class ActivityLogger {
   /** Registro fire-and-forget (recomendado para no añadir latencia). */
   log(input: ActivityInput): void {
     const entry = this.normalize(input);
+    this.report(input, entry);
     fireAndForget(
       () => this.deps.store.append(entry),
       this.deps.logger,
@@ -34,6 +37,7 @@ export class ActivityLogger {
   /** Variante await-able para flujos donde se quiera confirmar la escritura. */
   async logAwait(input: ActivityInput): Promise<boolean> {
     const entry = this.normalize(input);
+    this.report(input, entry);
     return runSafe(
       () => this.deps.store.append(entry),
       this.deps.logger,
@@ -62,6 +66,38 @@ export class ActivityLogger {
     } catch (e) {
       this.deps.logger.error(`removeByFilter falló: ${(e as Error)?.message}`);
       return 0;
+    }
+  }
+
+  /** Etiqueta la petición en curso (usuario/conjunto/rol) para errores posteriores. */
+  bindRequest(ctx: RequestContext): void {
+    try {
+      this.deps.reporter?.setRequestContext(ctx);
+    } catch (e) {
+      this.deps.logger.warn(`[activity-audit] bindRequest falló (ignorado): ${(e as Error)?.message}`);
+    }
+  }
+
+  /**
+   * Entrega la actividad al reporter: siempre como migaja de pan y, si trae un
+   * error técnico, lo reporta y deja su id en `meta.errorEventId`. Nunca lanza.
+   */
+  private report(input: ActivityInput, entry: ActivityLog): void {
+    const reporter = this.deps.reporter;
+    if (!reporter) return;
+    try {
+      reporter.breadcrumb(entry);
+      if (input.error !== undefined) {
+        const eventId = reporter.captureError(input.error, {
+          vista: entry.vista,
+          usuario: entry.usuario,
+          conjunto: entry.conjunto,
+          ambiente: entry.ambiente,
+        });
+        if (eventId) entry.meta = { ...(entry.meta ?? {}), errorEventId: eventId };
+      }
+    } catch (e) {
+      this.deps.logger.warn(`[activity-audit] reporter falló (ignorado): ${(e as Error)?.message}`);
     }
   }
 

@@ -4,12 +4,14 @@
 // Contrato de API para que el cliente registre actividad (con evidenciaUrl
 // opcional, ya subida a Storage) y para consultar las métricas de sesión.
 
-import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiOperation, ApiProperty, ApiPropertyOptional, ApiQuery, ApiTags } from '@nestjs/swagger';
-import { Inject } from '@nestjs/common';
+import { Inject, Optional } from '@nestjs/common';
 import { ActivityLogger } from '../../core/activity-logger';
 import { SessionTracker } from '../../core/session-tracker';
-import { ACTIVITY_LOGGER, SESSION_TRACKER } from './activity-audit.tokens';
+import type { ErrorIssueSource } from '../../core/ports';
+import { ACTIVITY_LOGGER, ERROR_ISSUE_SOURCE, SESSION_TRACKER } from './activity-audit.tokens';
+import { SuperAdminGuard } from './super-admin.guard';
 
 class ActivityLogDto {
   @ApiProperty({ example: 'payments:register', description: 'Pantalla/sección/endpoint.' })
@@ -41,7 +43,49 @@ export class AuditController {
   constructor(
     @Inject(ACTIVITY_LOGGER) private readonly activity: ActivityLogger,
     @Inject(SESSION_TRACKER) private readonly sessions: SessionTracker,
+    @Optional() @Inject(ERROR_ISSUE_SOURCE) private readonly issues?: ErrorIssueSource | null,
   ) {}
+
+  @Get('errors')
+  @UseGuards(SuperAdminGuard)
+  @ApiOperation({
+    summary: 'Errores técnicos agrupados (Sentry). Solo superAdmin.',
+    description:
+      'Lee de la API de Sentry (requiere SENTRY_AUTH_TOKEN). Si no está configurada ' +
+      'responde configured=false con lista vacía.',
+  })
+  @ApiQuery({ name: 'ambiente', required: false, description: "'qa' | 'prod'. Vacío = todos." })
+  @ApiQuery({ name: 'periodo', required: false, description: '24h | 7d | 14d | 30d | 90d (default 14d).' })
+  @ApiQuery({ name: 'estado', required: false, description: "'unresolved' (default) | 'resolved' | 'all'." })
+  @ApiQuery({ name: 'limit', required: false, example: 25 })
+  async listErrors(
+    @Query('ambiente') ambiente?: string,
+    @Query('periodo') periodo?: string,
+    @Query('estado') estado?: string,
+    @Query('limit') limit?: string,
+  ) {
+    if (!this.issues) return { success: true, configured: false, data: [], warnings: [] };
+    try {
+      const { issues, warnings } = await this.issues.list({
+        ambiente: ambiente || undefined,
+        periodo: periodo || undefined,
+        estado: estado || undefined,
+        limit: limit ? parseInt(limit, 10) : undefined,
+      });
+      return { success: true, configured: true, data: issues, warnings };
+    } catch {
+      return { success: false, configured: true, data: [], warnings: [], message: 'No se pudo consultar Sentry.' };
+    }
+  }
+
+  @Get('errors/event/:eventId')
+  @UseGuards(SuperAdminGuard)
+  @ApiOperation({ summary: 'URL del issue de Sentry para un id de evento (meta.errorEventId). Solo superAdmin.' })
+  async resolveErrorEvent(@Param('eventId') eventId: string) {
+    if (!this.issues) return { success: true, configured: false };
+    const url = await this.issues.resolveEventUrl(eventId);
+    return { success: true, configured: true, url: url ?? null };
+  }
 
   @Post('activity')
   @ApiOperation({ summary: 'Registra un evento de actividad (no bloqueante).' })
