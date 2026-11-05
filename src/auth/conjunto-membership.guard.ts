@@ -80,9 +80,10 @@ export class ConjuntoMembershipGuard implements CanActivate {
   }
 
   /**
-   * Conjuntos del usuario (nombres), por nombre e id, leídos de
-   * mirror/usuarios/{uid}. Incluye el conjunto activo (compat con cuentas viejas
-   * sin el array). Cacheado unos segundos para no pegarle a RTDB por request.
+   * Conjunto del usuario (nombre e id), leído de mirror/usuarios/{uid}. Cada
+   * usuario pertenece a UN solo conjunto; se devuelven nombre e id para comparar
+   * contra el conjunto del request (que puede venir como cualquiera de los dos).
+   * Cacheado unos segundos para no pegarle a RTDB por request.
    */
   private async conjuntosDe(uid: string): Promise<string[]> {
     const key = this.safeKey(uid);
@@ -100,7 +101,6 @@ export class ConjuntoMembershipGuard implements CanActivate {
       const snap = await this.firebase.db().ref(`mirror/usuarios/${key}`).get();
       if (snap.exists()) {
         const perfil = snap.val() || {};
-        if (Array.isArray(perfil.conjuntos)) perfil.conjuntos.forEach(push);
         push(perfil.conjunto);
         push(perfil.conjuntoId);
       }

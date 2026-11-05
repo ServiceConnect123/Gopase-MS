@@ -33,10 +33,14 @@ export interface LoginResult {
     nombre?: string;
     rol?: string;
     conjuntoId?: string;
-    /** Nombre del conjunto activo (la app lo usa como "complex"). */
+    /** Nombre del conjunto de este usuario (la app lo usa como "complex"). */
     conjunto?: string;
-    /** Conjuntos a los que pertenece (para elegir en cuál trabajar). */
-    conjuntos?: string[];
+    /**
+     * Otros conjuntos de la MISMA persona (mismo correo), cada uno con su usuario
+     * propio. Para el selector "cambiar de conjunto" (pide la clave de ese usuario).
+     * Solo para admins; vacío/ausente en los demás.
+     */
+    accesos?: Array<{ conjunto: string; usuario: string }>;
     mustChangePassword?: boolean;
     /** JWT de sesión que el frontend adjunta como Bearer en las demás llamadas. */
     token?: string;
@@ -90,25 +94,47 @@ export class AuthLoginService {
   }
 
   /**
-   * Conjuntos (nombres) a los que pertenece el usuario, para el selector cuando
-   * administra varios. Lee `conjuntos` del perfil; si falta (usuarios viejos),
-   * usa el conjunto activo. Siempre incluye el activo. Best-effort.
+   * Accesos que comparten el correo del usuario: cada conjunto que administra la
+   * MISMA persona, con su usuario propio. Es lo que la app usa para el selector
+   * "cambiar de conjunto" (al elegir otro, pide la clave de ESE usuario).
+   * Solo aplica a admins (propietarios/vigilantes tienen un único acceso).
    */
-  private async conjuntosDelUsuario(uid: string, activo: string): Promise<string[]> {
-    const out: string[] = [];
-    const push = (c: unknown) => {
-      const v = String(c ?? '').trim();
-      if (v && !out.some((x) => x.toLowerCase() === v.toLowerCase())) out.push(v);
-    };
+  private async accesosPorCorreo(
+    email: string,
+    rol: string,
+  ): Promise<Array<{ conjunto: string; usuario: string }>> {
+    const correo = String(email || '').trim().toLowerCase();
+    if (!correo || rol.toLowerCase() !== 'admin') return [];
+    try {
+      const snap = await this.firebase.db().ref('mirror/usuarios').get();
+      if (!snap.exists()) return [];
+      const all = snap.val() || {};
+      const out: Array<{ conjunto: string; usuario: string }> = [];
+      for (const key of Object.keys(all)) {
+        const u = all[key] || {};
+        if (
+          String(u.email || '').trim().toLowerCase() === correo &&
+          String(u.rol || '').toLowerCase() === 'admin' &&
+          String(u.conjunto || '').trim()
+        ) {
+          out.push({ conjunto: String(u.conjunto), usuario: String(u.usuario || key) });
+        }
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  /** Correo real del usuario (perfil RTDB). En Auth el email es sintético. */
+  private async emailDePerfil(uid: string): Promise<string> {
     try {
       const safe = String(uid || '').trim().replace(/[.#$/\[\]]/g, '_');
-      const snap = await this.firebase.db().ref(`mirror/usuarios/${safe}/conjuntos`).get();
-      if (snap.exists() && Array.isArray(snap.val())) (snap.val() as any[]).forEach(push);
+      const snap = await this.firebase.db().ref(`mirror/usuarios/${safe}/email`).get();
+      return snap.exists() ? String(snap.val() || '') : '';
     } catch {
-      /* best-effort: si falla, al menos queda el activo */
+      return '';
     }
-    push(activo);
-    return out;
   }
 
   /**
@@ -230,10 +256,11 @@ export class AuthLoginService {
       // Resolver el NOMBRE del conjunto (la app usa el nombre como "complex").
       const conjuntoNombre = await this.resolveConjuntoNombre(conjuntoId);
 
-      // Conjuntos a los que pertenece (para el selector si administra varios).
-      // Se lee del perfil; incluye el activo aunque el array no exista (usuarios
-      // viejos). Si no es admin o solo tiene uno, el selector no se muestra.
-      const conjuntos = await this.conjuntosDelUsuario(uid, conjuntoNombre);
+      // Accesos de la MISMA persona (mismo correo), uno por conjunto que
+      // administra, para el selector de "cambiar de conjunto". El correo real se
+      // lee del perfil (en Auth el email es sintético).
+      const emailPerfil = await this.emailDePerfil(uid);
+      const accesos = await this.accesosPorCorreo(emailPerfil, rol);
 
       // ----- Control de pago SaaS (suscripción del conjunto) -----
       // El superAdmin nunca se bloquea. Para los demás, si el conjunto está
@@ -302,7 +329,7 @@ export class AuthLoginService {
           rol: claims.rol || '',
           conjuntoId,
           conjunto: conjuntoNombre,
-          conjuntos,
+          accesos,
           mustChangePassword: !!claims.mustChangePassword,
           token,
           suscripcion,

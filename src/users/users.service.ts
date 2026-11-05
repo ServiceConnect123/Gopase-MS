@@ -41,6 +41,13 @@ export interface UserDTO {
   conjuntoId?: string;
   /** IDs de etiquetas asignadas al usuario (las gestiona el admin). */
   etiquetas?: string[];
+  /**
+   * Si true, en Firebase Auth se usa el email SINTÉTICO (username@dominio) en vez
+   * del correo real. El correo real se guarda solo en el perfil (`email`), lo que
+   * permite que VARIOS usuarios compartan el mismo correo (p. ej. una persona que
+   * administra varios conjuntos, cada uno con su propio usuario/contraseña).
+   */
+  authEmailSintetico?: boolean;
 }
 
 const MIRROR_USERS = 'mirror/usuarios';
@@ -108,7 +115,6 @@ export class UsersService {
       return {
         ...rest,
         etiquetas: Array.isArray(rest.etiquetas) ? rest.etiquetas : [],
-        conjuntos: this.membresias(u),
         dato_1: rest.usuario ?? rest.id ?? '',
         dato_2: rest.email ?? '',
         dato_4: rest.nombre ?? '',
@@ -144,75 +150,36 @@ export class UsersService {
       placa2: dto.placa2 || '',
       fechaIngreso: dto.fechaIngreso || '',
       etiquetas: Array.isArray(dto.etiquetas) ? dto.etiquetas : [],
-      // Lista de conjuntos a los que pertenece (nombres). Un usuario puede
-      // administrar varios; `conjunto`/`conjuntoId` es el ACTIVO por defecto, y
-      // `conjuntos` el catálogo para el selector. Arranca con su conjunto inicial.
-      conjuntos: (dto.conjunto || dto.complex) ? [String(dto.conjunto || dto.complex)] : [],
       // Fecha de creación (ISO). Solo se escribe al crear; update() no la toca.
       createdAt: new Date().toISOString(),
       _fbWrite: true,
     };
   }
 
-  /** Lista de conjuntos (nombres) del usuario, normalizada y sin duplicados. */
-  private membresias(perfil: any): string[] {
-    const arr: string[] = Array.isArray(perfil?.conjuntos) ? perfil.conjuntos.map((c: any) => String(c || '')) : [];
-    // Garantiza que el conjunto activo esté incluido (compat con usuarios viejos
-    // que no tenían el array `conjuntos`).
-    const activo = String(perfil?.conjunto || '');
-    const todos = [...arr, activo].map((c) => c.trim()).filter(Boolean);
-    const vistos = new Set<string>();
-    const out: string[] = [];
-    for (const c of todos) {
-      const k = c.toLowerCase();
-      if (!vistos.has(k)) { vistos.add(k); out.push(c); }
-    }
-    return out;
-  }
-
-  /** Busca el uid (username) de un usuario por su email. null si no existe. */
-  async findByEmail(email: string): Promise<{ uid: string; perfil: any } | null> {
+  /**
+   * Todos los usuarios que comparten un correo. En el modelo multi-conjunto, una
+   * persona tiene un usuario DISTINTO por conjunto (nombre y contraseña propios),
+   * y el correo es lo único que los agrupa. Devuelve cada uno con su conjunto.
+   */
+  async usuariosPorEmail(email: string): Promise<Array<{ usuario: string; conjunto: string; nombre: string; rol: string }>> {
     const target = String(email || '').trim().toLowerCase();
-    if (!target || !this.firebase.isEnabled()) return null;
+    if (!target || !this.firebase.isEnabled()) return [];
     const snap = await this.firebase.db().ref(MIRROR_USERS).get();
-    if (!snap.exists()) return null;
+    if (!snap.exists()) return [];
     const all = snap.val() || {};
+    const out: Array<{ usuario: string; conjunto: string; nombre: string; rol: string }> = [];
     for (const key of Object.keys(all)) {
-      if (String(all[key]?.email || '').trim().toLowerCase() === target) {
-        return { uid: String(all[key]?.usuario || key), perfil: all[key] };
+      const u = all[key] || {};
+      if (String(u.email || '').trim().toLowerCase() === target) {
+        out.push({
+          usuario: String(u.usuario || key),
+          conjunto: String(u.conjunto || ''),
+          nombre: String(u.nombre || ''),
+          rol: String(u.rol || ''),
+        });
       }
     }
-    return null;
-  }
-
-  /**
-   * Agrega un conjunto a la lista de membresías de un usuario YA existente (sin
-   * tocar su contraseña ni su conjunto activo). Lo usa el autoregistro cuando el
-   * correo ya está registrado: la persona administra otro conjunto con la misma cuenta.
-   * Es idempotente: si ya pertenece al conjunto, no duplica.
-   */
-  async addConjunto(usuario: string, conjuntoNombre: string): Promise<{ success: boolean; message?: string }> {
-    if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
-    const key = this.safeKey(usuario);
-    const nombre = String(conjuntoNombre || '').trim();
-    if (!key || !nombre) return { success: false, message: 'Usuario y conjunto requeridos.' };
-
-    const ref = this.firebase.db().ref(`${MIRROR_USERS}/${key}`);
-    const snap = await ref.get();
-    if (!snap.exists()) return { success: false, message: 'El usuario no existe.' };
-    const perfil = snap.val();
-
-    const actuales = this.membresias(perfil);
-    if (actuales.some((c) => c.toLowerCase() === nombre.toLowerCase())) {
-      return { success: true, message: 'El usuario ya pertenece a ese conjunto.' };
-    }
-    try {
-      await ref.update({ conjuntos: [...actuales, nombre], _fbWrite: true });
-      return { success: true, message: 'Conjunto agregado al usuario.' };
-    } catch (err: any) {
-      this.logger.error(`[users] addConjunto ${key} falló: ${err?.message}`);
-      return { success: false, message: err?.message || 'No se pudo agregar el conjunto.' };
-    }
+    return out;
   }
 
   /**
@@ -238,7 +205,12 @@ export class UsersService {
     const recovered = recoverPassword(String(dto.password || ''));
     const usaTemp = !recovered || recovered.length < 6;
     const password = usaTemp ? this.tempPassword : recovered;
-    const email = dto.email || this.usernameToEmail(usuario);
+    // Email para Firebase Auth. Si `authEmailSintetico`, se usa username@dominio
+    // (así el correo real del perfil puede repetirse entre usuarios). Si no, se
+    // respeta el correo que venga (comportamiento histórico para otros flujos).
+    const email = dto.authEmailSintetico
+      ? this.usernameToEmail(usuario)
+      : (dto.email || this.usernameToEmail(usuario));
 
     try {
       const auth = this.firebase.auth();
