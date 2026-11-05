@@ -171,6 +171,32 @@ export class AuditController {
     return { success: true, data };
   }
 
+  @Get('screen-views')
+  @UseGuards(SuperAdminGuard)
+  @ApiOperation({
+    summary: 'Pantallas más usadas (Monitoreo > Pantallas). Solo superAdmin.',
+    description:
+      'Cuenta los eventos "Vio pantalla" de los últimos `dias` (1-14), agrupados por pantalla ' +
+      '(detalle.pantalla). Sin `conjunto` agrega todos. Cacheado 60 s. Equivale al screen_view ' +
+      'de Firebase Analytics, pero servido desde la base de monitoreo.',
+  })
+  @ApiQuery({ name: 'conjunto', required: false })
+  @ApiQuery({ name: 'dias', required: false, example: 14 })
+  @ApiQuery({ name: 'ambiente', required: false, description: "'qa' | 'prod'. Vacío = todos." })
+  async screenViews(
+    @Query('conjunto') conjunto?: string,
+    @Query('dias') dias?: string,
+    @Query('ambiente') ambiente?: string,
+  ) {
+    const data = await this.activity.screenViews({
+      conjunto: conjunto || undefined,
+      ambiente: ambiente || undefined,
+      dias: dias ? parseInt(dias, 10) || undefined : undefined,
+    });
+    if (!data) return { success: false, data: null, message: 'No se pudo calcular las pantallas.' };
+    return { success: true, data };
+  }
+
   @Delete('activity')
   @ApiOperation({ summary: 'Elimina en masa logs de actividad por filtro (conjunto/usuario/ambiente).' })
   @ApiQuery({ name: 'conjunto', required: false })

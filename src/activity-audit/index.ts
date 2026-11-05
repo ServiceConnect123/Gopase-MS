@@ -13,6 +13,7 @@ export type {
   ActivitySummary,
   ModuleUsage,
   OpeningsSummary,
+  ScreenViewsSummary,
   ErrorContext,
   ErrorIssue,
   ErrorIssueQuery,
@@ -31,7 +32,7 @@ export type {
 export { systemClock, consoleAuditLogger } from './core/ports';
 export { ActivityLogger } from './core/activity-logger';
 export { SessionTracker } from './core/session-tracker';
-export { summarizeActivity, summarizeOpenings } from './core/activity-summary';
+export { summarizeActivity, summarizeOpenings, summarizeScreenViews, VISTA_SCREEN_VIEW } from './core/activity-summary';
 export { fireAndForget, runSafe } from './core/fail-safe';
 
 // --- Adapters RTDB ---

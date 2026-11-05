@@ -3,8 +3,16 @@
 // ==========================================
 
 import type { ActivityStore, Clock, AuditLogger, ErrorReporter } from './ports';
-import type { ActivityInput, ActivityLog, ActivityQuery, ActivitySummary, OpeningsSummary, RequestContext } from './types';
-import { summarizeActivity, summarizeOpenings } from './activity-summary';
+import type {
+  ActivityInput,
+  ActivityLog,
+  ActivityQuery,
+  ActivitySummary,
+  OpeningsSummary,
+  ScreenViewsSummary,
+  RequestContext,
+} from './types';
+import { summarizeActivity, summarizeOpenings, summarizeScreenViews } from './activity-summary';
 import { fireAndForget, runSafe } from './fail-safe';
 
 export interface ActivityLoggerDeps {
@@ -82,6 +90,7 @@ export class ActivityLogger {
 
   private readonly summaryCache = new Map<string, { at: number; value: ActivitySummary }>();
   private readonly openingsCache = new Map<string, { at: number; value: OpeningsSummary }>();
+  private readonly screenViewsCache = new Map<string, { at: number; value: ScreenViewsSummary }>();
 
   /**
    * Aperturas de la app por usuario y por día (para Monitoreo > Sesiones). Lee
@@ -107,6 +116,34 @@ export class ActivityLogger {
       return value;
     } catch (e) {
       this.deps.logger.error(`openings falló: ${(e as Error)?.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Vistas de pantalla por pantalla y por día (Monitoreo > Pantallas más usadas).
+   * Mismo patrón que `openings`: lee toda la ventana vía `scan` y cachea 60 s.
+   * `conjunto` opcional (vacío = todos). Devuelve null si el store falla.
+   */
+  async screenViews(filter: { conjunto?: string; ambiente?: string; dias?: number }): Promise<ScreenViewsSummary | null> {
+    const dias = Math.min(Math.max(filter.dias ?? 14, 1), 14);
+    const key = `${filter.conjunto ?? ''}|${filter.ambiente ?? ''}|${dias}`;
+    const ahora = this.deps.clock.now();
+    const hit = this.screenViewsCache.get(key);
+    if (hit && ahora.getTime() - hit.at < 60_000) return hit.value;
+
+    try {
+      const { logs, truncado } = await this.deps.store.scan({
+        conjunto: filter.conjunto,
+        ambiente: filter.ambiente,
+        dias,
+      });
+      const value = summarizeScreenViews(logs, { conjunto: filter.conjunto, dias, ahora, truncado });
+      this.screenViewsCache.set(key, { at: ahora.getTime(), value });
+      if (this.screenViewsCache.size > 200) this.screenViewsCache.delete(this.screenViewsCache.keys().next().value as string);
+      return value;
+    } catch (e) {
+      this.deps.logger.error(`screenViews falló: ${(e as Error)?.message}`);
       return null;
     }
   }

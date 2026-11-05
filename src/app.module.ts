@@ -37,6 +37,7 @@ import { ReadOnlyGuard } from './auth/read-only.guard';
 import { ConjuntoMembershipGuard } from './auth/conjunto-membership.guard';
 import { FirebaseModule } from './firebase/firebase.module';
 import { HealthController } from './health/health.controller';
+import { ConfigWebController } from './config-web/config-web.controller';
 import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
 
 @Module({
@@ -107,7 +108,7 @@ import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
     // Necesario para que ConjuntoMembershipGuard (APP_GUARD) inyecte FirebaseService.
     FirebaseModule,
   ],
-  controllers: [HealthController],
+  controllers: [HealthController, ConfigWebController],
   providers: [
     // Reporta a Sentry TODO error: excepciones no controladas y también las
     // HttpException (4xx como warning, 5xx como error). Nest sigue respondiendo
