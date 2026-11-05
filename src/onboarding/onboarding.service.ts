@@ -65,6 +65,8 @@ export class OnboardingService {
   private readonly trialMensual: number;
   private readonly trialAnual: number;
   private readonly maxPorHora: number;
+  private readonly webApiKey: string;
+  private readonly emailDomain: string;
   /** ip -> instantes (ms) de los registros recientes. Best-effort, en memoria. */
   private readonly intentos = new Map<string, number[]>();
 
@@ -78,6 +80,38 @@ export class OnboardingService {
     this.trialMensual = this.intEnv('ONBOARDING_TRIAL_DIAS_MENSUAL', 15);
     this.trialAnual = this.intEnv('ONBOARDING_TRIAL_DIAS_ANUAL', 30);
     this.maxPorHora = this.intEnv('ONBOARDING_MAX_POR_HORA', 5);
+    // Para validar la contraseña de un correo que ya tiene cuenta (mismo mecanismo
+    // que el login: REST de Firebase Auth con el email sintético username@dominio).
+    this.webApiKey = this.config.get<string>('FIREBASE_WEB_API_KEY', '');
+    this.emailDomain = this.config.get<string>('AUTH_EMAIL_DOMAIN', 'gopase.local');
+  }
+
+  /** username -> email sintético (igual que AuthLoginService), para validar login. */
+  private usernameToEmail(username: string): string {
+    const local = String(username || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '_');
+    return `${local}@${this.emailDomain}`;
+  }
+
+  /**
+   * Verifica que `password` sea la contraseña de la cuenta `uid`, usando la REST
+   * de Firebase Auth (igual que el login). Evita que alguien registre conjuntos a
+   * nombre de un correo ajeno. Fail-closed: si no se puede validar, devuelve false.
+   */
+  private async validarPassword(uid: string, password: string): Promise<boolean> {
+    if (!this.webApiKey || !password) return false;
+    try {
+      const resp = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${this.webApiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: this.usernameToEmail(uid), password, returnSecureToken: false }),
+        },
+      );
+      return resp.ok;
+    } catch {
+      return false;
+    }
   }
 
   private intEnv(name: string, fallback: number): number {
@@ -263,11 +297,33 @@ export class OnboardingService {
       return { success: false, message: 'Ya existe un conjunto con ese nombre. Si es tuyo, ingresa o contáctanos.' };
     }
 
-    // ----- Usuario del administrador (único: es el uid de Firebase Auth) -----
-    const base = this.generarUsuario(nombreAdmin);
-    if (!base) return { success: false, message: 'El nombre del administrador debe contener letras o números.' };
-    const usuario = await this.usuarioDisponible(base);
-    if (!usuario) return { success: false, message: GENERIC_FAIL };
+    // ----- ¿El correo ya tiene cuenta? -----
+    // Si existe, NO se crea otra: la misma persona administra un conjunto más con
+    // su misma cuenta. Para evitar que alguien registre conjuntos a nombre de un
+    // correo ajeno, se exige que la contraseña ingresada sea la de esa cuenta.
+    const existente = await this.users.findByEmail(email);
+    let usuario: string;
+    let usuarioExistente = false;
+
+    if (existente) {
+      const passOk = await this.validarPassword(existente.uid, password);
+      if (!passOk) {
+        return {
+          success: false,
+          message:
+            'Ese correo ya tiene una cuenta. Para registrar otro conjunto con él, escribe la contraseña de esa cuenta (o ingresa y regístralo desde la app).',
+        };
+      }
+      usuario = existente.uid;
+      usuarioExistente = true;
+    } else {
+      // Usuario nuevo: username único (es el uid de Firebase Auth).
+      const base = this.generarUsuario(nombreAdmin);
+      if (!base) return { success: false, message: 'El nombre del administrador debe contener letras o números.' };
+      const libre = await this.usuarioDisponible(base);
+      if (!libre) return { success: false, message: GENERIC_FAIL };
+      usuario = libre;
+    }
 
     // ----- Conjunto en estado PENDIENTE (con prueba corriendo desde hoy) -----
     const hoy = new Date();
@@ -312,16 +368,21 @@ export class OnboardingService {
       return { success: false, message: GENERIC_FAIL };
     }
 
-    // ----- Administrador: rol FIJO 'admin' (nunca viene del cliente) -----
-    const userRes = await this.users.create({
-      usuario,
-      email,
-      password: String(input?.password ?? ''),
-      nombre: nombreAdmin,
-      rol: 'admin',
-      phone: telefono,
-      conjunto: nombreConjunto,
-    });
+    // ----- Administrador -----
+    // Correo nuevo: se crea la cuenta (rol 'admin', FIJO). Correo existente: no se
+    // crea nada; solo se le agrega este conjunto a su lista de membresías (su
+    // contraseña, rol y conjunto activo no se tocan).
+    const userRes = usuarioExistente
+      ? await this.users.addConjunto(usuario, nombreConjunto)
+      : await this.users.create({
+          usuario,
+          email,
+          password: String(input?.password ?? ''),
+          nombre: nombreAdmin,
+          rol: 'admin',
+          phone: telefono,
+          conjunto: nombreConjunto,
+        });
     if (!userRes.success) {
       // Rollback: no dejar un conjunto huérfano sin administrador.
       try {
@@ -329,11 +390,7 @@ export class OnboardingService {
       } catch (e: any) {
         this.logger.error(`[onboarding] rollback del conjunto ${key} falló: ${e?.message}`);
       }
-      const msg = String(userRes.message || '');
-      if (/email.*(already|exists)|already.*email/i.test(msg)) {
-        return { success: false, message: 'Ese correo ya está registrado. Usa otro o ingresa con tu cuenta.' };
-      }
-      this.logger.warn(`[onboarding] crear admin falló: ${msg}`);
+      this.logger.warn(`[onboarding] asignar admin falló: ${userRes.message || ''}`);
       return { success: false, message: GENERIC_FAIL };
     }
 

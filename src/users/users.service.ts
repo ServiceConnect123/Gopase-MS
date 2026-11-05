@@ -108,6 +108,7 @@ export class UsersService {
       return {
         ...rest,
         etiquetas: Array.isArray(rest.etiquetas) ? rest.etiquetas : [],
+        conjuntos: this.membresias(u),
         dato_1: rest.usuario ?? rest.id ?? '',
         dato_2: rest.email ?? '',
         dato_4: rest.nombre ?? '',
@@ -143,10 +144,75 @@ export class UsersService {
       placa2: dto.placa2 || '',
       fechaIngreso: dto.fechaIngreso || '',
       etiquetas: Array.isArray(dto.etiquetas) ? dto.etiquetas : [],
+      // Lista de conjuntos a los que pertenece (nombres). Un usuario puede
+      // administrar varios; `conjunto`/`conjuntoId` es el ACTIVO por defecto, y
+      // `conjuntos` el catálogo para el selector. Arranca con su conjunto inicial.
+      conjuntos: (dto.conjunto || dto.complex) ? [String(dto.conjunto || dto.complex)] : [],
       // Fecha de creación (ISO). Solo se escribe al crear; update() no la toca.
       createdAt: new Date().toISOString(),
       _fbWrite: true,
     };
+  }
+
+  /** Lista de conjuntos (nombres) del usuario, normalizada y sin duplicados. */
+  private membresias(perfil: any): string[] {
+    const arr: string[] = Array.isArray(perfil?.conjuntos) ? perfil.conjuntos.map((c: any) => String(c || '')) : [];
+    // Garantiza que el conjunto activo esté incluido (compat con usuarios viejos
+    // que no tenían el array `conjuntos`).
+    const activo = String(perfil?.conjunto || '');
+    const todos = [...arr, activo].map((c) => c.trim()).filter(Boolean);
+    const vistos = new Set<string>();
+    const out: string[] = [];
+    for (const c of todos) {
+      const k = c.toLowerCase();
+      if (!vistos.has(k)) { vistos.add(k); out.push(c); }
+    }
+    return out;
+  }
+
+  /** Busca el uid (username) de un usuario por su email. null si no existe. */
+  async findByEmail(email: string): Promise<{ uid: string; perfil: any } | null> {
+    const target = String(email || '').trim().toLowerCase();
+    if (!target || !this.firebase.isEnabled()) return null;
+    const snap = await this.firebase.db().ref(MIRROR_USERS).get();
+    if (!snap.exists()) return null;
+    const all = snap.val() || {};
+    for (const key of Object.keys(all)) {
+      if (String(all[key]?.email || '').trim().toLowerCase() === target) {
+        return { uid: String(all[key]?.usuario || key), perfil: all[key] };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Agrega un conjunto a la lista de membresías de un usuario YA existente (sin
+   * tocar su contraseña ni su conjunto activo). Lo usa el autoregistro cuando el
+   * correo ya está registrado: la persona administra otro conjunto con la misma cuenta.
+   * Es idempotente: si ya pertenece al conjunto, no duplica.
+   */
+  async addConjunto(usuario: string, conjuntoNombre: string): Promise<{ success: boolean; message?: string }> {
+    if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
+    const key = this.safeKey(usuario);
+    const nombre = String(conjuntoNombre || '').trim();
+    if (!key || !nombre) return { success: false, message: 'Usuario y conjunto requeridos.' };
+
+    const ref = this.firebase.db().ref(`${MIRROR_USERS}/${key}`);
+    const snap = await ref.get();
+    if (!snap.exists()) return { success: false, message: 'El usuario no existe.' };
+    const perfil = snap.val();
+
+    const actuales = this.membresias(perfil);
+    if (actuales.some((c) => c.toLowerCase() === nombre.toLowerCase())) {
+      return { success: true, message: 'El usuario ya pertenece a ese conjunto.' };
+    }
+    try {
+      await ref.update({ conjuntos: [...actuales, nombre], _fbWrite: true });
+      return { success: true, message: 'Conjunto agregado al usuario.' };
+    } catch (err: any) {
+      this.logger.error(`[users] addConjunto ${key} falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo agregar el conjunto.' };
+    }
   }
 
   /**

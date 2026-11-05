@@ -34,6 +34,8 @@ import { SentryErrorReporter } from './activity-audit/adapters/sentry/sentry-err
 import { SentryIssuesClient } from './activity-audit/adapters/sentry/sentry-issues.client';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { ReadOnlyGuard } from './auth/read-only.guard';
+import { ConjuntoMembershipGuard } from './auth/conjunto-membership.guard';
+import { FirebaseModule } from './firebase/firebase.module';
 import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
 
 @Module({
@@ -99,6 +101,8 @@ import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
     PlansModule,
     TagsModule,
     OnboardingModule,
+    // Necesario para que ConjuntoMembershipGuard (APP_GUARD) inyecte FirebaseService.
+    FirebaseModule,
   ],
   providers: [
     // Reporta a Sentry TODO error: excepciones no controladas y también las
@@ -118,6 +122,9 @@ import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
     // Después del JWT: si el conjunto está suspendido por pago, su admin queda en
     // solo lectura (bloquea POST/PUT/PATCH/DELETE, salvo /billing para pagar).
     { provide: APP_GUARD, useClass: ReadOnlyGuard },
+    // Pertenencia: un usuario solo puede operar sobre conjuntos en su lista de
+    // membresías (bloquea el acceso cruzado de un admin multi-conjunto).
+    { provide: APP_GUARD, useClass: ConjuntoMembershipGuard },
   ],
 })
 export class AppModule {}

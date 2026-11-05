@@ -33,8 +33,10 @@ export interface LoginResult {
     nombre?: string;
     rol?: string;
     conjuntoId?: string;
-    /** Nombre del conjunto (la app lo usa como "complex"). */
+    /** Nombre del conjunto activo (la app lo usa como "complex"). */
     conjunto?: string;
+    /** Conjuntos a los que pertenece (para elegir en cuál trabajar). */
+    conjuntos?: string[];
     mustChangePassword?: boolean;
     /** JWT de sesión que el frontend adjunta como Bearer en las demás llamadas. */
     token?: string;
@@ -85,6 +87,28 @@ export class AuthLoginService {
       .toLowerCase()
       .replace(/[^a-z0-9._-]/g, '_');
     return `${local}@${this.emailDomain}`;
+  }
+
+  /**
+   * Conjuntos (nombres) a los que pertenece el usuario, para el selector cuando
+   * administra varios. Lee `conjuntos` del perfil; si falta (usuarios viejos),
+   * usa el conjunto activo. Siempre incluye el activo. Best-effort.
+   */
+  private async conjuntosDelUsuario(uid: string, activo: string): Promise<string[]> {
+    const out: string[] = [];
+    const push = (c: unknown) => {
+      const v = String(c ?? '').trim();
+      if (v && !out.some((x) => x.toLowerCase() === v.toLowerCase())) out.push(v);
+    };
+    try {
+      const safe = String(uid || '').trim().replace(/[.#$/\[\]]/g, '_');
+      const snap = await this.firebase.db().ref(`mirror/usuarios/${safe}/conjuntos`).get();
+      if (snap.exists() && Array.isArray(snap.val())) (snap.val() as any[]).forEach(push);
+    } catch {
+      /* best-effort: si falla, al menos queda el activo */
+    }
+    push(activo);
+    return out;
   }
 
   /**
@@ -206,6 +230,11 @@ export class AuthLoginService {
       // Resolver el NOMBRE del conjunto (la app usa el nombre como "complex").
       const conjuntoNombre = await this.resolveConjuntoNombre(conjuntoId);
 
+      // Conjuntos a los que pertenece (para el selector si administra varios).
+      // Se lee del perfil; incluye el activo aunque el array no exista (usuarios
+      // viejos). Si no es admin o solo tiene uno, el selector no se muestra.
+      const conjuntos = await this.conjuntosDelUsuario(uid, conjuntoNombre);
+
       // ----- Control de pago SaaS (suscripción del conjunto) -----
       // El superAdmin nunca se bloquea. Para los demás, si el conjunto está
       // bloqueado por falta de pago:
@@ -273,6 +302,7 @@ export class AuthLoginService {
           rol: claims.rol || '',
           conjuntoId,
           conjunto: conjuntoNombre,
+          conjuntos,
           mustChangePassword: !!claims.mustChangePassword,
           token,
           suscripcion,
