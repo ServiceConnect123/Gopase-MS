@@ -41,6 +41,13 @@ export interface UserDTO {
   conjuntoId?: string;
   /** IDs de etiquetas asignadas al usuario (las gestiona el admin). */
   etiquetas?: string[];
+  /**
+   * Si true, en Firebase Auth se usa el email SINTÉTICO (username@dominio) en vez
+   * del correo real. El correo real se guarda solo en el perfil (`email`), lo que
+   * permite que VARIOS usuarios compartan el mismo correo (p. ej. una persona que
+   * administra varios conjuntos, cada uno con su propio usuario/contraseña).
+   */
+  authEmailSintetico?: boolean;
 }
 
 const MIRROR_USERS = 'mirror/usuarios';
@@ -150,6 +157,32 @@ export class UsersService {
   }
 
   /**
+   * Todos los usuarios que comparten un correo. En el modelo multi-conjunto, una
+   * persona tiene un usuario DISTINTO por conjunto (nombre y contraseña propios),
+   * y el correo es lo único que los agrupa. Devuelve cada uno con su conjunto.
+   */
+  async usuariosPorEmail(email: string): Promise<Array<{ usuario: string; conjunto: string; nombre: string; rol: string }>> {
+    const target = String(email || '').trim().toLowerCase();
+    if (!target || !this.firebase.isEnabled()) return [];
+    const snap = await this.firebase.db().ref(MIRROR_USERS).get();
+    if (!snap.exists()) return [];
+    const all = snap.val() || {};
+    const out: Array<{ usuario: string; conjunto: string; nombre: string; rol: string }> = [];
+    for (const key of Object.keys(all)) {
+      const u = all[key] || {};
+      if (String(u.email || '').trim().toLowerCase() === target) {
+        out.push({
+          usuario: String(u.usuario || key),
+          conjunto: String(u.conjunto || ''),
+          nombre: String(u.nombre || ''),
+          rol: String(u.rol || ''),
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
    * Crea un usuario: perfil en RTDB + cuenta en Firebase Auth.
    * La contraseña llega cifrada; si no sirve (<6), se usa la temporal y se marca
    * mustChangePassword.
@@ -172,7 +205,12 @@ export class UsersService {
     const recovered = recoverPassword(String(dto.password || ''));
     const usaTemp = !recovered || recovered.length < 6;
     const password = usaTemp ? this.tempPassword : recovered;
-    const email = dto.email || this.usernameToEmail(usuario);
+    // Email para Firebase Auth. Si `authEmailSintetico`, se usa username@dominio
+    // (así el correo real del perfil puede repetirse entre usuarios). Si no, se
+    // respeta el correo que venga (comportamiento histórico para otros flujos).
+    const email = dto.authEmailSintetico
+      ? this.usernameToEmail(usuario)
+      : (dto.email || this.usernameToEmail(usuario));
 
     try {
       const auth = this.firebase.auth();

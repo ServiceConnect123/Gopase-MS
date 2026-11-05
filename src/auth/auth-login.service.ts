@@ -33,8 +33,14 @@ export interface LoginResult {
     nombre?: string;
     rol?: string;
     conjuntoId?: string;
-    /** Nombre del conjunto (la app lo usa como "complex"). */
+    /** Nombre del conjunto de este usuario (la app lo usa como "complex"). */
     conjunto?: string;
+    /**
+     * Conjuntos de la MISMA persona (mismo correo), cada uno con su usuario y rol
+     * propios. Para el selector "cambiar de conjunto" (pide la clave de ese
+     * usuario). Cualquier rol: puede ser propietario en uno y admin en otro.
+     */
+    accesos?: Array<{ conjunto: string; usuario: string; rol: string }>;
     mustChangePassword?: boolean;
     /** JWT de sesión que el frontend adjunta como Bearer en las demás llamadas. */
     token?: string;
@@ -45,6 +51,16 @@ export interface LoginResult {
       pagadoHasta: string;
       /** Si el conjunto está bloqueado pero el usuario es admin: 'facturacion'. */
       accesoRestringido?: 'facturacion' | '';
+      /** Prueba gratis (autoregistro): true mientras no haya un pago confirmado. */
+      trial?: boolean;
+      trialHasta?: string;
+      /** Días que quedan de prueba (0 si no aplica o ya venció). */
+      diasRestantes?: number;
+      /** Día en que le toca pagar y último día con acceso (después se corta). */
+      fechaPago?: string;
+      vencimiento?: string;
+      /** Debe pagar pero aún conserva el acceso (dentro de los días de gracia). */
+      enGracia?: boolean;
     };
   };
 }
@@ -75,6 +91,53 @@ export class AuthLoginService {
       .toLowerCase()
       .replace(/[^a-z0-9._-]/g, '_');
     return `${local}@${this.emailDomain}`;
+  }
+
+  /**
+   * Accesos que comparten el correo del usuario: cada conjunto en el que esa
+   * MISMA persona tiene una cuenta, con su usuario y rol propios. Es lo que la
+   * app usa para el selector "cambiar de conjunto" (al elegir otro, pide la clave
+   * de ESE usuario). Aplica a cualquier rol: alguien puede ser propietario en un
+   * conjunto y administrador en otro. Sin correo => sin accesos (no se agrupa).
+   */
+  private async accesosPorCorreo(
+    email: string,
+  ): Promise<Array<{ conjunto: string; usuario: string; rol: string }>> {
+    const correo = String(email || '').trim().toLowerCase();
+    if (!correo) return [];
+    try {
+      const snap = await this.firebase.db().ref('mirror/usuarios').get();
+      if (!snap.exists()) return [];
+      const all = snap.val() || {};
+      const out: Array<{ conjunto: string; usuario: string; rol: string }> = [];
+      for (const key of Object.keys(all)) {
+        const u = all[key] || {};
+        if (
+          String(u.email || '').trim().toLowerCase() === correo &&
+          String(u.conjunto || '').trim()
+        ) {
+          out.push({
+            conjunto: String(u.conjunto),
+            usuario: String(u.usuario || key),
+            rol: String(u.rol || ''),
+          });
+        }
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  /** Correo real del usuario (perfil RTDB). En Auth el email es sintético. */
+  private async emailDePerfil(uid: string): Promise<string> {
+    try {
+      const safe = String(uid || '').trim().replace(/[.#$/\[\]]/g, '_');
+      const snap = await this.firebase.db().ref(`mirror/usuarios/${safe}/email`).get();
+      return snap.exists() ? String(snap.val() || '') : '';
+    } catch {
+      return '';
+    }
   }
 
   /**
@@ -196,6 +259,13 @@ export class AuthLoginService {
       // Resolver el NOMBRE del conjunto (la app usa el nombre como "complex").
       const conjuntoNombre = await this.resolveConjuntoNombre(conjuntoId);
 
+      // Accesos de la MISMA persona (mismo correo), uno por conjunto donde tiene
+      // cuenta, para el selector de "cambiar de conjunto". Cualquier rol (puede
+      // ser propietario en uno y admin en otro). El correo real se lee del perfil
+      // (en Auth el email es sintético).
+      const emailPerfil = await this.emailDePerfil(uid);
+      const accesos = await this.accesosPorCorreo(emailPerfil);
+
       // ----- Control de pago SaaS (suscripción del conjunto) -----
       // El superAdmin nunca se bloquea. Para los demás, si el conjunto está
       // bloqueado por falta de pago:
@@ -203,7 +273,7 @@ export class AuthLoginService {
       //   - propietario/vigilante/otros: login rechazado (suspensión por pago).
       const esSuperAdmin = rol.toLowerCase() === 'superadmin';
       let suscripcion:
-        | { alDia: boolean; bloqueado: boolean; pagadoHasta: string; accesoRestringido?: 'facturacion' | '' }
+        | NonNullable<NonNullable<LoginResult['user']>['suscripcion']>
         | undefined;
       if (!esSuperAdmin && conjuntoNombre) {
         try {
@@ -223,6 +293,12 @@ export class AuthLoginService {
             bloqueado: est.bloqueado,
             pagadoHasta: est.pagadoHasta,
             accesoRestringido: est.bloqueado && esAdmin ? 'facturacion' : '',
+            trial: est.trial,
+            trialHasta: est.trialHasta,
+            diasRestantes: est.diasRestantes,
+            fechaPago: est.fechaPago,
+            vencimiento: est.vencimiento,
+            enGracia: est.enGracia,
           };
         } catch (e: any) {
           // Fail-open: si no se puede evaluar la suscripción, no bloqueamos el login.
@@ -242,7 +318,11 @@ export class AuthLoginService {
         detalle: { accion: 'Sesión', recurso: 'Inicio de sesión', rol: claims.rol || '' },
       });
       // JWT de sesión: identidad + rol + conjunto (el guard lo verifica).
-      const token = this.jwt.sign({ sub: uid, rol: claims.rol || '', conjuntoId });
+      // `suspendido`: el conjunto entró sin pagar. El admin puede navegar pero
+      // en SOLO LECTURA (el ReadOnlyGuard bloquea sus escrituras). Se calcula
+      // aquí para no consultar la suscripción en cada request.
+      const suspendido = suscripcion?.bloqueado === true;
+      const token = this.jwt.sign({ sub: uid, rol: claims.rol || '', conjuntoId, suspendido });
       return {
         success: true,
         user: {
@@ -253,6 +333,7 @@ export class AuthLoginService {
           rol: claims.rol || '',
           conjuntoId,
           conjunto: conjuntoNombre,
+          accesos,
           mustChangePassword: !!claims.mustChangePassword,
           token,
           suscripcion,

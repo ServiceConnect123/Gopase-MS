@@ -20,6 +20,7 @@ const SENSITIVE_KEYS = [
   'passwordplain',
   'newpassword',
   'token',
+  'registrotoken',
   'authorization',
   'privatekey',
   'serviceaccountjson',
@@ -133,7 +134,9 @@ function resolveWho(req: any): { usuario: string; conjunto?: string } {
  */
 function isSelfAudited(path: string): boolean {
   const seg = path.split('/').filter(Boolean)[0] || '';
-  return seg === 'payments' || seg === 'drive';
+  // onboarding: el servicio registra su propio evento (con el usuario y conjunto
+  // reales) y su cuerpo lleva la contraseña y el token del alta.
+  return seg === 'payments' || seg === 'drive' || seg === 'onboarding';
 }
 
 /** Verbo de acción legible según el método HTTP. */

@@ -24,6 +24,7 @@ import { NoticiasModule } from './noticias/noticias.module';
 import { BillingModule } from './billing/billing.module';
 import { PlansModule } from './plans/plans.module';
 import { TagsModule } from './tags/tags.module';
+import { OnboardingModule } from './onboarding/onboarding.module';
 import { APP_INTERCEPTOR, APP_GUARD, APP_FILTER } from '@nestjs/core';
 import { SentryModule } from '@sentry/nestjs/setup';
 import { AllErrorsSentryFilter } from './activity-audit/adapters/sentry/all-errors-sentry.filter';
@@ -32,6 +33,9 @@ import { AuditInterceptor } from './activity-audit/integrations/nest/audit.inter
 import { SentryErrorReporter } from './activity-audit/adapters/sentry/sentry-error-reporter';
 import { SentryIssuesClient } from './activity-audit/adapters/sentry/sentry-issues.client';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
+import { ReadOnlyGuard } from './auth/read-only.guard';
+import { ConjuntoMembershipGuard } from './auth/conjunto-membership.guard';
+import { FirebaseModule } from './firebase/firebase.module';
 import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
 
 @Module({
@@ -96,6 +100,9 @@ import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
     BillingModule,
     PlansModule,
     TagsModule,
+    OnboardingModule,
+    // Necesario para que ConjuntoMembershipGuard (APP_GUARD) inyecte FirebaseService.
+    FirebaseModule,
   ],
   providers: [
     // Reporta a Sentry TODO error: excepciones no controladas y también las
@@ -112,6 +119,12 @@ import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
     // mientras no sea 'true', deja pasar todo (permite desplegar sin romper los
     // clientes que aún no envían el token).
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    // Después del JWT: si el conjunto está suspendido por pago, su admin queda en
+    // solo lectura (bloquea POST/PUT/PATCH/DELETE, salvo /billing para pagar).
+    { provide: APP_GUARD, useClass: ReadOnlyGuard },
+    // Pertenencia: un usuario solo puede operar sobre conjuntos en su lista de
+    // membresías (bloquea el acceso cruzado de un admin multi-conjunto).
+    { provide: APP_GUARD, useClass: ConjuntoMembershipGuard },
   ],
 })
 export class AppModule {}
