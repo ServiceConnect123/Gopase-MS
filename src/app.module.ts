@@ -36,6 +36,7 @@ import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { ReadOnlyGuard } from './auth/read-only.guard';
 import { ConjuntoMembershipGuard } from './auth/conjunto-membership.guard';
 import { FirebaseModule } from './firebase/firebase.module';
+import { HealthController } from './health/health.controller';
 import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
 
 @Module({
@@ -68,7 +69,9 @@ import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
         ? new SentryIssuesClient({
             token: process.env.SENTRY_AUTH_TOKEN,
             org: process.env.SENTRY_ORG || 'sconnectgroup',
-            projects: (process.env.SENTRY_ISSUE_PROJECTS || 'gopase-backend')
+            // Por defecto, backend + app (así el monitoreo muestra los issues de
+            // ambos sin depender de la variable de entorno).
+            projects: (process.env.SENTRY_ISSUE_PROJECTS || 'gopase-backend,gopase-app')
               .split(',')
               .map((p) => p.trim())
               .filter(Boolean),
@@ -104,6 +107,7 @@ import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
     // Necesario para que ConjuntoMembershipGuard (APP_GUARD) inyecte FirebaseService.
     FirebaseModule,
   ],
+  controllers: [HealthController],
   providers: [
     // Reporta a Sentry TODO error: excepciones no controladas y también las
     // HttpException (4xx como warning, 5xx como error). Nest sigue respondiendo

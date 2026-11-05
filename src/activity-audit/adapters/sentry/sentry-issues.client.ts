@@ -36,12 +36,18 @@ const PERIODOS = new Set(['24h', '7d', '14d', '30d', '90d']);
 const ESTADOS: Record<string, string> = { unresolved: 'is:unresolved', resolved: 'is:resolved', all: '' };
 const EVENT_ID_RE = /^[0-9a-f]{32}$/i;
 
-/** 'qa' | 'prod'/'production' -> nombre de entorno en Sentry; otro valor = sin filtro. */
-function toSentryEnvironment(ambiente?: string): string | undefined {
+/**
+ * Nombres de entorno a consultar en Sentry para un ambiente lógico. Devuelve
+ * TODAS las variantes porque los distintos servicios no etiquetan igual: el
+ * backend usa 'prod'/'qa' (AUDIT_ENV) y la app 'production'/'qa'
+ * (SENTRY_ENVIRONMENT). Si no se filtra por todas, los issues de un servicio
+ * quedan ocultos aunque existan. Vacío = sin filtro (todos los entornos).
+ */
+function toSentryEnvironments(ambiente?: string): string[] {
   const v = String(ambiente ?? '').trim().toLowerCase();
-  if (v === 'qa') return 'qa';
-  if (v === 'prod' || v === 'production') return 'production';
-  return undefined;
+  if (v === 'qa') return ['qa'];
+  if (v === 'prod' || v === 'production') return ['production', 'prod'];
+  return [];
 }
 
 export class SentryIssuesClient implements ErrorIssueSource {
@@ -64,16 +70,16 @@ export class SentryIssuesClient implements ErrorIssueSource {
       ? String(query.estado)
       : 'unresolved';
     const limit = Math.min(100, Math.max(1, Math.trunc(Number(query.limit)) || 25));
-    const environment = toSentryEnvironment(query.ambiente);
+    const environments = toSentryEnvironments(query.ambiente);
 
-    const key = JSON.stringify(['list', periodo, estado, limit, environment ?? '']);
+    const key = JSON.stringify(['list', periodo, estado, limit, environments.join(',')]);
     const hit = this.fromCache<ErrorIssueResult>(key);
     if (hit) return hit;
 
     // Una llamada por proyecto: si uno falla (p. ej. aún no existe) los demás siguen.
     const settled = await Promise.allSettled(
       this.cfg.projects.map((project) =>
-        this.listProject(project, { periodo, estado, limit, environment }),
+        this.listProject(project, { periodo, estado, limit, environments }),
       ),
     );
 
@@ -117,7 +123,7 @@ export class SentryIssuesClient implements ErrorIssueSource {
 
   private async listProject(
     project: string,
-    p: { periodo: string; estado: string; limit: number; environment?: string },
+    p: { periodo: string; estado: string; limit: number; environments: string[] },
   ): Promise<ErrorIssue[]> {
     const qs = new URLSearchParams();
     qs.append('project', project);
@@ -128,7 +134,9 @@ export class SentryIssuesClient implements ErrorIssueSource {
     // Sin series de estadísticas: la respuesta es mucho más liviana.
     qs.append('collapse', 'stats');
     qs.append('collapse', 'unhandled');
-    if (p.environment) qs.append('environment', p.environment);
+    // Filtro por entorno: se agregan TODAS las variantes (la API de Sentry acepta
+    // el parámetro `environment` repetido y hace OR entre ellas).
+    for (const env of p.environments) qs.append('environment', env);
 
     const raw = await this.getJson(`/api/0/organizations/${encodeURIComponent(this.cfg.org)}/issues/?${qs}`);
     if (!Array.isArray(raw)) return [];
