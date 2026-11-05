@@ -13,6 +13,12 @@ import * as Sentry from '@sentry/nestjs';
 import { SentryGlobalFilter } from '@sentry/nestjs/setup';
 import { markReported, wasReported } from './reported-errors';
 
+// 4xx que son RUIDO esperado y NO deben generar evento en Sentry (igual se
+// responden al cliente): peticiones a rutas inexistentes (bots/health checks) y
+// faltas de token/permiso. Un 4xx de validación (400/422) sí se reporta, porque
+// suele indicar un cliente mal integrado.
+const STATUS_NO_REPORTAR = new Set<number>([401, 403, 404, 405]);
+
 @Catch()
 export class AllErrorsSentryFilter extends SentryGlobalFilter {
   catch(exception: unknown, host: ArgumentsHost): void {
@@ -21,6 +27,7 @@ export class AllErrorsSentryFilter extends SentryGlobalFilter {
         host.getType() === 'http' &&
         exception instanceof HttpException &&
         !wasReported(exception) &&
+        !STATUS_NO_REPORTAR.has(exception.getStatus()) &&
         Sentry.getClient()
       ) {
         const status = exception.getStatus();
