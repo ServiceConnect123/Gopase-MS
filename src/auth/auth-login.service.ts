@@ -36,11 +36,11 @@ export interface LoginResult {
     /** Nombre del conjunto de este usuario (la app lo usa como "complex"). */
     conjunto?: string;
     /**
-     * Otros conjuntos de la MISMA persona (mismo correo), cada uno con su usuario
-     * propio. Para el selector "cambiar de conjunto" (pide la clave de ese usuario).
-     * Solo para admins; vacío/ausente en los demás.
+     * Conjuntos de la MISMA persona (mismo correo), cada uno con su usuario y rol
+     * propios. Para el selector "cambiar de conjunto" (pide la clave de ese
+     * usuario). Cualquier rol: puede ser propietario en uno y admin en otro.
      */
-    accesos?: Array<{ conjunto: string; usuario: string }>;
+    accesos?: Array<{ conjunto: string; usuario: string; rol: string }>;
     mustChangePassword?: boolean;
     /** JWT de sesión que el frontend adjunta como Bearer en las demás llamadas. */
     token?: string;
@@ -94,30 +94,33 @@ export class AuthLoginService {
   }
 
   /**
-   * Accesos que comparten el correo del usuario: cada conjunto que administra la
-   * MISMA persona, con su usuario propio. Es lo que la app usa para el selector
-   * "cambiar de conjunto" (al elegir otro, pide la clave de ESE usuario).
-   * Solo aplica a admins (propietarios/vigilantes tienen un único acceso).
+   * Accesos que comparten el correo del usuario: cada conjunto en el que esa
+   * MISMA persona tiene una cuenta, con su usuario y rol propios. Es lo que la
+   * app usa para el selector "cambiar de conjunto" (al elegir otro, pide la clave
+   * de ESE usuario). Aplica a cualquier rol: alguien puede ser propietario en un
+   * conjunto y administrador en otro. Sin correo => sin accesos (no se agrupa).
    */
   private async accesosPorCorreo(
     email: string,
-    rol: string,
-  ): Promise<Array<{ conjunto: string; usuario: string }>> {
+  ): Promise<Array<{ conjunto: string; usuario: string; rol: string }>> {
     const correo = String(email || '').trim().toLowerCase();
-    if (!correo || rol.toLowerCase() !== 'admin') return [];
+    if (!correo) return [];
     try {
       const snap = await this.firebase.db().ref('mirror/usuarios').get();
       if (!snap.exists()) return [];
       const all = snap.val() || {};
-      const out: Array<{ conjunto: string; usuario: string }> = [];
+      const out: Array<{ conjunto: string; usuario: string; rol: string }> = [];
       for (const key of Object.keys(all)) {
         const u = all[key] || {};
         if (
           String(u.email || '').trim().toLowerCase() === correo &&
-          String(u.rol || '').toLowerCase() === 'admin' &&
           String(u.conjunto || '').trim()
         ) {
-          out.push({ conjunto: String(u.conjunto), usuario: String(u.usuario || key) });
+          out.push({
+            conjunto: String(u.conjunto),
+            usuario: String(u.usuario || key),
+            rol: String(u.rol || ''),
+          });
         }
       }
       return out;
@@ -256,11 +259,12 @@ export class AuthLoginService {
       // Resolver el NOMBRE del conjunto (la app usa el nombre como "complex").
       const conjuntoNombre = await this.resolveConjuntoNombre(conjuntoId);
 
-      // Accesos de la MISMA persona (mismo correo), uno por conjunto que
-      // administra, para el selector de "cambiar de conjunto". El correo real se
-      // lee del perfil (en Auth el email es sintético).
+      // Accesos de la MISMA persona (mismo correo), uno por conjunto donde tiene
+      // cuenta, para el selector de "cambiar de conjunto". Cualquier rol (puede
+      // ser propietario en uno y admin en otro). El correo real se lee del perfil
+      // (en Auth el email es sintético).
       const emailPerfil = await this.emailDePerfil(uid);
-      const accesos = await this.accesosPorCorreo(emailPerfil, rol);
+      const accesos = await this.accesosPorCorreo(emailPerfil);
 
       // ----- Control de pago SaaS (suscripción del conjunto) -----
       // El superAdmin nunca se bloquea. Para los demás, si el conjunto está
