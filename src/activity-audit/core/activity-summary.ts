@@ -3,7 +3,7 @@
 // ==========================================
 // Función pura: convierte logs crudos en un resumen por módulo/día/usuario.
 // Sin dependencias de framework ni de Firebase (fácil de probar).
-import type { ActivityLog, ActivitySummary, ModuleUsage, OpeningsSummary } from './types';
+import type { ActivityLog, ActivitySummary, ModuleUsage, OpeningsSummary, ScreenViewsSummary } from './types';
 
 /** Verbo (primera palabra de `vista`) -> tipo de acción. */
 const VERBOS: Record<string, 'crear' | 'editar' | 'eliminar' | 'otra'> = {
@@ -43,6 +43,13 @@ const MODULOS: Record<string, string> = {
 };
 
 const VISTA_APERTURA = 'abrió la app';
+/**
+ * Vista con la que la app registra una navegación a pantalla (equivalente al
+ * screen_view de Analytics). El nombre de la pantalla va en `detalle.pantalla`.
+ * No empieza por un verbo conocido, así que `clasificar()` la ignora y no
+ * contamina el resumen de módulos (igual que 'abrió la app').
+ */
+export const VISTA_SCREEN_VIEW = 'vio pantalla';
 
 function normaliza(s: string): string {
   return s.trim().toLowerCase();
@@ -103,9 +110,11 @@ export function summarizeActivity(
 
     if (esError(log)) errores++;
 
-    // Las aperturas de la app NO son actividad de módulos: se miden aparte
-    // (summarizeOpenings) y se muestran en Monitoreo > Sesiones.
-    if (normaliza(String(log.vista || '')) === VISTA_APERTURA) continue;
+    // Las aperturas de la app y las vistas de pantalla NO son actividad de
+    // módulos: se miden aparte (summarizeOpenings / summarizeScreenViews) y se
+    // muestran en Monitoreo > Sesiones / Pantallas.
+    const vistaNorm = normaliza(String(log.vista || ''));
+    if (vistaNorm === VISTA_APERTURA || vistaNorm === VISTA_SCREEN_VIEW) continue;
 
     const c = clasificar(log);
     if (!c) continue;
@@ -186,6 +195,49 @@ export function summarizeOpenings(
       .map(([usuario, v]) => ({ usuario, total: v.total, ultima: new Date(v.ultima).toISOString() }))
       .sort((a, b) => b.total - a.total),
     porDia: [...porDia.entries()].map(([dia, aperturas]) => ({ dia, aperturas })),
+    truncado,
+  };
+}
+
+/**
+ * Vistas de pantalla ('Vio pantalla') por pantalla y por día en la ventana.
+ * El nombre de la pantalla sale de `detalle.pantalla`. `conjunto` es opcional:
+ * sin él agrega todos los conjuntos. Es el ranking de "pantallas más usadas".
+ */
+export function summarizeScreenViews(
+  logs: ActivityLog[],
+  opts: { conjunto?: string; dias: number; ahora: Date; truncado: boolean },
+): ScreenViewsSummary {
+  const { conjunto, dias, ahora, truncado } = opts;
+  // Por pantalla: total de vistas y usuarios distintos que la vieron.
+  const porPantalla = new Map<string, { total: number; usuarios: Set<string> }>();
+  const porDia = new Map<string, number>();
+  for (let i = dias - 1; i >= 0; i--) porDia.set(diaUtc(ahora.getTime() - i * 86400000), 0);
+
+  let total = 0;
+  for (const log of logs) {
+    if (normaliza(String(log.vista || '')) !== VISTA_SCREEN_VIEW) continue;
+    const pantalla = String(log.detalle?.pantalla || '').trim();
+    if (!pantalla) continue;
+    const ts = log.timestamp.getTime();
+    total++;
+    const dia = diaUtc(ts);
+    if (porDia.has(dia)) porDia.set(dia, (porDia.get(dia) ?? 0) + 1);
+    const prev = porPantalla.get(pantalla) ?? { total: 0, usuarios: new Set<string>() };
+    prev.total++;
+    const usuario = String(log.usuario || '');
+    if (usuario && usuario !== 'anonimo') prev.usuarios.add(usuario);
+    porPantalla.set(pantalla, prev);
+  }
+
+  return {
+    conjunto: conjunto || '',
+    dias,
+    total,
+    porPantalla: [...porPantalla.entries()]
+      .map(([pantalla, v]) => ({ pantalla, total: v.total, usuarios: v.usuarios.size }))
+      .sort((a, b) => b.total - a.total),
+    porDia: [...porDia.entries()].map(([dia, vistas]) => ({ dia, vistas })),
     truncado,
   };
 }

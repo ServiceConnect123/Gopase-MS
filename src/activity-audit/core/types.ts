@@ -180,6 +180,24 @@ export interface ActivitySummary {
   truncado: boolean;
 }
 
+/**
+ * Vistas de pantalla ('Vio pantalla') en una ventana de días, agregadas por
+ * pantalla (para saber qué pantallas se usan más). Es el equivalente a lo que
+ * mide Firebase Analytics (screen_view), pero guardado en la misma infraestructura
+ * de activity-audit para mostrarlo dentro del Monitoreo.
+ */
+export interface ScreenViewsSummary {
+  /** Vacío = todos los conjuntos. */
+  conjunto: string;
+  dias: number;
+  total: number;
+  /** Ranking de pantallas más vistas. */
+  porPantalla: Array<{ pantalla: string; total: number; usuarios: number }>;
+  porDia: Array<{ dia: string; vistas: number }>;
+  /** true si se alcanzó el tope de eventos leídos y el conteo es parcial. */
+  truncado: boolean;
+}
+
 /** Aperturas de la app ('Abrió la app') en una ventana de días, por usuario y por día. */
 export interface OpeningsSummary {
   /** Vacío = todos los conjuntos. */
