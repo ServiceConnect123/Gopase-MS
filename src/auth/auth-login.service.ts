@@ -258,7 +258,11 @@ export class AuthLoginService {
         detalle: { accion: 'Sesión', recurso: 'Inicio de sesión', rol: claims.rol || '' },
       });
       // JWT de sesión: identidad + rol + conjunto (el guard lo verifica).
-      const token = this.jwt.sign({ sub: uid, rol: claims.rol || '', conjuntoId });
+      // `suspendido`: el conjunto entró sin pagar. El admin puede navegar pero
+      // en SOLO LECTURA (el ReadOnlyGuard bloquea sus escrituras). Se calcula
+      // aquí para no consultar la suscripción en cada request.
+      const suspendido = suscripcion?.bloqueado === true;
+      const token = this.jwt.sign({ sub: uid, rol: claims.rol || '', conjuntoId, suspendido });
       return {
         success: true,
         user: {

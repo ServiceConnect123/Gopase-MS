@@ -1,5 +1,5 @@
-import { Body, Controller, Post, Req } from '@nestjs/common';
-import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Get, Post, Query, Req } from '@nestjs/common';
+import { ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { Public } from '../auth/public.decorator';
 import { OnboardingService } from './onboarding.service';
 
@@ -52,6 +52,16 @@ export class OnboardingController {
   @Post('register')
   async register(@Body() body: any, @Req() req: any) {
     return this.onboarding.register(body || {}, this.ipOf(req));
+  }
+
+  @ApiOperation({
+    summary: 'Verifica, sin registrar, qué usuario se le asignaría a un nombre y si ya está tomado',
+    description: 'Lo usa la landing para avisar en vivo bajo el campo del nombre del administrador.',
+  })
+  @ApiQuery({ name: 'nombre', required: true })
+  @Get('check-usuario')
+  async checkUsuario(@Query('nombre') nombre?: string) {
+    return this.onboarding.checkUsuario(nombre || '');
   }
 
   @ApiOperation({

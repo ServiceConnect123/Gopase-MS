@@ -33,6 +33,7 @@ import { AuditInterceptor } from './activity-audit/integrations/nest/audit.inter
 import { SentryErrorReporter } from './activity-audit/adapters/sentry/sentry-error-reporter';
 import { SentryIssuesClient } from './activity-audit/adapters/sentry/sentry-issues.client';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
+import { ReadOnlyGuard } from './auth/read-only.guard';
 import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
 
 @Module({
@@ -114,6 +115,9 @@ import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
     // mientras no sea 'true', deja pasar todo (permite desplegar sin romper los
     // clientes que aún no envían el token).
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    // Después del JWT: si el conjunto está suspendido por pago, su admin queda en
+    // solo lectura (bloquea POST/PUT/PATCH/DELETE, salvo /billing para pagar).
+    { provide: APP_GUARD, useClass: ReadOnlyGuard },
   ],
 })
 export class AppModule {}

@@ -169,6 +169,52 @@ export class OnboardingService {
     return false;
   }
 
+  /** ¿El username ya está tomado en RTDB? (es el uid de Firebase Auth). */
+  private async usuarioExiste(usuario: string): Promise<boolean> {
+    const key = this.safeKey(usuario);
+    if (!key) return false;
+    const snap = await this.firebase.db().ref(`${MIRROR_USUARIOS}/${key}`).get();
+    return snap.exists();
+  }
+
+  /**
+   * A partir del `base` (ya normalizado), devuelve el primer username LIBRE:
+   * prueba base, base2, base3... hasta 99. Devuelve '' si todos están tomados.
+   */
+  private async usuarioDisponible(base: string): Promise<string> {
+    if (!base) return '';
+    if (!(await this.usuarioExiste(base))) return base;
+    for (let n = 2; n < 100; n++) {
+      const cand = `${base}${n}`;
+      if (!(await this.usuarioExiste(cand))) return cand;
+    }
+    return '';
+  }
+
+  /**
+   * Comprueba, SIN registrar, qué usuario se le asignaría a un nombre. Lo usa la
+   * landing para avisar en vivo si el nombre tal cual ya está tomado (y qué
+   * usuario con sufijo quedaría). No revela datos de otros usuarios.
+   */
+  async checkUsuario(nombre: string): Promise<{
+    success: boolean;
+    base: string;
+    /** Username que quedaría libre (puede llevar sufijo). '' si no hay ninguno. */
+    disponible: string;
+    /** true si el username tal cual (sin sufijo) ya está tomado. */
+    tomado: boolean;
+    message?: string;
+  }> {
+    const base = this.generarUsuario(String(nombre ?? ''));
+    if (!base) {
+      return { success: false, base: '', disponible: '', tomado: false, message: 'El nombre debe contener letras o números.' };
+    }
+    if (!this.firebase.isEnabled()) return { success: true, base, disponible: base, tomado: false };
+    const tomado = await this.usuarioExiste(base);
+    const disponible = tomado ? await this.usuarioDisponible(base) : base;
+    return { success: true, base, disponible, tomado };
+  }
+
   // --------------------------------------------------------------- registro
 
   async register(input: RegisterInput, ip: string): Promise<{
@@ -220,14 +266,8 @@ export class OnboardingService {
     // ----- Usuario del administrador (único: es el uid de Firebase Auth) -----
     const base = this.generarUsuario(nombreAdmin);
     if (!base) return { success: false, message: 'El nombre del administrador debe contener letras o números.' };
-    let usuario = base;
-    for (let n = 2; n < 100; n++) {
-      const u = await db.ref(`${MIRROR_USUARIOS}/${this.safeKey(usuario)}`).get();
-      if (!u.exists()) break;
-      usuario = `${base}${n}`;
-    }
-    const taken = await db.ref(`${MIRROR_USUARIOS}/${this.safeKey(usuario)}`).get();
-    if (taken.exists()) return { success: false, message: GENERIC_FAIL };
+    const usuario = await this.usuarioDisponible(base);
+    if (!usuario) return { success: false, message: GENERIC_FAIL };
 
     // ----- Conjunto en estado PENDIENTE (con prueba corriendo desde hoy) -----
     const hoy = new Date();
