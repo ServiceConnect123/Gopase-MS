@@ -497,6 +497,31 @@ export class BillingService {
   }
 
   /**
+   * Corrige manualmente el pagadoHasta de un conjunto (uso del superAdmin).
+   * Útil para ajustar fechas mal calculadas o migrar datos existentes.
+   */
+  async setPagadoHasta(conjunto: string, fecha: string): Promise<{ success: boolean; message?: string }> {
+    if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
+    if (!conjunto.trim()) return { success: false, message: 'Conjunto requerido.' };
+    const d = this.parseDate(fecha);
+    if (!d) return { success: false, message: `Fecha inválida: '${fecha}'. Usa YYYY-MM-DD.` };
+    const found = await this.findConjunto(conjunto);
+    if (!found) return { success: false, message: `Conjunto '${conjunto}' no encontrado.` };
+    try {
+      await this.firebase.db().ref(`${MIRROR_CONJUNTOS}/${found.key}`).update({
+        pagadoHasta: this.toISODate(d),
+        bloqueado: false,
+        _fbWrite: true,
+      });
+      this.logger.log(`[billing] setPagadoHasta: ${conjunto} → ${this.toISODate(d)}`);
+      return { success: true, message: `pagadoHasta actualizado a ${this.toISODate(d)}.` };
+    } catch (err: any) {
+      this.logger.error(`[billing] setPagadoHasta: ${err?.message}`);
+      return { success: false, message: err?.message };
+    }
+  }
+
+  /**
    * Extiende la suscripción del conjunto al confirmar una factura.
    * El nuevo pagadoHasta = max(hoy, pagadoHasta actual) + (1 o 12) meses.
    * También limpia bloqueado.

@@ -1,12 +1,20 @@
-import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { BillingService } from './billing.service';
+import { EpaycoService } from './epayco.service';
+import { AppConfigService } from './app-config.service';
+import { Public } from '../auth/public.decorator';
+import { SuperAdminGuard } from '../activity-audit/integrations/nest/super-admin.guard';
 
 /** Facturación SaaS: pagos del conjunto hacia el superAdmin (RTDB mirror/facturas). */
 @ApiTags('billing')
 @Controller('billing')
 export class BillingController {
-  constructor(private readonly billing: BillingService) {}
+  constructor(
+    private readonly billing: BillingService,
+    private readonly epayco: EpaycoService,
+    private readonly appConfig: AppConfigService,
+  ) {}
 
   @ApiOperation({ summary: 'Config de facturación (carpeta de Drive para comprobantes)' })
   @Get('config')
@@ -102,5 +110,194 @@ export class BillingController {
   @Post('subscription/recompute')
   async recompute() {
     return this.billing.recomputarBloqueos();
+  }
+
+  @ApiOperation({ summary: 'Corrige el pagadoHasta de un conjunto (superAdmin). Útil para ajustar fechas mal calculadas.' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        conjunto:    { type: 'string', description: 'Nombre del conjunto.' },
+        pagadoHasta: { type: 'string', description: 'Nueva fecha YYYY-MM-DD.' },
+      },
+      required: ['conjunto', 'pagadoHasta'],
+    },
+  })
+  @UseGuards(SuperAdminGuard)
+  @Post('subscription/set-fecha')
+  async setFechaSuscripcion(@Body() body: any) {
+    return this.billing.setPagadoHasta(String(body?.conjunto || ''), String(body?.pagadoHasta || ''));
+  }
+
+  @ApiOperation({ summary: 'Indica si ePayco está completamente configurado (público, para que el admin decida si mostrar el botón de pago electrónico).' })
+  @Public()
+  @Get('epayco/status')
+  async epaycoStatus() {
+    const cfg = await this.appConfig.getEpaycoConfigForUI();
+    return { success: true, configured: cfg.configured };
+  }
+
+  // ===========================================================================
+  // Datos de pago del superAdmin (Bre-B / cuenta bancaria)
+  // ===========================================================================
+
+  @ApiOperation({
+    summary: 'Datos de pago del superAdmin (Bre-B o cuenta bancaria). Público — el admin los necesita al pagar.',
+  })
+  @Public()
+  @Get('payment-info')
+  async getPaymentInfo() {
+    const data = await this.appConfig.getDatosPago();
+    return { success: true, data: data ?? null };
+  }
+
+  @ApiOperation({
+    summary: 'Guarda los datos de pago del superAdmin (Bre-B o cuenta bancaria). Solo superAdmin.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        tipo:         { type: 'string', enum: ['breb', 'cuenta'] },
+        llave:        { type: 'string', description: 'Llave Bre-B (si tipo=breb).' },
+        banco:        { type: 'string', description: 'Nombre del banco (si tipo=cuenta).' },
+        numeroCuenta: { type: 'string', description: 'Número de cuenta (si tipo=cuenta).' },
+        tipoCuenta:   { type: 'string', enum: ['ahorro', 'corriente'] },
+        titular:      { type: 'string', description: 'Nombre del titular.' },
+      },
+      required: ['tipo', 'titular'],
+    },
+  })
+  @UseGuards(SuperAdminGuard)
+  @Put('payment-info')
+  async savePaymentInfo(@Body() body: any) {
+    return this.appConfig.saveDatosPago({
+      tipo:         body?.tipo === 'cuenta' ? 'cuenta' : 'breb',
+      llave:        String(body?.llave        ?? '').trim(),
+      banco:        String(body?.banco        ?? '').trim(),
+      numeroCuenta: String(body?.numeroCuenta ?? '').trim(),
+      tipoCuenta:   body?.tipoCuenta === 'corriente' ? 'corriente' : 'ahorro',
+      titular:      String(body?.titular      ?? '').trim(),
+    });
+  }
+
+  // ===========================================================================
+  // ePayco — configuración (solo superAdmin)
+  // ===========================================================================
+
+  @ApiOperation({
+    summary: 'Obtiene la configuración de ePayco (superAdmin). La privateKey se enmascara.',
+  })
+  @UseGuards(SuperAdminGuard)
+  @Get('epayco/config')
+  async getEpaycoConfig() {
+    const data = await this.appConfig.getEpaycoConfigForUI();
+    return { success: true, data };
+  }
+
+  @ApiOperation({
+    summary: 'Guarda la configuración de ePayco en RTDB (superAdmin). Activa desde la UI sin redesplegar.',
+    description:
+      'Persiste publicKey, privateKey, test y webhookBase en mirror/appConfig/epayco. ' +
+      'Si privateKey llega vacía, conserva la guardada (no la borra). ' +
+      'Las env vars EPAYCO_* siguen como fallback si el nodo RTDB no existe.',
+  })
+  @UseGuards(SuperAdminGuard)
+  @Put('epayco/config')
+  async saveEpaycoConfig(@Body() body: any) {
+    const dto = {
+      publicKey:   String(body?.publicKey   ?? '').trim(),
+      privateKey:  String(body?.privateKey  ?? '').trim(),
+      customerId:  String(body?.customerId  ?? '').trim(),
+      pKey:        String(body?.pKey        ?? '').trim(),
+      test:        body?.test === false || body?.test === 'false' ? false : true,
+      webhookBase: String(body?.webhookBase ?? '').trim(),
+    };
+    return this.appConfig.saveEpaycoConfig(dto);
+  }
+
+  // ===========================================================================
+  // ePayco — pasarela de pago electrónico (PSE + tarjeta)
+  // ===========================================================================
+
+  @ApiOperation({
+    summary: 'Crea una sesión de Smart Checkout en ePayco. El frontend usa el sessionId para abrir el modal de pago.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        conjunto: { type: 'string' },
+        planId: { type: 'string', example: 'basico' },
+        ciclo: { type: 'string', enum: ['mensual', 'anual'] },
+        adminEmail: { type: 'string' },
+        adminNombre: { type: 'string' },
+        adminTelefono: { type: 'string' },
+      },
+      required: ['conjunto', 'planId', 'ciclo'],
+    },
+  })
+  @Post('epayco/session')
+  async epaycoSession(@Body() body: any) {
+    const { conjunto, planId, ciclo, adminEmail, adminNombre, adminTelefono } = body || {};
+    if (!conjunto || !planId || !ciclo) {
+      return { success: false, message: 'conjunto, planId y ciclo son requeridos.' };
+    }
+    return this.epayco.createSession({ conjunto, planId, ciclo, adminEmail, adminNombre, adminTelefono });
+  }
+
+  @ApiOperation({
+    summary: 'Confirma un pago de ePayco desde el frontend (tras onResponse). Verifica con la API de ePayco, crea y confirma la factura.',
+    description:
+      'El frontend llama este endpoint cuando onResponse del checkout reporta éxito. ' +
+      'Es el camino principal de registro (no depende del webhook, que puede tardar o no llegar en pruebas). ' +
+      'Idempotente: si la factura ya existe con esa referencia, no la duplica.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        refPayco: { type: 'string', description: 'x_ref_payco devuelto por ePayco en onResponse.' },
+        conjunto: { type: 'string' },
+        planId: { type: 'string' },
+        ciclo: { type: 'string', enum: ['mensual', 'anual'] },
+        facturaId: { type: 'string', description: 'ID que se pasó en el invoice/extra4 al crear la sesión.' },
+        monto: { type: 'number' },
+        periodo: { type: 'string', example: '2026-11' },
+      },
+      required: ['refPayco', 'conjunto', 'planId'],
+    },
+  })
+  @Post('epayco/confirm')
+  async epaycoConfirm(@Body() body: any) {
+    const { refPayco, conjunto, planId, ciclo, facturaId, monto, periodo } = body || {};
+    if (!refPayco || !conjunto || !planId) {
+      return { success: false, message: 'refPayco, conjunto y planId son requeridos.' };
+    }
+    return this.epayco.confirmFromFrontend({ refPayco, conjunto, planId, ciclo, facturaId, monto, periodo });
+  }
+
+  @ApiOperation({
+    summary: 'Webhook de confirmación de ePayco (respaldo automático). Verifica el pago y extiende la suscripción.',
+    description: 'Debe ser público para que ePayco pueda llamarlo. El camino principal es /epayco/confirm (desde el frontend).',
+  })
+  @Public()
+  @Post('epayco/webhook')
+  async epaycoWebhook(@Body() body: any) {
+    this.billing['logger']?.log?.(`[epayco] webhook recibido: ${JSON.stringify(body || {}).slice(0, 300)}`);
+    return this.epayco.handleWebhook(body || {});
+  }
+
+  @ApiOperation({
+    summary: 'Verifica el estado de una transacción ePayco por su referencia (ref_payco).',
+    description:
+      'Consulta la API pública de ePayco para confirmar si la transacción fue aceptada. ' +
+      'Útil para el frontend después del onResponse del checkout (doble verificación).',
+  })
+  @Get('epayco/transaction/:ref')
+  async epaycoTransaction(@Param('ref') ref: string) {
+    if (!ref) return { success: false, message: 'Referencia requerida.' };
+    const result = await this.epayco.verifyTransaction(ref);
+    return { success: true, ...result };
   }
 }
