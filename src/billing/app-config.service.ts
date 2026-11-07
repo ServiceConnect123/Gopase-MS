@@ -18,6 +18,22 @@ export interface EpaycoConfig {
   webhookBase: string;
 }
 
+/** Datos de pago del superAdmin para transferencias manuales (Bre-B o cuenta bancaria). */
+export interface DatosPagoConfig {
+  /** 'breb' = llave Bre-B/Nequi/Daviplata, 'cuenta' = cuenta bancaria tradicional. */
+  tipo: 'breb' | 'cuenta';
+  /** Llave Bre-B (número de celular, correo o alias). Solo si tipo = 'breb'. */
+  llave: string;
+  /** Nombre del banco (Bancolombia, Davivienda, etc.). Solo si tipo = 'cuenta'. */
+  banco: string;
+  /** Número de cuenta. Solo si tipo = 'cuenta'. */
+  numeroCuenta: string;
+  /** 'ahorro' | 'corriente'. Solo si tipo = 'cuenta'. */
+  tipoCuenta: 'ahorro' | 'corriente';
+  /** Nombre del titular (para que el admin sepa a quién transferir). */
+  titular: string;
+}
+
 @Injectable()
 export class AppConfigService {
   private readonly logger = new Logger(AppConfigService.name);
@@ -90,6 +106,45 @@ export class AppConfigService {
       webhookBase:      cfg.webhookBase,
       configured:       !!(cfg.publicKey && cfg.privateKey),
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Datos de pago del superAdmin (Bre-B / cuenta bancaria)
+  // ---------------------------------------------------------------------------
+
+  /** Lee los datos de pago desde RTDB. Público: los admins lo necesitan al pagar. */
+  async getDatosPago(): Promise<DatosPagoConfig | null> {
+    if (!this.firebase.isEnabled()) return null;
+    try {
+      const snap = await this.firebase.db().ref(`${RTDB_PATH}/datosPago`).get();
+      if (!snap.exists()) return null;
+      return snap.val() as DatosPagoConfig;
+    } catch (err: any) {
+      this.logger.warn(`[appConfig] getDatosPago: ${err?.message}`);
+      return null;
+    }
+  }
+
+  /** Guarda los datos de pago en RTDB (solo superAdmin). */
+  async saveDatosPago(dto: DatosPagoConfig): Promise<{ success: boolean; message?: string }> {
+    if (!this.firebase.isEnabled()) return { success: false, message: 'Firebase no disponible.' };
+    try {
+      const record = {
+        tipo:         dto.tipo === 'cuenta' ? 'cuenta' : 'breb',
+        llave:        String(dto.llave        ?? '').trim(),
+        banco:        String(dto.banco        ?? '').trim(),
+        numeroCuenta: String(dto.numeroCuenta ?? '').trim(),
+        tipoCuenta:   dto.tipoCuenta === 'corriente' ? 'corriente' : 'ahorro',
+        titular:      String(dto.titular      ?? '').trim(),
+        updatedAt:    new Date().toISOString(),
+      };
+      await this.firebase.db().ref(`${RTDB_PATH}/datosPago`).set(record);
+      this.logger.log('[appConfig] datosPago actualizado.');
+      return { success: true };
+    } catch (err: any) {
+      this.logger.error(`[appConfig] saveDatosPago: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo guardar.' };
+    }
   }
 
   private async readEpaycoFromRtdb(): Promise<Partial<EpaycoConfig & { updatedAt?: string }> | null> {

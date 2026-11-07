@@ -121,6 +121,50 @@ export class BillingController {
   }
 
   // ===========================================================================
+  // Datos de pago del superAdmin (Bre-B / cuenta bancaria)
+  // ===========================================================================
+
+  @ApiOperation({
+    summary: 'Datos de pago del superAdmin (Bre-B o cuenta bancaria). Público — el admin los necesita al pagar.',
+  })
+  @Public()
+  @Get('payment-info')
+  async getPaymentInfo() {
+    const data = await this.appConfig.getDatosPago();
+    return { success: true, data: data ?? null };
+  }
+
+  @ApiOperation({
+    summary: 'Guarda los datos de pago del superAdmin (Bre-B o cuenta bancaria). Solo superAdmin.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        tipo:         { type: 'string', enum: ['breb', 'cuenta'] },
+        llave:        { type: 'string', description: 'Llave Bre-B (si tipo=breb).' },
+        banco:        { type: 'string', description: 'Nombre del banco (si tipo=cuenta).' },
+        numeroCuenta: { type: 'string', description: 'Número de cuenta (si tipo=cuenta).' },
+        tipoCuenta:   { type: 'string', enum: ['ahorro', 'corriente'] },
+        titular:      { type: 'string', description: 'Nombre del titular.' },
+      },
+      required: ['tipo', 'titular'],
+    },
+  })
+  @UseGuards(SuperAdminGuard)
+  @Put('payment-info')
+  async savePaymentInfo(@Body() body: any) {
+    return this.appConfig.saveDatosPago({
+      tipo:         body?.tipo === 'cuenta' ? 'cuenta' : 'breb',
+      llave:        String(body?.llave        ?? '').trim(),
+      banco:        String(body?.banco        ?? '').trim(),
+      numeroCuenta: String(body?.numeroCuenta ?? '').trim(),
+      tipoCuenta:   body?.tipoCuenta === 'corriente' ? 'corriente' : 'ahorro',
+      titular:      String(body?.titular      ?? '').trim(),
+    });
+  }
+
+  // ===========================================================================
   // ePayco — configuración (solo superAdmin)
   // ===========================================================================
 
