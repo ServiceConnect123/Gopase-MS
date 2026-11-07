@@ -1,8 +1,10 @@
-import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { BillingService } from './billing.service';
 import { EpaycoService } from './epayco.service';
+import { AppConfigService } from './app-config.service';
 import { Public } from '../auth/public.decorator';
+import { SuperAdminGuard } from '../activity-audit/integrations/nest/super-admin.guard';
 
 /** Facturación SaaS: pagos del conjunto hacia el superAdmin (RTDB mirror/facturas). */
 @ApiTags('billing')
@@ -11,6 +13,7 @@ export class BillingController {
   constructor(
     private readonly billing: BillingService,
     private readonly epayco: EpaycoService,
+    private readonly appConfig: AppConfigService,
   ) {}
 
   @ApiOperation({ summary: 'Config de facturación (carpeta de Drive para comprobantes)' })
@@ -107,6 +110,39 @@ export class BillingController {
   @Post('subscription/recompute')
   async recompute() {
     return this.billing.recomputarBloqueos();
+  }
+
+  // ===========================================================================
+  // ePayco — configuración (solo superAdmin)
+  // ===========================================================================
+
+  @ApiOperation({
+    summary: 'Obtiene la configuración de ePayco (superAdmin). La privateKey se enmascara.',
+  })
+  @UseGuards(SuperAdminGuard)
+  @Get('epayco/config')
+  async getEpaycoConfig() {
+    const data = await this.appConfig.getEpaycoConfigForUI();
+    return { success: true, data };
+  }
+
+  @ApiOperation({
+    summary: 'Guarda la configuración de ePayco en RTDB (superAdmin). Activa desde la UI sin redesplegar.',
+    description:
+      'Persiste publicKey, privateKey, test y webhookBase en mirror/appConfig/epayco. ' +
+      'Si privateKey llega vacía, conserva la guardada (no la borra). ' +
+      'Las env vars EPAYCO_* siguen como fallback si el nodo RTDB no existe.',
+  })
+  @UseGuards(SuperAdminGuard)
+  @Put('epayco/config')
+  async saveEpaycoConfig(@Body() body: any) {
+    const dto = {
+      publicKey:   String(body?.publicKey   ?? '').trim(),
+      privateKey:  String(body?.privateKey  ?? '').trim(),
+      test:        body?.test === false || body?.test === 'false' ? false : true,
+      webhookBase: String(body?.webhookBase ?? '').trim(),
+    };
+    return this.appConfig.saveEpaycoConfig(dto);
   }
 
   // ===========================================================================

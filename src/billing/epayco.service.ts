@@ -22,9 +22,9 @@
 //   EPAYCO_WEBHOOK_BASE — URL base del backend (p. ej. https://api.gopase.com).
 //                         Se usa para construir la URL de confirmación del webhook.
 import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { BillingService } from './billing.service';
 import { PlansService } from '../plans/plans.service';
+import { AppConfigService } from './app-config.service';
 
 const APIFY_BASE = 'https://apify.epayco.co';
 
@@ -33,35 +33,22 @@ export class EpaycoService {
   private readonly logger = new Logger(EpaycoService.name);
 
   constructor(
-    private readonly config: ConfigService,
     private readonly billing: BillingService,
     private readonly plans: PlansService,
+    private readonly appConfig: AppConfigService,
   ) {}
 
   // ---------------------------------------------------------------------------
-  // Config
+  // Config — ahora proviene de RTDB (AppConfigService), con env vars como fallback
   // ---------------------------------------------------------------------------
 
-  get isTest(): boolean {
-    return this.config.get<string>('EPAYCO_TEST', 'true') !== 'false';
+  async isTest(): Promise<boolean> {
+    return (await this.appConfig.getEpaycoConfig()).test;
   }
 
-  private get publicKey(): string {
-    return this.config.get<string>('EPAYCO_PUBLIC_KEY', '');
-  }
-
-  private get privateKey(): string {
-    return this.config.get<string>('EPAYCO_PRIVATE_KEY', '');
-  }
-
-  /** URL del backend expuesta a internet (para el webhook de confirmación). */
-  private get webhookBase(): string {
-    const raw = this.config.get<string>('EPAYCO_WEBHOOK_BASE', '').trim();
-    return raw.endsWith('/') ? raw.slice(0, -1) : raw;
-  }
-
-  isConfigured(): boolean {
-    return !!(this.publicKey && this.privateKey);
+  async isConfigured(): Promise<boolean> {
+    const cfg = await this.appConfig.getEpaycoConfig();
+    return !!(cfg.publicKey && cfg.privateKey);
   }
 
   // ---------------------------------------------------------------------------
@@ -69,7 +56,8 @@ export class EpaycoService {
   // ---------------------------------------------------------------------------
 
   private async getApifyToken(): Promise<string> {
-    const credentials = Buffer.from(`${this.publicKey}:${this.privateKey}`).toString('base64');
+    const cfg = await this.appConfig.getEpaycoConfig();
+    const credentials = Buffer.from(`${cfg.publicKey}:${cfg.privateKey}`).toString('base64');
     const res = await fetch(`${APIFY_BASE}/login`, {
       method: 'POST',
       headers: {
@@ -102,10 +90,11 @@ export class EpaycoService {
     adminEmail?: string;
     adminNombre?: string;
     adminTelefono?: string;
-  }): Promise<{ success: boolean; sessionId?: string; token?: string; monto?: number; message?: string }> {
-    if (!this.isConfigured()) {
-      return { success: false, message: 'ePayco no está configurado (faltan EPAYCO_PUBLIC_KEY / EPAYCO_PRIVATE_KEY).' };
+  }): Promise<{ success: boolean; sessionId?: string; token?: string; monto?: number; test?: boolean; message?: string }> {
+    if (!(await this.isConfigured())) {
+      return { success: false, message: 'ePayco no está configurado. El superAdmin debe ingresar las llaves en Configuración → Facturación.' };
     }
+    const cfg = await this.appConfig.getEpaycoConfig();
 
     // Obtener el precio del plan en RTDB.
     const planes = await this.plans.list().catch(() => [] as any[]);
@@ -141,12 +130,10 @@ export class EpaycoService {
         lang: 'ES',
         country: 'CO',
         invoice: facturaId,
-        test: this.isTest,
-        // URL de confirmación (webhook): el backend recibe la notificación cuando
-        // ePayco procesa el pago. Si no hay EPAYCO_WEBHOOK_BASE, ePayco lo omite
-        // (el webhook no llegará y habrá que confirmar manualmente).
-        ...(this.webhookBase
-          ? { confirmation: `${this.webhookBase}/billing/epayco/webhook` }
+        test: cfg.test,
+        // URL de confirmación (webhook): si no hay webhookBase, ePayco lo omite.
+        ...(cfg.webhookBase
+          ? { confirmation: `${cfg.webhookBase}/billing/epayco/webhook` }
           : {}),
         // Extras para cruzar con la factura al recibir el webhook.
         extras: {
@@ -189,7 +176,7 @@ export class EpaycoService {
       }
 
       this.logger.log(`[epayco] sesión creada ${sessionId} para ${opts.conjunto} (${opts.planId}/${opts.ciclo}), monto=${monto}`);
-      return { success: true, sessionId, token: sessionToken, monto };
+      return { success: true, sessionId, token: sessionToken, monto, test: cfg.test };
     } catch (err: any) {
       this.logger.error(`[epayco] createSession: ${err?.message}`);
       return { success: false, message: err?.message || 'No se pudo crear la sesión de pago.' };
