@@ -112,6 +112,13 @@ export class BillingController {
     return this.billing.recomputarBloqueos();
   }
 
+  @ApiOperation({ summary: 'Indica si ePayco está completamente configurado (público, para que el admin decida si mostrar el botón de pago electrónico).' })
+  @Get('epayco/status')
+  async epaycoStatus() {
+    const cfg = await this.appConfig.getEpaycoConfigForUI();
+    return { success: true, configured: cfg.configured };
+  }
+
   // ===========================================================================
   // ePayco — configuración (solo superAdmin)
   // ===========================================================================
