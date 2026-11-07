@@ -112,6 +112,23 @@ export class BillingController {
     return this.billing.recomputarBloqueos();
   }
 
+  @ApiOperation({ summary: 'Corrige el pagadoHasta de un conjunto (superAdmin). Útil para ajustar fechas mal calculadas.' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        conjunto:    { type: 'string', description: 'Nombre del conjunto.' },
+        pagadoHasta: { type: 'string', description: 'Nueva fecha YYYY-MM-DD.' },
+      },
+      required: ['conjunto', 'pagadoHasta'],
+    },
+  })
+  @UseGuards(SuperAdminGuard)
+  @Post('subscription/set-fecha')
+  async setFechaSuscripcion(@Body() body: any) {
+    return this.billing.setPagadoHasta(String(body?.conjunto || ''), String(body?.pagadoHasta || ''));
+  }
+
   @ApiOperation({ summary: 'Indica si ePayco está completamente configurado (público, para que el admin decida si mostrar el botón de pago electrónico).' })
   @Public()
   @Get('epayco/status')
