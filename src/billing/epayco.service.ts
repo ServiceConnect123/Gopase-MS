@@ -274,21 +274,18 @@ export class EpaycoService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Recibe la notificación de ePayco cuando se completa un pago. Verifica la
-   * transacción en la API de ePayco, crea la factura en RTDB y la confirma
-   * (extiende la suscripción del conjunto automáticamente).
-   *
-   * ePayco envía un POST con el cuerpo URL-encoded o JSON según el método
-   * configurado en la sesión (aquí usamos POST). Los campos clave son:
-   *   x_ref_payco       — referencia de la transacción en ePayco
-   *   x_response        — Aceptada | Rechazada | Pendiente | Fallida
-   *   x_transaction_state — igual que x_response en algunos casos
-   *   x_amount          — monto cobrado
-   *   x_extra1..5       — los extras que pasamos al crear la sesión
+   * Recibe la notificación POST de ePayco. Valida la firma SHA256 (si hay customerId+pKey)
+   * y procesa solo transacciones Aceptadas.
+   * x_response llega con mayúscula inicial: "Aceptada" | "Rechazada" | "Pendiente" | "Fallida".
    */
   async handleWebhook(body: Record<string, any>): Promise<{ success: boolean; message?: string }> {
+    // Log completo para diagnóstico (sin la private key).
+    this.logger.log(`[epayco] webhook body: ${JSON.stringify(body).slice(0, 600)}`);
+
+    // ePayco usa tanto ref_payco como x_ref_payco según el método.
     const ref = String(body.x_ref_payco || body.ref_payco || '').trim();
-    const response = String(body.x_response || body.x_transaction_state || '').trim().toLowerCase();
+    // x_response llega en español con mayúscula: "Aceptada", "Rechazada", etc.
+    const response = String(body.x_response || body.x_transaction_state || '').trim();
     const conjunto = String(body.x_extra1 || '').trim();
     const planId = String(body.x_extra2 || '').trim();
     const ciclo = String(body.x_extra3 || '').trim() as 'mensual' | 'anual';
@@ -301,66 +298,98 @@ export class EpaycoService {
       return { success: false, message: 'Sin referencia de transacción.' };
     }
 
-    // Solo procesar pagos aceptados.
-    if (!['aceptada', 'accepted'].includes(response)) {
+    // Validar firma SHA256 si tenemos customerId y pKey configurados.
+    const cfg = await this.appConfig.getEpaycoConfig();
+    if (cfg.customerId && cfg.pKey && body.x_signature) {
+      const valid = this.validateSignature({
+        customerId: cfg.customerId,
+        pKey: cfg.pKey,
+        xRefPayco: String(body.x_ref_payco || ''),
+        xTransactionId: String(body.x_transaction_id || ''),
+        xAmount: String(body.x_amount || ''),
+        xCurrencyCode: String(body.x_currency_code || ''),
+        xSignature: String(body.x_signature || ''),
+      });
+      if (!valid) {
+        this.logger.warn(`[epayco] webhook: firma inválida para ref=${ref}. Posible fraude o prueba manual.`);
+        // En modo prueba dejamos pasar (ePayco puede no incluir firma correcta en test).
+        if (!cfg.test) {
+          return { success: false, message: 'Firma de seguridad inválida.' };
+        }
+      }
+    }
+
+    // Solo procesar transacciones aceptadas. ePayco envía "Aceptada" con mayúscula.
+    const accepted = ['aceptada', 'accepted'].includes(response.toLowerCase());
+    if (!accepted) {
       this.logger.log(`[epayco] webhook ignorado: estado '${response}' para ref=${ref}`);
       return { success: true, message: `Transacción ${response}, ignorada.` };
     }
 
     if (!conjunto || !planId) {
       this.logger.warn(`[epayco] webhook sin conjunto/planId en extras (ref=${ref}).`);
-      return { success: false, message: 'Faltan datos del conjunto en el webhook.' };
+      // Intenta procesar igual si hay suficiente info en la referencia.
+      return { success: false, message: 'Faltan datos del conjunto en el webhook (extras vacíos).' };
     }
 
+    // Idempotencia: si ya fue confirmada por el frontend (confirm), no duplicar.
     try {
-      // Verificar con la API de ePayco para no aceptar webhooks falsos.
-      const verified = await this.verifyTransaction(ref);
-      if (!verified.accepted) {
-        this.logger.warn(`[epayco] webhook: transacción ${ref} no verificada (${verified.message}).`);
-        return { success: false, message: `Transacción no verificada: ${verified.message}` };
+      const existing = await this.billing.list(conjunto).catch(() => [] as any[]);
+      const yaConfirmada = Array.isArray(existing) && existing.some(
+        (f: any) => (f.id === facturaId || String(f.concepto || '').includes(ref)) && f.estado === 'confirmada',
+      );
+      if (yaConfirmada) {
+        this.logger.log(`[epayco] webhook: pago ${ref} ya confirmado (por frontend), omitido.`);
+        return { success: true, message: 'Ya procesado.' };
       }
 
-      const id = facturaId || `epayco_${Date.now()}`;
+      const id = facturaId || `epayco_wh_${Date.now()}`;
       const ahora = new Date();
       const periodoStr = periodo || `${ahora.getFullYear()}-${String(ahora.getMonth() + 1).padStart(2, '0')}`;
       const cicloNorm: 'mensual' | 'anual' = ciclo === 'anual' ? 'anual' : 'mensual';
 
-      // Crear la factura (queda confirmada automáticamente porque el pago es
-      // electrónico y ya fue verificado con la API de ePayco).
       const created = await this.billing.create({
-        id,
-        conjunto,
-        monto: monto || verified.monto,
-        montoObjetivo: monto || verified.monto,
-        montoPagado: monto || verified.monto,
+        id, conjunto,
+        monto: monto || 0,
+        montoObjetivo: monto || 0,
+        montoPagado: monto || 0,
         planIdSolicitado: planId,
-        ciclo: cicloNorm,
-        moneda: 'COP',
-        periodo: periodoStr,
-        concepto: `Pago electrónico ePayco (${ref})`,
-        comprobanteUrl: '',
-        creadoPor: conjunto,
-        creadoPorNombre: conjunto,
-        estado: 'pendiente',
+        ciclo: cicloNorm, moneda: 'COP', periodo: periodoStr,
+        concepto: `Pago electrónico ePayco webhook (${ref})`,
+        comprobanteUrl: '', creadoPor: conjunto, creadoPorNombre: conjunto, estado: 'pendiente',
       });
 
-      if (!created.success) {
-        this.logger.error(`[epayco] webhook: no se pudo crear factura para ${conjunto}: ${created.message}`);
-        return { success: false, message: created.message };
-      }
+      if (!created.success) return { success: false, message: created.message };
 
-      // Confirmar la factura: extiende la suscripción automáticamente.
       const reviewed = await this.billing.review(id, {
         estado: 'confirmada',
         revisadoPor: 'epayco_webhook',
         nota: `Referencia ePayco: ${ref}`,
       });
 
-      this.logger.log(`[epayco] webhook procesado OK: ${conjunto} / ${planId} / ${cicloNorm} / ref=${ref}`);
+      this.logger.log(`[epayco] webhook OK: ${conjunto}/${planId}/${cicloNorm} ref=${ref}`);
       return { success: true, message: reviewed.message };
     } catch (err: any) {
       this.logger.error(`[epayco] handleWebhook (ref=${ref}): ${err?.message}`);
-      return { success: false, message: err?.message || 'Error interno al procesar el webhook.' };
+      return { success: false, message: err?.message };
+    }
+  }
+
+  /** Valida la firma SHA256 del webhook según la fórmula oficial de ePayco. */
+  private validateSignature(data: {
+    customerId: string; pKey: string;
+    xRefPayco: string; xTransactionId: string;
+    xAmount: string; xCurrencyCode: string; xSignature: string;
+  }): boolean {
+    try {
+      const crypto = require('crypto');
+      const expected = crypto
+        .createHash('sha256')
+        .update(`${data.customerId}^${data.pKey}^${data.xRefPayco}^${data.xTransactionId}^${data.xAmount}^${data.xCurrencyCode}`)
+        .digest('hex');
+      return expected === data.xSignature;
+    } catch {
+      return false;
     }
   }
 

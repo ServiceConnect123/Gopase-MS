@@ -147,6 +147,8 @@ export class BillingController {
     const dto = {
       publicKey:   String(body?.publicKey   ?? '').trim(),
       privateKey:  String(body?.privateKey  ?? '').trim(),
+      customerId:  String(body?.customerId  ?? '').trim(),
+      pKey:        String(body?.pKey        ?? '').trim(),
       test:        body?.test === false || body?.test === 'false' ? false : true,
       webhookBase: String(body?.webhookBase ?? '').trim(),
     };
