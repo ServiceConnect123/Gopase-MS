@@ -158,20 +158,17 @@ export class BillingController {
 
   @ApiOperation({
     summary: 'Crea una sesión de Smart Checkout en ePayco. El frontend usa el sessionId para abrir el modal de pago.',
-    description:
-      'Hace login en la API de ePayco y crea la sesión de pago con el monto del plan y ciclo del conjunto. ' +
-      'Requiere EPAYCO_PUBLIC_KEY y EPAYCO_PRIVATE_KEY en las variables de entorno del servidor.',
   })
   @ApiBody({
     schema: {
       type: 'object',
       properties: {
-        conjunto: { type: 'string', description: 'Nombre del conjunto.' },
-        planId: { type: 'string', example: 'basico', description: 'ID del plan a pagar.' },
-        ciclo: { type: 'string', enum: ['mensual', 'anual'], description: 'Ciclo de facturación.' },
-        adminEmail: { type: 'string', description: 'Email del administrador (opcional, para la pantalla de pago).' },
-        adminNombre: { type: 'string', description: 'Nombre del administrador (opcional).' },
-        adminTelefono: { type: 'string', description: 'Teléfono del administrador, sin +57 (opcional).' },
+        conjunto: { type: 'string' },
+        planId: { type: 'string', example: 'basico' },
+        ciclo: { type: 'string', enum: ['mensual', 'anual'] },
+        adminEmail: { type: 'string' },
+        adminNombre: { type: 'string' },
+        adminTelefono: { type: 'string' },
       },
       required: ['conjunto', 'planId', 'ciclo'],
     },
@@ -186,11 +183,39 @@ export class BillingController {
   }
 
   @ApiOperation({
-    summary: 'Webhook de confirmación de ePayco. Verifica el pago, crea la factura y extiende la suscripción.',
+    summary: 'Confirma un pago de ePayco desde el frontend (tras onResponse). Verifica con la API de ePayco, crea y confirma la factura.',
     description:
-      'ePayco llama este endpoint cuando una transacción se completa. Verifica la autenticidad con la API ' +
-      'de ePayco, luego crea y confirma la factura en RTDB (extiende pagadoHasta del conjunto). ' +
-      'Debe ser público (sin JWT) para que ePayco pueda llamarlo.',
+      'El frontend llama este endpoint cuando onResponse del checkout reporta éxito. ' +
+      'Es el camino principal de registro (no depende del webhook, que puede tardar o no llegar en pruebas). ' +
+      'Idempotente: si la factura ya existe con esa referencia, no la duplica.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        refPayco: { type: 'string', description: 'x_ref_payco devuelto por ePayco en onResponse.' },
+        conjunto: { type: 'string' },
+        planId: { type: 'string' },
+        ciclo: { type: 'string', enum: ['mensual', 'anual'] },
+        facturaId: { type: 'string', description: 'ID que se pasó en el invoice/extra4 al crear la sesión.' },
+        monto: { type: 'number' },
+        periodo: { type: 'string', example: '2026-11' },
+      },
+      required: ['refPayco', 'conjunto', 'planId'],
+    },
+  })
+  @Post('epayco/confirm')
+  async epaycoConfirm(@Body() body: any) {
+    const { refPayco, conjunto, planId, ciclo, facturaId, monto, periodo } = body || {};
+    if (!refPayco || !conjunto || !planId) {
+      return { success: false, message: 'refPayco, conjunto y planId son requeridos.' };
+    }
+    return this.epayco.confirmFromFrontend({ refPayco, conjunto, planId, ciclo, facturaId, monto, periodo });
+  }
+
+  @ApiOperation({
+    summary: 'Webhook de confirmación de ePayco (respaldo automático). Verifica el pago y extiende la suscripción.',
+    description: 'Debe ser público para que ePayco pueda llamarlo. El camino principal es /epayco/confirm (desde el frontend).',
   })
   @Public()
   @Post('epayco/webhook')

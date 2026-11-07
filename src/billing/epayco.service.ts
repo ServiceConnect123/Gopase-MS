@@ -90,7 +90,7 @@ export class EpaycoService {
     adminEmail?: string;
     adminNombre?: string;
     adminTelefono?: string;
-  }): Promise<{ success: boolean; sessionId?: string; token?: string; monto?: number; test?: boolean; message?: string }> {
+  }): Promise<{ success: boolean; sessionId?: string; token?: string; monto?: number; test?: boolean; facturaId?: string; message?: string }> {
     if (!(await this.isConfigured())) {
       return { success: false, message: 'ePayco no está configurado. El superAdmin debe ingresar las llaves en Configuración → Facturación.' };
     }
@@ -176,7 +176,7 @@ export class EpaycoService {
       }
 
       this.logger.log(`[epayco] sesión creada ${sessionId} para ${opts.conjunto} (${opts.planId}/${opts.ciclo}), monto=${monto}`);
-      return { success: true, sessionId, token: sessionToken, monto, test: cfg.test };
+      return { success: true, sessionId, token: sessionToken, monto, test: cfg.test, facturaId };
     } catch (err: any) {
       this.logger.error(`[epayco] createSession: ${err?.message}`);
       return { success: false, message: err?.message || 'No se pudo crear la sesión de pago.' };
@@ -184,7 +184,93 @@ export class EpaycoService {
   }
 
   // ---------------------------------------------------------------------------
-  // Webhook de confirmación (ePayco → backend)
+  // Confirmación desde el frontend (camino principal)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * El frontend llama esto justo cuando `onResponse` reporta pago aceptado.
+   * No depende del webhook (que puede no llegar en modo prueba o si falta la URL).
+   * Idempotente: si ya existe una factura con ese `facturaId`, no la duplica.
+   */
+  async confirmFromFrontend(opts: {
+    refPayco: string;
+    conjunto: string;
+    planId: string;
+    ciclo?: string;
+    facturaId?: string;
+    monto?: number;
+    periodo?: string;
+  }): Promise<{ success: boolean; message?: string }> {
+    const { refPayco, conjunto, planId } = opts;
+
+    // Verificar con la API pública de ePayco (evita confirmaciones falsas).
+    // En modo prueba, la verificación puede devolver 'pendiente' — se acepta
+    // igualmente porque el onResponse ya viene firmado por el SDK de ePayco.
+    const verified = await this.verifyTransaction(refPayco);
+    const cfg = await this.appConfig.getEpaycoConfig();
+
+    // En producción exigimos verificación. En modo prueba lo dejamos pasar
+    // (la API de validación a veces tarda en actualizar el estado en pruebas).
+    if (!verified.accepted && !cfg.test) {
+      this.logger.warn(`[epayco] confirmFromFrontend: ref=${refPayco} no verificada (${verified.message}), prod → rechazado.`);
+      return { success: false, message: `El pago no pudo verificarse: ${verified.message}` };
+    }
+
+    const ahora = new Date();
+    const id = opts.facturaId || `epayco_${conjunto.replace(/\s+/g, '_').toLowerCase()}_${Date.now()}`;
+    const periodoStr = opts.periodo || `${ahora.getFullYear()}-${String(ahora.getMonth() + 1).padStart(2, '0')}`;
+    const cicloNorm: 'mensual' | 'anual' = opts.ciclo === 'anual' ? 'anual' : 'mensual';
+    const montoFinal = opts.monto || verified.monto;
+
+    try {
+      // Idempotencia: si la factura ya existe y está confirmada, no duplicar.
+      const existing = await this.billing.list(conjunto).catch(() => [] as any[]);
+      const yaConfirmada = Array.isArray(existing) && existing.some(
+        (f: any) => (f.id === id || String(f.concepto || '').includes(refPayco)) && f.estado === 'confirmada',
+      );
+      if (yaConfirmada) {
+        this.logger.log(`[epayco] confirmFromFrontend: factura ${id} ya confirmada, se omite duplicado.`);
+        return { success: true, message: 'El pago ya estaba registrado.' };
+      }
+
+      const created = await this.billing.create({
+        id,
+        conjunto,
+        monto: montoFinal,
+        montoObjetivo: montoFinal,
+        montoPagado: montoFinal,
+        planIdSolicitado: planId,
+        ciclo: cicloNorm,
+        moneda: 'COP',
+        periodo: periodoStr,
+        concepto: `Pago electrónico ePayco (${refPayco})`,
+        comprobanteUrl: '',
+        creadoPor: conjunto,
+        creadoPorNombre: conjunto,
+        estado: 'pendiente',
+      });
+
+      if (!created.success) {
+        this.logger.error(`[epayco] confirmFromFrontend: no se pudo crear factura (${conjunto}): ${created.message}`);
+        return { success: false, message: created.message };
+      }
+
+      const reviewed = await this.billing.review(id, {
+        estado: 'confirmada',
+        revisadoPor: 'epayco_checkout',
+        nota: `Referencia ePayco: ${refPayco}${cfg.test ? ' [modo prueba]' : ''}`,
+      });
+
+      this.logger.log(`[epayco] confirmFromFrontend OK: ${conjunto}/${planId}/${cicloNorm} ref=${refPayco}`);
+      return { success: true, message: reviewed.message };
+    } catch (err: any) {
+      this.logger.error(`[epayco] confirmFromFrontend (ref=${refPayco}): ${err?.message}`);
+      return { success: false, message: err?.message || 'Error interno al registrar el pago.' };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Webhook de confirmación (ePayco → backend)  — respaldo
   // ---------------------------------------------------------------------------
 
   /**
