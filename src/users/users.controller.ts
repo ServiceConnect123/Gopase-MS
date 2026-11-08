@@ -2,6 +2,8 @@ import { Body, Controller, Delete, Get, Param, Post, Put, Query } from '@nestjs/
 import { ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { UsersService, UserDTO } from './users.service';
 import { UsersImportService } from './users-import.service';
+import { UsersInviteService } from './users-invite.service';
+import { Public } from '../auth/public.decorator';
 
 /**
  * CRUD de usuarios contra Firebase (RTDB + Auth). Reemplaza las llamadas del
@@ -13,6 +15,7 @@ export class UsersController {
   constructor(
     private readonly users: UsersService,
     private readonly usersImport: UsersImportService,
+    private readonly usersInvite: UsersInviteService,
   ) {}
 
   // ==========================================================================
@@ -116,5 +119,68 @@ export class UsersController {
   @Delete(':username')
   async remove(@Param('username') username: string) {
     return this.users.remove(username);
+  }
+
+  // ==========================================================================
+  // Invitación por QR y envío de credenciales
+  // ==========================================================================
+
+  @ApiOperation({
+    summary: 'Genera el link/token de invitación QR del conjunto (admin).',
+    description: 'El token es un JWT de 30 días. El link apunta a la pantalla de autoregistro del frontend.',
+  })
+  @ApiQuery({ name: 'conjunto', required: true })
+  @Get('invite-link')
+  async getInviteLink(@Query('conjunto') conjunto: string) {
+    return this.usersInvite.getInviteLink(conjunto || '');
+  }
+
+  @ApiOperation({
+    summary: 'Valida un token de invitación QR y devuelve el nombre del conjunto. Público.',
+  })
+  @Public()
+  @Get('invite-validate')
+  async validateInviteToken(@Query('token') token: string) {
+    return this.usersInvite.validateInviteToken(token || '');
+  }
+
+  @ApiOperation({
+    summary: 'Autoregistro del propietario usando el token del QR. Público.',
+    description: 'Crea la cuenta del propietario con contraseña temporal y devuelve sus credenciales.',
+  })
+  @Public()
+  @Post('self-register')
+  async selfRegister(@Body() body: {
+    token: string;
+    nombre: string;
+    email?: string;
+    phone?: string;
+    documentType?: string;
+    documentNumber?: string;
+    parcela?: string;
+  }) {
+    const { token, ...data } = body || {};
+    return this.usersInvite.selfRegister(token || '', data);
+  }
+
+  @ApiOperation({
+    summary: 'Lista usuarios del conjunto que nunca han iniciado sesión.',
+  })
+  @ApiQuery({ name: 'conjunto', required: true })
+  @Get('never-logged')
+  async neverLoggedIn(@Query('conjunto') conjunto: string) {
+    return this.usersInvite.neverLoggedIn(conjunto || '');
+  }
+
+  @ApiOperation({
+    summary: 'Envía las credenciales de un usuario por WhatsApp.',
+    description: 'Envía usuario + contraseña temporal al número registrado del propietario.',
+  })
+  @Post(':username/send-credentials')
+  async sendCredentials(
+    @Param('username') username: string,
+    @Query('conjunto') conjunto: string,
+  ) {
+    return this.usersInvite.sendCredentials(username || '', conjunto || '');
   }
 }
