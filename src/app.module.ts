@@ -60,6 +60,11 @@ import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
       // Entorno que etiqueta los registros. En QA se define AUDIT_ENV=qa; si no
       // se define, se asume 'prod' (más seguro: un log real no se confunde con prueba).
       environment: (process.env.AUDIT_ENV || 'prod').toLowerCase(),
+      // No registrar actividad del ambiente QA ni del superAdmin en el monitoreo.
+      // El superAdmin realiza operaciones técnicas sobre todos los conjuntos que
+      // contaminarían el historial de actividad de cada uno. QA genera ruido de pruebas.
+      skipAmbientes: ['qa'],
+      skipUsuarios: ['superadmin'],
       // Cruza el monitoreo con Sentry (migas de pan + id del evento de error en
       // meta.errorEventId). Sin SENTRY_DSN queda inerte.
       errorReporter: new SentryErrorReporter(),

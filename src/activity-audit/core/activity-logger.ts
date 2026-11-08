@@ -23,6 +23,16 @@ export interface ActivityLoggerDeps {
   environment?: string;
   /** Reporter de errores técnicos (opcional). Sin él, el comportamiento no cambia. */
   reporter?: ErrorReporter;
+  /**
+   * Ambientes que se ignoran completamente (no se persisten ni se reportan).
+   * Ej: ['qa'] para no ensuciar el monitoreo con registros de pruebas.
+   */
+  skipAmbientes?: string[];
+  /**
+   * Usuarios que se ignoran completamente.
+   * Ej: ['superadmin'] para no registrar la actividad del superAdmin en el monitoreo.
+   */
+  skipUsuarios?: string[];
 }
 
 /**
@@ -35,6 +45,7 @@ export class ActivityLogger {
   /** Registro fire-and-forget (recomendado para no añadir latencia). */
   log(input: ActivityInput): void {
     const entry = this.normalize(input);
+    if (!entry) return; // filtrado por ambiente o usuario
     this.report(input, entry);
     fireAndForget(
       () => this.deps.store.append(entry),
@@ -46,6 +57,7 @@ export class ActivityLogger {
   /** Variante await-able para flujos donde se quiera confirmar la escritura. */
   async logAwait(input: ActivityInput): Promise<boolean> {
     const entry = this.normalize(input);
+    if (!entry) return true; // filtrado, se considera éxito silencioso
     this.report(input, entry);
     return runSafe(
       () => this.deps.store.append(entry),
@@ -200,13 +212,23 @@ export class ActivityLogger {
     }
   }
 
-  private normalize(input: ActivityInput): ActivityLog {
+  private normalize(input: ActivityInput): ActivityLog | null {
+    const ambiente = input.ambiente ?? this.deps.environment;
+    // Filtra por ambiente (p. ej. no registrar QA en el monitoreo de producción).
+    if (ambiente && this.deps.skipAmbientes?.length) {
+      if (this.deps.skipAmbientes.includes(ambiente.toLowerCase())) return null;
+    }
+    // Filtra por usuario (p. ej. no registrar actividad del superAdmin).
+    const usuario = String(input.usuario || 'anonimo');
+    if (this.deps.skipUsuarios?.length) {
+      const u = usuario.toLowerCase();
+      if (this.deps.skipUsuarios.some((s) => u === s.toLowerCase() || u.startsWith(s.toLowerCase()))) return null;
+    }
     return {
       vista: input.vista,
-      usuario: input.usuario || 'anonimo',
+      usuario,
       conjunto: input.conjunto,
-      // El entorno del log: lo que traiga el input o, si no, el del backend.
-      ambiente: input.ambiente ?? this.deps.environment,
+      ambiente,
       detalle: input.detalle ?? {},
       evidenciaUrl: input.evidenciaUrl,
       meta: input.meta,

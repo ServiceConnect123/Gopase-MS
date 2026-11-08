@@ -43,6 +43,17 @@ export interface ActivityAuditOptions {
    * configured=false.
    */
   issueSource?: ErrorIssueSource;
+  /**
+   * Ambientes que NO se persisten en el monitoreo. Ej: ['qa'] para no
+   * contaminar con registros de pruebas.
+   */
+  skipAmbientes?: string[];
+  /**
+   * Usuarios (por nombre de usuario) cuyos logs se descartan silenciosamente.
+   * Ej: ['superadmin'] para no registrar las acciones del superAdmin.
+   * La comparación es case-insensitive y admite prefijos.
+   */
+  skipUsuarios?: string[];
 }
 
 /**
@@ -80,6 +91,8 @@ export class ActivityAuditModule {
             logger: auditLogger,
             environment: options.environment,
             reporter: options.errorReporter ?? new NoopErrorReporter(),
+            skipAmbientes: options.skipAmbientes,
+            skipUsuarios: options.skipUsuarios,
           }),
         },
         {
