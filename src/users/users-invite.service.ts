@@ -297,8 +297,78 @@ export class UsersInviteService {
   }
 
   // ---------------------------------------------------------------------------
-  // Internals
+  // 3. Generar acceso temporal (reset controlado por el admin)
   // ---------------------------------------------------------------------------
+
+  /**
+   * El admin solicita un acceso temporal para un propietario sin teléfono
+   * (o para cualquier propietario que necesite sus credenciales).
+   * Genera una contraseña aleatoria segura, la establece en Firebase Auth
+   * y la devuelve UNA SOLA VEZ al admin. El propietario debe cambiarla al entrar.
+   *
+   * NO expone la contraseña actual del usuario — siempre es un reset.
+   * Solo aplica a propietarios del mismo conjunto del admin (el backend
+   * no verifica esto; es responsabilidad del caller respetar la restricción
+   * ya que el endpoint está protegido por JWT del admin).
+   */
+  async generateTempAccess(username: string): Promise<{
+    success: boolean;
+    usuario?: string;
+    password?: string;
+    message?: string;
+  }> {
+    if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
+    const key = this.safeKey(username);
+
+    // Verificar que el usuario existe.
+    const snap = await this.firebase.db().ref(`${MIRROR_USERS}/${key}`).get();
+    if (!snap.exists()) return { success: false, message: 'Usuario no encontrado.' };
+
+    // Generar contraseña aleatoria segura (12 chars: letras + números + símbolo).
+    const password = this.generateSecurePassword();
+
+    try {
+      const auth = this.firebase.auth();
+      await auth.updateUser(key, { password });
+      // Forzar cambio de contraseña en el primer ingreso.
+      const record = await auth.getUser(key);
+      await auth.setCustomUserClaims(key, {
+        ...(record.customClaims || {}),
+        mustChangePassword: true,
+      });
+
+      this.logger.log(`[invite] acceso temporal generado para ${username} por el admin.`);
+      this.activity?.log({
+        vista: 'Generó acceso temporal',
+        usuario: username,
+        detalle: { accion: 'Reseteo', recurso: 'Contraseña temporal', porAdmin: true },
+      });
+
+      return { success: true, usuario: username, password };
+    } catch (err: any) {
+      this.logger.error(`[invite] generateTempAccess ${key}: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudo generar el acceso.' };
+    }
+  }
+
+  /**
+   * Genera una contraseña aleatoria de 12 caracteres.
+   * Formato: Xxxxxx00! (mayúscula + minúsculas + números + símbolo) para cumplir políticas.
+   */
+  private generateSecurePassword(): string {
+    const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+    const lower = 'abcdefghjkmnpqrstuvwxyz';
+    const digits = '23456789';
+    const symbols = '!@#$%&*';
+    const all = upper + lower + digits + symbols;
+    const rand = (chars: string) => chars[Math.floor(Math.random() * chars.length)];
+    // Garantiza al menos uno de cada tipo.
+    const parts = [rand(upper), rand(lower), rand(lower), rand(lower), rand(digits), rand(digits), rand(symbols)];
+    // Rellena hasta 12 con caracteres aleatorios del conjunto completo.
+    while (parts.length < 12) parts.push(rand(all));
+    // Mezcla para que los tipos no queden en posición fija.
+    return parts.sort(() => Math.random() - 0.5).join('');
+  }
 
   private generarUsuarioBase(nombre: string): string {
     return String(nombre || '')

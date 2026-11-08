@@ -173,6 +173,15 @@ export class UsersController {
   }
 
   @ApiOperation({
+    summary: 'Genera un acceso temporal para un propietario (admin). Resetea su contraseña y devuelve las nuevas credenciales una sola vez.',
+    description: 'No expone la contraseña actual. Siempre es un reset a una clave aleatoria segura con mustChangePassword=true.',
+  })
+  @Post(':username/temp-access')
+  async generateTempAccess(@Param('username') username: string) {
+    return this.usersInvite.generateTempAccess(username || '');
+  }
+
+  @ApiOperation({
     summary: 'Envía las credenciales de un usuario por WhatsApp.',
     description: 'Envía usuario + contraseña temporal al número registrado del propietario.',
   })
