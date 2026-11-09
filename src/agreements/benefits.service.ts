@@ -35,6 +35,7 @@ export class BenefitsService {
       fechaFin: dto.fechaFin ?? '',
       activo: dto.activo !== false,
       aplicacionesMes: Number(dto.aplicacionesMes ?? 0),
+      solicitantes: Array.isArray(dto.solicitantes) ? dto.solicitantes : [],
       createdBy: String(dto.createdBy ?? ''),
       createdAt: dto.createdAt ?? new Date().toISOString(),
       fechaModificacion: dto.fechaModificacion ?? new Date().toISOString(),
@@ -83,7 +84,8 @@ export class BenefitsService {
       const patch: Record<string, any> = { _fbWrite: true };
       [
         'nombre', 'descripcion', 'tipo', 'valor', 'modalidad', 'regla',
-        'aplicaA', 'fechaInicio', 'fechaFin', 'activo', 'aplicacionesMes', 'conjunto',
+        'aplicaA', 'fechaInicio', 'fechaFin', 'activo', 'aplicacionesMes',
+        'conjunto', 'solicitantes',
       ].forEach((f) => {
         if (dto[f] !== undefined) patch[f] = dto[f];
       });
