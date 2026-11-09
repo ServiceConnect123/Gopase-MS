@@ -16,6 +16,7 @@ import { RolesModule } from './roles/roles.module';
 import { ReportsModule } from './reports/reports.module';
 import { EventsModule } from './events/events.module';
 import { AgreementsModule } from './agreements/agreements.module';
+import { BenefitsModule } from './agreements/benefits.module';
 import { GuestsModule } from './guests/guests.module';
 import { FundsModule } from './funds/funds.module';
 import { PqrsModule } from './pqrs/pqrs.module';
@@ -102,6 +103,7 @@ import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
     ReportsModule,
     EventsModule,
     AgreementsModule,
+    BenefitsModule,
     GuestsModule,
     FundsModule,
     PqrsModule,

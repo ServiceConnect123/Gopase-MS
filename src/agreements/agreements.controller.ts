@@ -12,11 +12,12 @@ import { AgreementsService } from './agreements.service';
 export class AgreementsController {
   constructor(private readonly agreements: AgreementsService) {}
 
-  @ApiOperation({ summary: 'Lista de acuerdos (opcionalmente filtrada por usuario)' })
+  @ApiOperation({ summary: 'Lista de acuerdos (filtrada por conjunto y/o usuario)' })
   @ApiQuery({ name: 'usuario', required: false })
+  @ApiQuery({ name: 'conjunto', required: false })
   @Get()
-  async list(@Query('usuario') usuario?: string) {
-    const data = await this.agreements.list({ usuario: usuario || '' });
+  async list(@Query('usuario') usuario?: string, @Query('conjunto') conjunto?: string) {
+    const data = await this.agreements.list({ usuario: usuario || '', conjunto: conjunto || '' });
     return { success: true, data };
   }
 
