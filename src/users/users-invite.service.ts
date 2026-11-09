@@ -248,11 +248,9 @@ export class UsersInviteService {
   }
 
   /**
-   * Envía las credenciales de un usuario por WhatsApp.
-   * La contraseña que se envía es la temporal (AUTH_TEMP_PASSWORD) porque no
-   * podemos leer la contraseña real desde Firebase Auth (irreversible).
-   * Si el usuario ya cambió su clave, el admin le puede generar una nueva desde
-   * el menú "Cambiar contraseña" de owners.tsx antes de llamar a este endpoint.
+   * Genera una contraseña temporal nueva y la envía por WhatsApp al propietario.
+   * Siempre hace un reset — nunca expone la contraseña actual.
+   * Al recibirla, el propietario la usa para entrar y el modal la obliga a cambiar.
    */
   async sendCredentials(username: string, conjunto: string): Promise<{
     success: boolean;
@@ -270,15 +268,23 @@ export class UsersInviteService {
       return { success: false, message: 'El usuario no tiene número de teléfono registrado.' };
     }
 
+    // 1. Genera contraseña temporal nueva (reset seguro, no expone la actual).
+    const tempResult = await this.generateTempAccess(username);
+    if (!tempResult.success || !tempResult.password) {
+      return { success: false, message: tempResult.message || 'No se pudo generar la contraseña temporal.' };
+    }
+    const password = tempResult.password;
+
+    // 2. Envía por WhatsApp con la contraseña recién generada.
     const nombre = String(user.nombre || username);
     const appUrl = this.frontendUrl;
     const mensaje =
       `¡Hola ${nombre}! 👋\n\n` +
       `Te compartimos tus datos de acceso a *GoPase* para el conjunto *${conjunto}*:\n\n` +
       `👤 *Usuario:* ${username}\n` +
-      `🔑 *Contraseña:* ${this.tempPassword}\n\n` +
+      `🔑 *Contraseña temporal:* ${password}\n\n` +
       `Ingresa aquí: ${appUrl}\n\n` +
-      `_Por seguridad, te recomendamos cambiar tu contraseña al ingresar por primera vez._`;
+      `_Al entrar por primera vez se te pedirá crear una contraseña nueva._`;
 
     const ok = await this.whatsapp.sendMessage(phone, mensaje, conjunto);
     if (ok) {
