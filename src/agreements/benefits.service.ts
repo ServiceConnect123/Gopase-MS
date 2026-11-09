@@ -85,7 +85,7 @@ export class BenefitsService {
       [
         'nombre', 'descripcion', 'tipo', 'valor', 'modalidad', 'regla',
         'aplicaA', 'fechaInicio', 'fechaFin', 'activo', 'aplicacionesMes',
-        'conjunto', 'solicitantes',
+        'conjunto', 'solicitantes', 'aprobados',
       ].forEach((f) => {
         if (dto[f] !== undefined) patch[f] = dto[f];
       });
