@@ -3,15 +3,15 @@ import { FirebaseService } from '../firebase/firebase.service';
 import { SheetsService } from '../sheets/sheets.service';
 
 /**
- * CRUD de acuerdos contra Firebase (RTDB mirror/acuerdos).
- * Reemplaza getData('acuerdos')/createData('acuerdos') del frontend (Sheets).
+ * CRUD de acuerdos de pago contra Firebase (RTDB mirror/acuerdos).
  *
- * Campos (alineados con mapAcuerdo del SyncService):
- *   id, usuario, tipo, descripcion, monto, fechaInicio, fechaFin, estado,
- *   aplicaA, createdBy, createdAt
+ * Modelo extendido (refinanciamiento con cuotas + amortización + condonación
+ * condicional + soporte de firma). Conserva los campos del modelo plano
+ * original (id, usuario, tipo, descripcion, monto, fechaInicio, fechaFin,
+ * estado, aplicaA, createdBy, createdAt) para no romper el sync heredado.
  *
- * Además, al crear un acuerdo, este servicio resuelve las SUSCRIPCIONES push de
- * los usuarios afectados leyéndolas de la hoja 'citofonia' (dato_5==='subscription',
+ * Al crear un acuerdo, este servicio resuelve las SUSCRIPCIONES push de los
+ * usuarios afectadas leyéndolas de la hoja 'citofonia' (dato_5==='subscription',
  * dato_3 = payload push). El sync NO espeja ese payload por seguridad, así que
  * se lee directamente de Sheets. El envío del push lo sigue haciendo el frontend
  * vía /api/send-push (Vercel), al que se le pasan estas suscripciones.
@@ -31,31 +31,66 @@ export class AgreementsService {
     return String(raw ?? '').trim().replace(/[.#$/\[\]]/g, '_');
   }
 
+  /**
+   * Construye el registro a persistir. Mezcla el modelo plano original con los
+   * campos extendidos (cuotas/amortización). Los numéricos se normalizan para
+   * que el frontend siempre reciba el tipo esperado.
+   */
   private buildRecord(dto: any): Record<string, any> {
+    const montoTotal = dto.montoTotal ?? dto.monto ?? 0;
+    const abonoInicialMonto = dto.abonoInicialMonto ?? 0;
+    const saldoPendiente =
+      dto.saldoPendiente ?? Math.max(0, Number(montoTotal) - Number(abonoInicialMonto));
     return {
       id: String(dto.id),
+      conjunto: String(dto.conjunto ?? ''),
       usuario: String(dto.usuario ?? ''),
-      tipo: dto.tipo ?? '',
+      unidad: String(dto.unidad ?? ''),
+      tipo: dto.tipo ?? 'refinanciamiento',
       descripcion: dto.descripcion ?? '',
-      monto: String(dto.monto ?? '0'),
-      fechaInicio: dto.fechaInicio ?? '',
+      // --- compatibilidad con el modelo plano anterior ---
+      monto: String(montoTotal ?? '0'),
+      fechaInicio: dto.fechaInicio ?? dto.fechaPrimerCuota ?? '',
       fechaFin: dto.fechaFin ?? '',
-      estado: dto.estado ?? 'Activo',
-      aplicaA: String(dto.aplicaA ?? 'todos'),
+      estado: dto.estado ?? 'activo',
+      aplicaA: String(dto.aplicaA ?? dto.usuario ?? 'todos'),
+      // --- modelo extendido: cuotas + amortización + condonación ---
+      montoTotal: Number(montoTotal ?? 0),
+      abonoInicialPct: Number(dto.abonoInicialPct ?? 0),
+      abonoInicialMonto: Number(abonoInicialMonto ?? 0),
+      abonoInicialEstado: dto.abonoInicialEstado ?? 'pendiente',
+      saldoPendiente: Number(saldoPendiente ?? 0),
+      numCuotas: Number(dto.numCuotas ?? 0),
+      frecuenciaCuotas: dto.frecuenciaCuotas ?? 'mensual',
+      montoCuota: Number(dto.montoCuota ?? 0),
+      fechaPrimerCuota: dto.fechaPrimerCuota ?? '',
+      condonacionMora: !!dto.condonacionMora,
+      condonacionMonto: Number(dto.condonacionMonto ?? 0),
+      condonacionCondicionada: dto.condonacionCondicionada !== false,
+      diasGracia: Number(dto.diasGracia ?? 5),
+      cuotas: Array.isArray(dto.cuotas) ? dto.cuotas : [],
+      firmaUrl: dto.firmaUrl ?? '',
+      fechaAprobacion: dto.fechaAprobacion ?? '',
       createdBy: String(dto.createdBy ?? ''),
       createdAt: dto.createdAt ?? new Date().toISOString(),
+      fechaModificacion: dto.fechaModificacion ?? new Date().toISOString(),
+      ultimoUsuario: String(dto.ultimoUsuario ?? dto.createdBy ?? ''),
       _fbWrite: true,
     };
   }
 
-  /** Lista de acuerdos. Filtra por conjunto (no aplica directo) y/o usuario. */
-  async list(filters: { usuario?: string }): Promise<any[]> {
+  /** Lista de acuerdos. Filtra por conjunto y/o usuario. */
+  async list(filters: { usuario?: string; conjunto?: string }): Promise<any[]> {
     if (!this.firebase.isEnabled()) throw new Error('Servicio no disponible.');
     const snap = await this.firebase.db().ref(MIRROR_ACUERDOS).get();
     if (!snap.exists()) return [];
     let acuerdos = Object.values(snap.val() || {}) as any[];
+    const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
+    if (filters.conjunto) {
+      const c = norm(filters.conjunto);
+      acuerdos = acuerdos.filter((a) => norm(a.conjunto) === c);
+    }
     if (filters.usuario) {
-      const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
       const u = norm(filters.usuario);
       acuerdos = acuerdos.filter(
         (a) => norm(a.aplicaA) === 'todos' || norm(a.aplicaA) === u || norm(a.usuario) === u,
@@ -115,7 +150,7 @@ export class AgreementsService {
     try {
       await this.firebase.db().ref(`${MIRROR_ACUERDOS}/${this.safeKey(id)}`).set(this.buildRecord({ ...dto, id }));
       // Resolver suscripciones push de los afectados para que el frontend las envíe.
-      const subscriptions = await this.getPushSubscriptions(String(dto.aplicaA || 'todos'));
+      const subscriptions = await this.getPushSubscriptions(String(dto.aplicaA || dto.usuario || 'todos'));
       return { success: true, id, message: 'Acuerdo creado.', subscriptions };
     } catch (err: any) {
       this.logger.error(`[agreements] create falló: ${err?.message}`);
@@ -132,9 +167,18 @@ export class AgreementsService {
     if (!snap.exists()) return { success: false, message: 'El acuerdo no existe.' };
     try {
       const patch: Record<string, any> = { _fbWrite: true };
-      ['usuario', 'tipo', 'descripcion', 'monto', 'fechaInicio', 'fechaFin', 'estado', 'aplicaA'].forEach((f) => {
+      [
+        'usuario', 'unidad', 'tipo', 'descripcion', 'monto', 'montoTotal',
+        'abonoInicialPct', 'abonoInicialMonto', 'abonoInicialEstado', 'saldoPendiente',
+        'numCuotas', 'frecuenciaCuotas', 'montoCuota', 'fechaPrimerCuota', 'fechaInicio',
+        'fechaFin', 'estado', 'aplicaA', 'condonacionMora', 'condonacionMonto',
+        'condonacionCondicionada', 'diasGracia', 'cuotas', 'firmaUrl', 'fechaAprobacion',
+        'conjunto',
+      ].forEach((f) => {
         if (dto[f] !== undefined) patch[f] = dto[f];
       });
+      patch.fechaModificacion = new Date().toISOString();
+      patch.ultimoUsuario = String(dto.ultimoUsuario ?? dto.createdBy ?? '');
       await ref.update(patch);
       return { success: true, message: 'Acuerdo actualizado.' };
     } catch (err: any) {
