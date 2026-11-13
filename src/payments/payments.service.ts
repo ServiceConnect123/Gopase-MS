@@ -1095,6 +1095,56 @@ export class PaymentsService {
         reservaMsg = ' (Error actualizando la reserva vinculada.)';
       }
     }
+
+    // Vínculo con acuerdo de pago: ACUERDO:<id> en la referencia.
+    const matchAcuerdo = referencia.match(/ACUERDO:\s*([^\s|]+)/);
+    if (matchAcuerdo) {
+      const acuerdoId = matchAcuerdo[1].trim();
+      try {
+        const aRef = db.ref(`mirror/acuerdos/${this.safeKey(acuerdoId)}`);
+        const aSnap = await aRef.get();
+        if (aSnap.exists()) {
+          if (input.estado === 'Confirmado') {
+            await aRef.update({ abonoInicialEstado: 'aceptado', estado: 'activo', _fbWrite: true });
+            reservaMsg += ' Acuerdo activado.';
+          } else {
+            await aRef.update({ abonoInicialEstado: 'pendiente', _fbWrite: true });
+            reservaMsg += ' Acuerdo pendiente (abono rechazado).';
+          }
+        }
+      } catch {
+        reservaMsg += ' (Error actualizando el acuerdo vinculado.)';
+      }
+    }
+
+    // Vínculo con beneficio: BENEFICIO:<id> en la referencia.
+    const matchBeneficio = referencia.match(/BENEFICIO:\s*([^\s|]+)/);
+    if (matchBeneficio) {
+      const beneficioId = matchBeneficio[1].trim();
+      try {
+        const bRef = db.ref(`mirror/beneficios/${this.safeKey(beneficioId)}`);
+        const bSnap = await bRef.get();
+        if (bSnap.exists()) {
+          const beneficio = bSnap.val();
+          const usuario = String(pago.usuario ?? '');
+          const solicitantes: string[] = Array.isArray(beneficio.solicitantes) ? beneficio.solicitantes : [];
+          const aprobados: string[] = Array.isArray(beneficio.aprobados) ? beneficio.aprobados : [];
+          if (input.estado === 'Confirmado' && !aprobados.includes(usuario)) {
+            await bRef.update({ aprobados: [...aprobados, usuario], _fbWrite: true });
+            reservaMsg += ' Adhesión al beneficio aprobada.';
+          } else if (input.estado === 'Rechazado') {
+            await bRef.update({
+              solicitantes: solicitantes.filter((u) => u !== usuario),
+              _fbWrite: true,
+            });
+            reservaMsg += ' Solicitud de beneficio rechazada.';
+          }
+        }
+      } catch {
+        reservaMsg += ' (Error actualizando el beneficio vinculado.)';
+      }
+    }
+
     return { success: true, reservaMsg };
   }
 

@@ -12,6 +12,7 @@ import { Boom } from '@hapi/boom';
 import * as qrcodeTerminal from 'qrcode-terminal';
 import * as QRCode from 'qrcode';
 import pino from 'pino';
+import NodeCache from 'node-cache';
 import { FirebaseService } from '../firebase/firebase.service';
 import { clearFirebaseSession, useFirebaseAuthState } from './firebase-auth-state';
 
@@ -64,6 +65,13 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
   /** Sesiones activas, indexadas por clave lógica (conjunto normalizado). */
   private readonly sessions = new Map<string, WhatsappSession>();
+
+  /**
+   * Cache compartido para reintentos de mensajes (Signal retry protocol).
+   * Un único cache por proceso evita colisiones de pre-keys entre sesiones.
+   * stdTTL = 60 s (los reintentos de Signal expiran rápido).
+   */
+  private readonly msgRetryCounterCache = new NodeCache({ stdTTL: 60 });
 
   constructor(private readonly firebase: FirebaseService) {}
 
@@ -192,6 +200,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     if (!digits || digits.length < 10) {
       return { ready: false, code: null, message: 'Número de teléfono inválido.' };
     }
+    this.logger.log(`[${key}] Pairing code solicitado para número: ${digits} (${digits.length} dígitos)`);
 
     const { session } = this.ensureSession(key);
     if (session.ready) {
@@ -212,6 +221,10 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     session.currentQr = null;
 
     // Fuerza una reconexión limpia (el handler connect() pedirá el código).
+    // IMPORTANTE: si hay credenciales residuales de una sesión anterior con QR
+    // (creds.me está seteado pero creds.registered=false), WhatsApp rechaza el
+    // pairing code porque ya reconoce el dispositivo como registrado a medias.
+    // Limpiamos la sesión persistida para garantizar un estado limpio.
     try {
       session.sock?.ev.removeAllListeners('connection.update');
       await session.sock?.end(undefined);
@@ -220,12 +233,19 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     }
     session.sock = null;
     session.connecting = false;
+
+    // Limpiar credenciales residuales antes de pedir el código: evita que
+    // WhatsApp rechace el pairing por un creds.me de una sesión previa.
+    if (session.clearSession) {
+      await session.clearSession().catch(() => undefined);
+    }
+
     this.connect(session).catch((e) =>
       this.logger.error(`[${key}] Error conectando para pairing: ${e?.message}`),
     );
 
-    // Espera a que el código esté disponible (lo genera connect() tras ~3s).
-    const maxMs = 15000;
+    // Espera a que el código esté disponible (lo genera connect() tras ~5s + reintentos).
+    const maxMs = 30000;
     const step = 1000;
     let waited = 0;
     while (waited < maxMs) {
@@ -289,6 +309,23 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       auth: state,
       logger: pino({ level: 'silent' }),
       printQRInTerminal: false,
+      // ── Corrección "Esperando mensaje" en el dispositivo vinculado ──────────
+      // Sin getMessage Baileys no puede descifrar las copias deviceSentMessage
+      // que WhatsApp reenvía al teléfono principal. El protocolo de reintento de
+      // Signal queda colgado indefinidamente. El fallback { conversation: '' }
+      // es suficiente para desatascar el flujo cuando el mensaje no está en caché.
+      getMessage: async (_key) => {
+        return { conversation: '' };
+      },
+      // Evita descargar el historial completo al reconectar (reduce pre-keys
+      // duplicadas y colisiones de senderKeys que causan descifrado fallido).
+      syncFullHistory: false,
+      // Cache de reintentos de mensajes (compartido entre sesiones del proceso).
+      // Previene que el contador de reintentos de Signal se pierda entre
+      // reconexiones rápidas del mismo proceso.
+      msgRetryCounterCache: this.msgRetryCounterCache,
+      // No marcar el número como "en línea" al conectar (reduce firma detectable).
+      markOnlineOnConnect: false,
     });
     session.connecting = false;
 
@@ -296,12 +333,15 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
     // Vinculación por CÓDIGO (pairing code): si se solicitó y la sesión aún no
     // está registrada, pedimos el código a WhatsApp en vez de usar el QR. Debe
-    // hacerse recién creado el socket y ANTES de que se registre. Un pequeño
-    // delay da margen a que el socket inicialice el handshake.
+    // hacerse recién creado el socket y ANTES de que se registre.
+    // - 5s de delay: da margen suficiente para el handshake TLS incluso en cold
+    //   start de Render (3s era insuficiente con latencia de red alta).
+    // - Reintentos (máx 3): si WhatsApp responde con error transitorio (p.ej.
+    //   rate-limit o conexión en progreso) se reintenta cada 3s.
     if (session.usePairing && session.pairingPhone && !state.creds.registered) {
       const sockRef = session.sock;
       const phone = session.pairingPhone;
-      setTimeout(() => {
+      const tryRequest = (attempt: number) => {
         // Evita pedir el código si entretanto la sesión conectó o se recicló.
         if (session.sock !== sockRef || session.ready) return;
         sockRef
@@ -313,12 +353,21 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
             );
           })
           .catch((e: any) => {
-            session.pairingCode = null;
-            this.logger.error(
-              `[${session.key}] No se pudo generar el código de emparejamiento: ${e?.message}`,
+            this.logger.warn(
+              `[${session.key}] Intento ${attempt} de pairing code falló: ${e?.message}`,
             );
+            if (attempt < 3 && !session.ready && session.sock === sockRef) {
+              // Reintenta en 3s (máx 3 intentos).
+              setTimeout(() => tryRequest(attempt + 1), 3000);
+            } else {
+              session.pairingCode = null;
+              this.logger.error(
+                `[${session.key}] No se pudo generar el código de emparejamiento tras ${attempt} intentos.`,
+              );
+            }
           });
-      }, 3000);
+      };
+      setTimeout(() => tryRequest(1), 5000);
     }
 
     session.sock.ev.on('connection.update', (update) => {
