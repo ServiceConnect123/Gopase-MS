@@ -12,6 +12,7 @@ import { Boom } from '@hapi/boom';
 import * as qrcodeTerminal from 'qrcode-terminal';
 import * as QRCode from 'qrcode';
 import pino from 'pino';
+import NodeCache from 'node-cache';
 import { FirebaseService } from '../firebase/firebase.service';
 import { clearFirebaseSession, useFirebaseAuthState } from './firebase-auth-state';
 
@@ -64,6 +65,13 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
   /** Sesiones activas, indexadas por clave lógica (conjunto normalizado). */
   private readonly sessions = new Map<string, WhatsappSession>();
+
+  /**
+   * Cache compartido para reintentos de mensajes (Signal retry protocol).
+   * Un único cache por proceso evita colisiones de pre-keys entre sesiones.
+   * stdTTL = 60 s (los reintentos de Signal expiran rápido).
+   */
+  private readonly msgRetryCounterCache = new NodeCache({ stdTTL: 60 });
 
   constructor(private readonly firebase: FirebaseService) {}
 
@@ -289,6 +297,23 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       auth: state,
       logger: pino({ level: 'silent' }),
       printQRInTerminal: false,
+      // ── Corrección "Esperando mensaje" en el dispositivo vinculado ──────────
+      // Sin getMessage Baileys no puede descifrar las copias deviceSentMessage
+      // que WhatsApp reenvía al teléfono principal. El protocolo de reintento de
+      // Signal queda colgado indefinidamente. El fallback { conversation: '' }
+      // es suficiente para desatascar el flujo cuando el mensaje no está en caché.
+      getMessage: async (_key) => {
+        return { conversation: '' };
+      },
+      // Evita descargar el historial completo al reconectar (reduce pre-keys
+      // duplicadas y colisiones de senderKeys que causan descifrado fallido).
+      syncFullHistory: false,
+      // Cache de reintentos de mensajes (compartido entre sesiones del proceso).
+      // Previene que el contador de reintentos de Signal se pierda entre
+      // reconexiones rápidas del mismo proceso.
+      msgRetryCounterCache: this.msgRetryCounterCache,
+      // No marcar el número como "en línea" al conectar (reduce firma detectable).
+      markOnlineOnConnect: false,
     });
     session.connecting = false;
 
