@@ -73,6 +73,16 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
    */
   private readonly msgRetryCounterCache = new NodeCache({ stdTTL: 60 });
 
+  /**
+   * Store en memoria de mensajes enviados recientemente (últimos 200).
+   * Baileys lo necesita para responder a las solicitudes getMessage() que
+   * WhatsApp envía cuando reenvía la copia del mensaje al dispositivo vinculado
+   * (deviceSentMessage). Sin esto, imágenes y documentos quedan en
+   * "Waiting for this message" en el teléfono principal.
+   * TTL = 5 min (suficiente para el protocolo de reintento de Signal).
+   */
+  private readonly messageStore = new NodeCache({ stdTTL: 300, maxKeys: 200 });
+
   constructor(private readonly firebase: FirebaseService) {}
 
   async onModuleInit() {
@@ -310,11 +320,17 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       logger: pino({ level: 'silent' }),
       printQRInTerminal: false,
       // ── Corrección "Esperando mensaje" en el dispositivo vinculado ──────────
-      // Sin getMessage Baileys no puede descifrar las copias deviceSentMessage
-      // que WhatsApp reenvía al teléfono principal. El protocolo de reintento de
-      // Signal queda colgado indefinidamente. El fallback { conversation: '' }
-      // es suficiente para desatascar el flujo cuando el mensaje no está en caché.
-      getMessage: async (_key) => {
+      // getMessage devuelve el mensaje desde el store en memoria cuando WhatsApp
+      // solicita re-cifrar la copia deviceSentMessage para el teléfono principal.
+      // Sin un mensaje real, imágenes y documentos quedan en "Waiting for this
+      // message". El fallback { conversation: '' } solo sirve para texto simple.
+      getMessage: async (key) => {
+        const id = key.id;
+        if (id) {
+          const stored = this.messageStore.get<any>(id);
+          if (stored) return stored;
+        }
+        // Fallback: desatasca mensajes de texto cuando no hay store.
         return { conversation: '' };
       },
       // Evita descargar el historial completo al reconectar (reduce pre-keys
@@ -330,6 +346,18 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     session.connecting = false;
 
     session.sock.ev.on('creds.update', saveCreds);
+
+    // Guardar mensajes enviados en el store para que getMessage() los encuentre.
+    // Cubre el caso deviceSentMessage: WhatsApp pide el mensaje original para
+    // re-cifrarlo y enviarlo al teléfono vinculado. Sin esto, imágenes y docs
+    // quedan en "Waiting for this message" en el móvil del remitente.
+    session.sock.ev.on('messages.upsert', ({ messages }) => {
+      for (const msg of messages) {
+        if (msg.key?.id && msg.message) {
+          this.messageStore.set(msg.key.id, msg.message);
+        }
+      }
+    });
 
     // Vinculación por CÓDIGO (pairing code): si se solicitó y la sesión aún no
     // está registrada, pedimos el código a WhatsApp en vez de usar el QR. Debe
