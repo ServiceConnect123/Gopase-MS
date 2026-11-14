@@ -74,14 +74,56 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private readonly msgRetryCounterCache = new NodeCache({ stdTTL: 60 });
 
   /**
-   * Store en memoria de mensajes enviados recientemente (últimos 200).
-   * Baileys lo necesita para responder a las solicitudes getMessage() que
-   * WhatsApp envía cuando reenvía la copia del mensaje al dispositivo vinculado
-   * (deviceSentMessage). Sin esto, imágenes y documentos quedan en
-   * "Waiting for this message" en el teléfono principal.
-   * TTL = 5 min (suficiente para el protocolo de reintento de Signal).
+   * Store de mensajes respaldado en Firebase RTDB (nodo wsp_msg_store).
+   * TTL = 24 h. Sobrevive reinicios de Render (cold start).
+   * También mantiene un cache en memoria (NodeCache) para lecturas rápidas.
    */
-  private readonly messageStore = new NodeCache({ stdTTL: 300, maxKeys: 200 });
+  private readonly msgMemCache = new NodeCache({ stdTTL: 86400, maxKeys: 500 });
+  private readonly MSG_STORE_PATH = 'wsp_msg_store';
+  private readonly MSG_TTL_MS = 86400_000; // 24 h
+
+  private async msgStoreSave(sessionKey: string, id: string, message: any): Promise<void> {
+    this.msgMemCache.set(`${sessionKey}:${id}`, message);
+    const ts = Date.now();
+    this.firebase.db()
+      .ref(`${this.MSG_STORE_PATH}/${sessionKey}/${id}`)
+      .set({ msg: message, ts })
+      .catch((e) => this.logger.warn(`[msgStore] write error: ${e?.message}`));
+  }
+
+  private async msgStoreGet(sessionKey: string, id: string): Promise<any> {
+    const cached = this.msgMemCache.get<any>(`${sessionKey}:${id}`);
+    if (cached) return cached;
+    try {
+      const snap = await this.firebase.db()
+        .ref(`${this.MSG_STORE_PATH}/${sessionKey}/${id}`)
+        .get();
+      if (snap.exists()) {
+        const { msg } = snap.val();
+        this.msgMemCache.set(`${sessionKey}:${id}`, msg);
+        return msg;
+      }
+    } catch (e: any) {
+      this.logger.warn(`[msgStore] read error: ${e?.message}`);
+    }
+    return undefined;
+  }
+
+  /** Elimina entradas con más de 24 h. Se llama al arrancar cada sesión. */
+  private async msgStorePurge(sessionKey: string): Promise<void> {
+    try {
+      const cutoff = Date.now() - this.MSG_TTL_MS;
+      const ref = this.firebase.db().ref(`${this.MSG_STORE_PATH}/${sessionKey}`);
+      const snap = await ref.orderByChild('ts').endAt(cutoff).limitToFirst(200).get();
+      if (!snap.exists()) return;
+      const updates: Record<string, null> = {};
+      snap.forEach((child) => { updates[child.key!] = null; });
+      await ref.update(updates);
+      this.logger.debug(`[msgStore] purgados ${Object.keys(updates).length} msgs de '${sessionKey}'`);
+    } catch (e: any) {
+      this.logger.warn(`[msgStore] purge error: ${e?.message}`);
+    }
+  }
 
   constructor(private readonly firebase: FirebaseService) {}
 
@@ -327,10 +369,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       getMessage: async (key) => {
         const id = key.id;
         if (id) {
-          const stored = this.messageStore.get<any>(id);
+          const stored = await this.msgStoreGet(session.key, id);
           if (stored) return stored;
         }
-        // Fallback: desatasca mensajes de texto cuando no hay store.
         return { conversation: '' };
       },
       // Evita descargar el historial completo al reconectar (reduce pre-keys
@@ -347,17 +388,17 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
     session.sock.ev.on('creds.update', saveCreds);
 
-    // Guardar mensajes enviados en el store para que getMessage() los encuentre.
-    // Cubre el caso deviceSentMessage: WhatsApp pide el mensaje original para
-    // re-cifrarlo y enviarlo al teléfono vinculado. Sin esto, imágenes y docs
-    // quedan en "Waiting for this message" en el móvil del remitente.
+    // Guardar mensajes en Firebase (TTL 24h) para que getMessage() los encuentre
+    // tras un reinicio de Render.
     session.sock.ev.on('messages.upsert', ({ messages }) => {
       for (const msg of messages) {
         if (msg.key?.id && msg.message) {
-          this.messageStore.set(msg.key.id, msg.message);
+          this.msgStoreSave(session.key, msg.key.id, msg.message);
         }
       }
     });
+    // Limpiar mensajes viejos al arrancar la sesión (fire-and-forget).
+    this.msgStorePurge(session.key).catch(() => {});
 
     // Vinculación por CÓDIGO (pairing code): si se solicitó y la sesión aún no
     // está registrada, pedimos el código a WhatsApp en vez de usar el QR. Debe
