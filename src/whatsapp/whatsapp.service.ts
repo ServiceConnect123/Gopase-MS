@@ -92,21 +92,29 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async msgStoreGet(sessionKey: string, id: string): Promise<any> {
-    const cached = this.msgMemCache.get<any>(`${sessionKey}:${id}`);
-    if (cached) return cached;
+    // Solo memoria: no ir a Firebase en cada reintento de Signal (Bad MAC loop
+    // generaría decenas de reads/seg al RTDB y saturaria el event loop).
+    // Firebase se usa solo como respaldo al arrancar (precarga en onSessionReady).
+    return this.msgMemCache.get<any>(`${sessionKey}:${id}`) ?? undefined;
+  }
+
+  /** Precarga en memoria los mensajes recientes desde Firebase (se llama una sola vez al conectar). */
+  private async msgStorePrefill(sessionKey: string): Promise<void> {
     try {
+      const cutoff = Date.now() - this.MSG_TTL_MS;
       const snap = await this.firebase.db()
-        .ref(`${this.MSG_STORE_PATH}/${sessionKey}/${id}`)
-        .get();
-      if (snap.exists()) {
-        const { msg } = snap.val();
-        this.msgMemCache.set(`${sessionKey}:${id}`, msg);
-        return msg;
-      }
+        .ref(`${this.MSG_STORE_PATH}/${sessionKey}`)
+        .orderByChild('ts').startAt(cutoff).get();
+      if (!snap.exists()) return;
+      let count = 0;
+      snap.forEach((child) => {
+        const { msg } = child.val() ?? {};
+        if (msg) { this.msgMemCache.set(`${sessionKey}:${child.key}`, msg); count++; }
+      });
+      this.logger.debug(`[msgStore] precargados ${count} msgs de '${sessionKey}' en memoria`);
     } catch (e: any) {
-      this.logger.warn(`[msgStore] read error: ${e?.message}`);
+      this.logger.warn(`[msgStore] prefill error: ${e?.message}`);
     }
-    return undefined;
   }
 
   /** Elimina entradas con más de 24 h. Se llama al arrancar cada sesión. */
@@ -397,8 +405,11 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         }
       }
     });
-    // Limpiar mensajes viejos al arrancar la sesión (fire-and-forget).
-    this.msgStorePurge(session.key).catch(() => {});
+    // Al conectar: precargar mensajes recientes en memoria y limpiar los viejos (fire-and-forget).
+    Promise.all([
+      this.msgStorePrefill(session.key),
+      this.msgStorePurge(session.key),
+    ]).catch(() => {});
 
     // Vinculación por CÓDIGO (pairing code): si se solicitó y la sesión aún no
     // está registrada, pedimos el código a WhatsApp en vez de usar el QR. Debe
