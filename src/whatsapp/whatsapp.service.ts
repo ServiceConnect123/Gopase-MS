@@ -76,30 +76,47 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   /**
    * Store de mensajes respaldado en Firebase RTDB (nodo wsp_msg_store).
    * TTL = 24 h. Sobrevive reinicios de Render (cold start).
-   * También mantiene un cache en memoria (NodeCache) para lecturas rápidas.
+   * Usa un Map nativo (sin límite de keys) para evitar ECACHEFULL durante envíos masivos.
    */
-  private readonly msgMemCache = new NodeCache({ stdTTL: 86400, maxKeys: 2000 });
+  private readonly msgMap = new Map<string, { msg: any; ts: number }>();
   private readonly MSG_STORE_PATH = 'wsp_msg_store';
   private readonly MSG_TTL_MS = 86400_000; // 24 h
 
   private async msgStoreSave(sessionKey: string, id: string, message: any): Promise<void> {
-    try {
-      this.msgMemCache.set(`${sessionKey}:${id}`, message);
-    } catch {
-      // Cache lleno: ignorar silenciosamente (el mensaje igual se envía correctamente).
-    }
-    const ts = Date.now();
+    // Map nativo: sin límite, sin excepciones.
+    this.msgMap.set(`${sessionKey}:${id}`, { msg: message, ts: Date.now() });
+    // Persistir en Firebase (fire-and-forget).
     this.firebase.db()
       .ref(`${this.MSG_STORE_PATH}/${sessionKey}/${id}`)
-      .set({ msg: message, ts })
+      .set({ msg: message, ts: Date.now() })
       .catch((e) => this.logger.warn(`[msgStore] write error: ${e?.message}`));
   }
 
   private async msgStoreGet(sessionKey: string, id: string): Promise<any> {
-    // Solo memoria: no ir a Firebase en cada reintento de Signal (Bad MAC loop
-    // generaría decenas de reads/seg al RTDB y saturaria el event loop).
-    // Firebase se usa solo como respaldo al arrancar (precarga en onSessionReady).
-    return this.msgMemCache.get<any>(`${sessionKey}:${id}`) ?? undefined;
+    const entry = this.msgMap.get(`${sessionKey}:${id}`);
+    if (entry) return entry.msg;
+    return undefined;
+  }
+
+  /** Limpia entradas del Map con más de 24h y purga Firebase. Se llama al conectar. */
+  private async msgStorePurgeAll(sessionKey: string): Promise<void> {
+    // Limpiar Map en memoria.
+    const cutoff = Date.now() - this.MSG_TTL_MS;
+    for (const [key, val] of this.msgMap.entries()) {
+      if (val.ts < cutoff) this.msgMap.delete(key);
+    }
+    // Limpiar Firebase.
+    try {
+      const ref = this.firebase.db().ref(`${this.MSG_STORE_PATH}/${sessionKey}`);
+      const snap = await ref.orderByChild('ts').endAt(cutoff).limitToFirst(200).get();
+      if (!snap.exists()) return;
+      const updates: Record<string, null> = {};
+      snap.forEach((child) => { updates[child.key!] = null; });
+      await ref.update(updates);
+      this.logger.debug(`[msgStore] purgados ${Object.keys(updates).length} msgs de '${sessionKey}'`);
+    } catch (e: any) {
+      this.logger.warn(`[msgStore] purge error: ${e?.message}`);
+    }
   }
 
   /** Precarga en memoria los mensajes recientes desde Firebase (se llama una sola vez al conectar). */
@@ -112,8 +129,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       if (!snap.exists()) return;
       let count = 0;
       snap.forEach((child) => {
-        const { msg } = child.val() ?? {};
-        if (msg) { this.msgMemCache.set(`${sessionKey}:${child.key}`, msg); count++; }
+        const { msg, ts } = child.val() ?? {};
+        if (msg) { this.msgMap.set(`${sessionKey}:${child.key}`, { msg, ts: ts ?? Date.now() }); count++; }
       });
       this.logger.debug(`[msgStore] precargados ${count} msgs de '${sessionKey}' en memoria`);
     } catch (e: any) {
@@ -412,7 +429,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     // Al conectar: precargar mensajes recientes en memoria y limpiar los viejos (fire-and-forget).
     Promise.all([
       this.msgStorePrefill(session.key),
-      this.msgStorePurge(session.key),
+      this.msgStorePurgeAll(session.key),
     ]).catch(() => {});
 
     // Vinculación por CÓDIGO (pairing code): si se solicitó y la sesión aún no
