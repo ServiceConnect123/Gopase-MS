@@ -78,12 +78,16 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
    * TTL = 24 h. Sobrevive reinicios de Render (cold start).
    * También mantiene un cache en memoria (NodeCache) para lecturas rápidas.
    */
-  private readonly msgMemCache = new NodeCache({ stdTTL: 86400, maxKeys: 500 });
+  private readonly msgMemCache = new NodeCache({ stdTTL: 86400, maxKeys: 2000 });
   private readonly MSG_STORE_PATH = 'wsp_msg_store';
   private readonly MSG_TTL_MS = 86400_000; // 24 h
 
   private async msgStoreSave(sessionKey: string, id: string, message: any): Promise<void> {
-    this.msgMemCache.set(`${sessionKey}:${id}`, message);
+    try {
+      this.msgMemCache.set(`${sessionKey}:${id}`, message);
+    } catch {
+      // Cache lleno: ignorar silenciosamente (el mensaje igual se envía correctamente).
+    }
     const ts = Date.now();
     this.firebase.db()
       .ref(`${this.MSG_STORE_PATH}/${sessionKey}/${id}`)
