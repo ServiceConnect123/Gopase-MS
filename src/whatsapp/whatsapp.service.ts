@@ -83,13 +83,10 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private readonly MSG_TTL_MS = 86400_000; // 24 h
 
   private async msgStoreSave(sessionKey: string, id: string, message: any): Promise<void> {
-    // Map nativo: sin límite, sin excepciones.
+    // Solo memoria: persistir en Firebase genera demasiadas escrituras durante
+    // envíos masivos y satura el Free tier de Render. El Map sobrevive mientras
+    // el proceso esté vivo; tras un cold start los mensajes se pierden (aceptable).
     this.msgMap.set(`${sessionKey}:${id}`, { msg: message, ts: Date.now() });
-    // Persistir en Firebase (fire-and-forget).
-    this.firebase.db()
-      .ref(`${this.MSG_STORE_PATH}/${sessionKey}/${id}`)
-      .set({ msg: message, ts: Date.now() })
-      .catch((e) => this.logger.warn(`[msgStore] write error: ${e?.message}`));
   }
 
   private async msgStoreGet(sessionKey: string, id: string): Promise<any> {
