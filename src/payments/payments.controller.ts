@@ -38,6 +38,29 @@ export class PaymentsController {
    * datos reales de RTDB. Lo puede pedir el propietario (sus pagos), el admin
    * (pagos de su conjunto) o el superAdmin.
    */
+  @ApiOperation({ summary: 'Meses que un propietario puede pagar (hasta dic. del año siguiente)' })
+  @ApiQuery({ name: 'usuario', required: true })
+  @ApiQuery({ name: 'fondo', required: false, description: 'Tipo de recaudo (por defecto Administración)' })
+  @Get('payable-months')
+  @UseGuards(WspAccessGuard)
+  @WspRoles('admin', 'superadmin', 'propietario')
+  async payableMonths(@Req() req: any, @Query('usuario') usuario?: string, @Query('fondo') fondo?: string) {
+    const u = String(usuario || '').trim();
+    if (!u) throw new BadRequestException('Falta el usuario.');
+    if (!esSuperAdmin(req)) {
+      if (String(req.user?.rol || '').toLowerCase() === 'propietario') {
+        if (String(req.user?.sub || '').toLowerCase() !== u.toLowerCase()) {
+          throw new ForbiddenException('Solo puedes consultar tus propios meses.');
+        }
+      } else {
+        const usuarios = (await this.firebase.liveVal<Record<string, any>>('mirror/usuarios')) || {};
+        const conj = String(usuarios[u.replace(/[.#$/\[\]]/g, '_')]?.conjunto || '');
+        await assertConjuntoPermitido(req, this.firebase, conj);
+      }
+    }
+    return { success: true, data: await this.payments.getPayableMonths(u, fondo || undefined) };
+  }
+
   @ApiOperation({ summary: 'Recibo de pago (PNG base64) por ids de pago' })
   @ApiQuery({ name: 'ids', required: true, description: 'Ids separados por coma' })
   @Get('receipt')
@@ -331,9 +354,11 @@ export class PaymentsController {
       conjuntoId?: string;
       concepto?: string;
       tipoRecaudo?: string;
+      periodos?: Array<{ mes: string; anio: number }>;
     },
   ) {
     return this.payments.createPayments({
+      periodos: Array.isArray(body.periodos) ? body.periodos : undefined,
       usuario: body.usuario,
       montoPerMonth: body.montoPerMonth,
       meses: body.meses || [],
@@ -464,6 +489,8 @@ export class PaymentsController {
       monto?: number;
       concepto?: string;
       preferredMethod?: string;
+      periodos?: Array<{ mes: string; anio: number }>;
+      anio?: number;
     },
   ) {
     return this.payments.createPreference(body);
