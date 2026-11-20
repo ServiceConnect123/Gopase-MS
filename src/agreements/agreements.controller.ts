@@ -4,8 +4,6 @@ import { AgreementsService } from './agreements.service';
 
 /**
  * CRUD de acuerdos contra Firebase (RTDB). Reemplaza Sheets.
- * Al crear, devuelve las suscripciones push de los afectados (leídas de la hoja
- * citofonia) para que el frontend envíe las notificaciones vía /api/send-push.
  */
 @ApiTags('agreements')
 @Controller('agreements')

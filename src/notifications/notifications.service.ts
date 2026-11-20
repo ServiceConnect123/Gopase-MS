@@ -10,6 +10,12 @@ import {
 import { generateReceiptPng, ReceiptData } from './receipt-image.generator';
 import { WspQueueService } from './wsp-queue.service';
 
+/** Zona horaria de los conjuntos (Colombia, sin horario de verano). */
+const ZONA_HORARIA = 'America/Bogota';
+/** Horario en que se avisa al admin de pagos por aprobar (hora local). */
+const HORA_INICIO = 8;
+const HORA_FIN = 20;
+
 @Injectable()
 export class NotificationsService implements OnModuleInit {
   private readonly logger = new Logger(NotificationsService.name);
@@ -87,13 +93,25 @@ export class NotificationsService implements OnModuleInit {
     setTimeout(tick, 3000);
   }
 
-  /** Fecha local YYYY-MM-DD para el control diario. */
-  private today(): string {
-    const now = new Date();
-    const y = now.getFullYear();
-    const m = String(now.getMonth() + 1).padStart(2, '0');
-    const d = String(now.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
+  /**
+   * Fecha YYYY-MM-DD en hora de Colombia para el control diario. Antes usaba la
+   * hora del servidor (UTC en Render) y el "día" cambiaba a las 7 p. m.
+   */
+  private today(now = new Date()): string {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: ZONA_HORARIA,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(now);
+  }
+
+  /** ¿Estamos dentro del horario de envío (8:00–19:59 hora de Colombia)? */
+  private enHorarioDeEnvio(now = new Date()): boolean {
+    const hora = Number(
+      new Intl.DateTimeFormat('en-US', { timeZone: ZONA_HORARIA, hour: '2-digit', hourCycle: 'h23' }).format(now),
+    );
+    return hora >= HORA_INICIO && hora < HORA_FIN;
   }
 
   private buildMessage(conjunto: ConjuntoConfig, pagos: PendingPayment[]): string {
@@ -116,6 +134,12 @@ export class NotificationsService implements OnModuleInit {
   ): Promise<void> {
     if (this.running) {
       this.logger.warn('Ejecución omitida: ya hay un chequeo en curso.');
+      return;
+    }
+    // Fuera de horario no se avisa (ni se registra): el primer ciclo después de
+    // las 8 a. m. envía el aviso pendiente. El disparo manual lo ignora.
+    if (trigger !== 'manual' && !this.enHorarioDeEnvio()) {
+      this.logger.debug(`[${trigger}] Fuera del horario de envío; se omite el chequeo.`);
       return;
     }
     this.running = true;

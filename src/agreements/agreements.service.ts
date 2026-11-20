@@ -1,6 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
-import { SheetsService } from '../sheets/sheets.service';
 
 /**
  * CRUD de acuerdos de pago contra Firebase (RTDB mirror/acuerdos).
@@ -10,11 +9,10 @@ import { SheetsService } from '../sheets/sheets.service';
  * original (id, usuario, tipo, descripcion, monto, fechaInicio, fechaFin,
  * estado, aplicaA, createdBy, createdAt) para no romper el sync heredado.
  *
- * Al crear un acuerdo, este servicio resuelve las SUSCRIPCIONES push de los
- * usuarios afectadas leyéndolas de la hoja 'citofonia' (dato_5==='subscription',
- * dato_3 = payload push). El sync NO espeja ese payload por seguridad, así que
- * se lee directamente de Sheets. El envío del push lo sigue haciendo el frontend
- * vía /api/send-push (Vercel), al que se le pasan estas suscripciones.
+ * Antes la respuesta de `create` incluía las suscripciones push (endpoint y
+ * llaves) de los usuarios afectados para que el navegador las enviara por
+ * /api/send-push. Eso exponía credenciales de otros usuarios al cliente y el
+ * push no estaba conectado a ninguna pantalla: se eliminó.
  */
 const MIRROR_ACUERDOS = 'mirror/acuerdos';
 
@@ -22,10 +20,7 @@ const MIRROR_ACUERDOS = 'mirror/acuerdos';
 export class AgreementsService {
   private readonly logger = new Logger(AgreementsService.name);
 
-  constructor(
-    private readonly firebase: FirebaseService,
-    private readonly sheets: SheetsService,
-  ) {}
+  constructor(private readonly firebase: FirebaseService) {}
 
   private safeKey(raw: unknown): string {
     return String(raw ?? '').trim().replace(/[.#$/\[\]]/g, '_');
@@ -116,42 +111,12 @@ export class AgreementsService {
     });
   }
 
-  /**
-   * Lee las suscripciones push de la hoja 'citofonia' para los afectados.
-   * @param aplicaA 'todos' o un username.
-   * Devuelve los payloads de suscripción (objeto ya parseado) listos para push.
-   */
-  async getPushSubscriptions(aplicaA: string): Promise<any[]> {
-    try {
-      const rows = await this.sheets.read('citofonia');
-      const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
-      const target = norm(aplicaA);
-      const subs: any[] = [];
-      for (const r of rows) {
-        if (norm((r as any).dato_5) !== 'subscription') continue;
-        if (target !== 'todos' && norm((r as any).dato_2) !== target) continue;
-        try {
-          const payload = JSON.parse((r as any).dato_3 || '{}');
-          if (payload && payload.endpoint) subs.push(payload);
-        } catch {
-          // payload inválido: se ignora
-        }
-      }
-      return subs;
-    } catch (e: any) {
-      this.logger.warn(`getPushSubscriptions(${aplicaA}) falló: ${e?.message}`);
-      return [];
-    }
-  }
-
-  async create(dto: any): Promise<{ success: boolean; message?: string; id?: string; subscriptions?: any[] }> {
+  async create(dto: any): Promise<{ success: boolean; message?: string; id?: string }> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
     const id = String(dto.id || `agr_${Date.now()}`);
     try {
       await this.firebase.db().ref(`${MIRROR_ACUERDOS}/${this.safeKey(id)}`).set(this.buildRecord({ ...dto, id }));
-      // Resolver suscripciones push de los afectados para que el frontend las envíe.
-      const subscriptions = await this.getPushSubscriptions(String(dto.aplicaA || dto.usuario || 'todos'));
-      return { success: true, id, message: 'Acuerdo creado.', subscriptions };
+      return { success: true, id, message: 'Acuerdo creado.' };
     } catch (err: any) {
       this.logger.error(`[agreements] create falló: ${err?.message}`);
       return { success: false, message: err?.message || 'No se pudo crear el acuerdo.' };
