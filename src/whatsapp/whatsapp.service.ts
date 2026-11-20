@@ -7,6 +7,9 @@ import {
 import makeWASocket, {
   DisconnectReason,
   WASocket,
+  isJidBroadcast,
+  isJidGroup,
+  isJidNewsletter,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import * as qrcodeTerminal from 'qrcode-terminal';
@@ -20,6 +23,35 @@ import {
   useFirebaseAuthState,
   WSP_SESSION_ROOT,
 } from './firebase-auth-state';
+
+/**
+ * libsignal (dependencia de Baileys) imprime con console.error un stack completo
+ * por cada mensaje entrante que no logra descifrar ("Bad MAC"). Son esperables
+ * (WhatsApp reintenta y renegocia la sesión) pero inundan los logs de Render y
+ * escribir a stdout de forma síncrona también cuesta. Se descartan y se resumen
+ * en una sola línea por minuto.
+ */
+let signalNoiseCount = 0;
+const originalConsoleError = console.error.bind(console);
+console.error = (...args: any[]) => {
+  const first = typeof args[0] === 'string' ? args[0] : '';
+  if (
+    first.startsWith('Session error:') ||
+    first.startsWith('Failed to decrypt message with any known session')
+  ) {
+    signalNoiseCount++;
+    return;
+  }
+  originalConsoleError(...args);
+};
+setInterval(() => {
+  if (signalNoiseCount > 0) {
+    new Logger('libsignal').warn(
+      `${signalNoiseCount} mensajes entrantes no se pudieron descifrar (Bad MAC) en el último minuto.`,
+    );
+    signalNoiseCount = 0;
+  }
+}, 60_000).unref();
 
 /**
  * Representa una sesión de WhatsApp vinculada (una por conjunto, más una
@@ -106,12 +138,20 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private readonly msgMap = new Map<string, { msg: any; ts: number }>();
   private readonly MSG_STORE_PATH = 'wsp_msg_store';
   private readonly MSG_TTL_MS = 86400_000; // 24 h
+  /** Tope de mensajes en memoria (los más viejos se descartan primero). */
+  private readonly MSG_MAX = 5000;
 
   private async msgStoreSave(sessionKey: string, id: string, message: any): Promise<void> {
     // Solo memoria: persistir en Firebase genera demasiadas escrituras durante
     // envíos masivos y satura el Free tier de Render. El Map sobrevive mientras
     // el proceso esté vivo; tras un cold start los mensajes se pierden (aceptable).
     this.msgMap.set(`${sessionKey}:${id}`, { msg: message, ts: Date.now() });
+    // Map conserva orden de inserción: el primero es el más viejo.
+    while (this.msgMap.size > this.MSG_MAX) {
+      const oldest = this.msgMap.keys().next().value;
+      if (oldest === undefined) break;
+      this.msgMap.delete(oldest);
+    }
   }
 
   private async msgStoreGet(sessionKey: string, id: string): Promise<any> {
@@ -502,6 +542,15 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       msgRetryCounterCache: this.msgRetryCounterCache,
       // No marcar el número como "en línea" al conectar (reduce firma detectable).
       markOnlineOnConnect: false,
+      // Este servicio SOLO envía. Sin esto, Baileys descifra todo lo que llega
+      // al número vinculado (grupos, estados, canales): cada mensaje cuesta CPU,
+      // dispara "Bad MAC" cuando la sender-key no coincide, provoca reintentos y
+      // reescrituras de la sesión en RTDB, y bloquea el event loop que también
+      // atiende la API (la app "se queda pensando").
+      shouldIgnoreJid: (jid) =>
+        !!(isJidGroup(jid) || isJidBroadcast(jid) || isJidNewsletter(jid)),
+      // Nunca procesar historial (también genera descifrado y escrituras).
+      shouldSyncHistoryMessage: () => false,
     });
     session.connecting = false;
 
@@ -511,7 +560,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     // tras un reinicio de Render.
     session.sock.ev.on('messages.upsert', ({ messages }) => {
       for (const msg of messages) {
-        if (msg.key?.id && msg.message) {
+        // Solo los mensajes PROPIOS: getMessage() los pide para reenviar la
+        // copia al teléfono principal. Guardar los entrantes solo llenaba RAM.
+        if (msg.key?.fromMe && msg.key?.id && msg.message) {
           this.msgStoreSave(session.key, msg.key.id, msg.message);
         }
       }
