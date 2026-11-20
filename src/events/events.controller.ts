@@ -1,18 +1,28 @@
 import { Body, Controller, Delete, Get, Param, Post, Put, Query, Req } from '@nestjs/common';
 import { ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { EventsService } from './events.service';
+import { FirebaseService } from '../firebase/firebase.service';
+import { conjuntoPropioDelRequest } from '../auth/conjunto-scope';
 
 /** CRUD de eventos contra Firebase (RTDB). Reemplaza Sheets. */
 @ApiTags('events')
 @Controller('events')
 export class EventsController {
-  constructor(private readonly events: EventsService) {}
+  constructor(
+    private readonly events: EventsService,
+    private readonly firebase: FirebaseService,
+  ) {}
 
   @ApiOperation({ summary: 'Lista de eventos (opcionalmente por conjunto/nombre)' })
   @ApiQuery({ name: 'conjunto', required: false })
   @Get()
-  async list(@Query('conjunto') conjunto?: string) {
-    const data = await this.events.list(conjunto || '');
+  async list(@Req() req: any, @Query('conjunto') conjunto?: string) {
+    // Sin ?conjunto=, un usuario que no es superAdmin solo ve su propio conjunto
+    // (antes recibía los de toda la plataforma). Con ?conjunto=, el
+    // ConjuntoMembershipGuard ya validó que le pertenezca.
+    const propio = await conjuntoPropioDelRequest(req, this.firebase);
+    if (!conjunto && propio === '') return { success: true, data: [] };
+    const data = await this.events.list(conjunto || propio || '');
     return { success: true, data };
   }
 

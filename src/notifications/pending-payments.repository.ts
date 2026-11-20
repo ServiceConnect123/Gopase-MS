@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { SheetsService } from '../sheets/sheets.service';
+import { FirebaseService } from '../firebase/firebase.service';
 
 export interface ConjuntoConfig {
   nombre: string;
@@ -19,64 +19,58 @@ export interface PendingPayment {
   estado: string;
 }
 
+/** Nodo RTDB del control diario: wsp_envios/<YYYY-MM-DD>/<conjunto> = {...}. */
+const ENVIOS_ROOT = 'wsp_envios';
+
 /**
- * Acceso a datos para el flujo de pagos pendientes.
+ * Acceso a datos para el aviso diario de "pagos pendientes por aprobar".
  *
- * Mapeo de columnas conocido (según el Apps Script y goPase):
- *  - usuarios (Hoja 1): dato_1=usuario, dato_2=email, dato_3=password,
- *      dato_4=nombre, dato_5=rol, dato_6=docType, dato_7=docNum,
- *      dato_8=phone, dato_9=conjunto
- *  - pagos (Hoja 2): dato_1=id, dato_2=usuario, dato_3=concepto,
- *      dato_4=valor, dato_5=fecha, dato_6=estado, dato_7=referencia
- *  - propiedades (Hoja 5): dato_1=id, dato_2=nombre, dato_3=direccion,
- *      dato_4=tipo, dato_5=descripcion, dato_6=mercadoPagoKey, dato_7=cuotaMonto,
- *      dato_8=moneda, dato_9=llaveBreB, dato_10=geminiKey, dato_11=driveFolderId,
- *      dato_12=adminUsuario, dato_13=adminNombre, dato_14=adminWhatsapp,
- *      dato_15=notifActivo   <-- config del admin de notificaciones WhatsApp
- *  - wsp_envios (control diario): dato_1=conjunto, dato_2=fecha(YYYY-MM-DD),
- *      dato_3=cantidad_pagos, dato_4=estado, dato_5=timestamp
+ * Lee de Firebase RTDB (mirror/*) usando la caché en vivo de FirebaseService.
+ * Antes leía de Google Sheets, pero los pagos ya se crean y aprueban en RTDB y
+ * nada actualiza la hoja: los pagos nuevos nunca se avisaban y los antiguos que
+ * quedaron "Pendiente" en la hoja se podían avisar a diario aunque ya
+ * estuvieran aprobados.
+ *
+ * Campos usados:
+ *  - mirror/conjuntos: nombre, adminNombre, adminWhatsapp, notifActivo
+ *  - mirror/usuarios:  usuario, conjunto
+ *  - mirror/pagos:     id, usuario, concepto, valor, fecha, estado
+ *
+ * Las claves de conjunto de los mapas devueltos van en minúsculas.
  */
 @Injectable()
 export class PendingPaymentsRepository {
   private readonly logger = new Logger(PendingPaymentsRepository.name);
   private readonly pendingStatus: string;
 
-  static readonly SHEET_PROPIEDADES = 'propiedades';
-  static readonly SHEET_ENVIOS = 'wsp_envios';
-
   constructor(
-    private readonly sheets: SheetsService,
+    private readonly firebase: FirebaseService,
     private readonly config: ConfigService,
   ) {
-    this.pendingStatus = this.config
-      .get<string>('PENDING_STATUS', 'Pendiente')
-      .toLowerCase();
+    this.pendingStatus = this.config.get<string>('PENDING_STATUS', 'Pendiente').toLowerCase();
   }
 
   private str(v: any): string {
     return v == null ? '' : v.toString().trim();
   }
 
-  /**
-   * Lee la hoja de propiedades (conjuntos) y devuelve solo los que tienen
-   * admin de WhatsApp configurado y notificaciones activas.
-   */
+  private safeKey(raw: string): string {
+    return String(raw ?? '').trim().toLowerCase().replace(/[.#$/\[\]]/g, '_') || '_';
+  }
+
+  /** Conjuntos con admin de WhatsApp configurado y notificaciones activas. */
   async getConjuntos(): Promise<ConjuntoConfig[]> {
-    const rows = await this.sheets.read(
-      PendingPaymentsRepository.SHEET_PROPIEDADES,
-    );
+    const rows = await this.firebase.liveValues<any>('mirror/conjuntos');
     const defaultPath = this.config.get<string>('APP_APPROVAL_PATH', '/app/payments');
     return rows
       .map((r) => {
-        // notifActivo (dato_15): si viene vacío, se asume activo.
-        const notifRaw = this.str(r.dato_15).toLowerCase();
-        const activo =
-          notifRaw === '' ||
-          ['true', '1', 'si', 'sí', 'activo'].includes(notifRaw);
+        // notifActivo: si viene vacío, se asume activo.
+        const notifRaw = this.str(r?.notifActivo).toLowerCase();
+        const activo = notifRaw === '' || ['true', '1', 'si', 'sí', 'activo'].includes(notifRaw);
         return {
-          nombre: this.str(r.dato_2),
-          adminNombre: this.str(r.dato_13),
-          adminWhatsapp: this.str(r.dato_14),
+          nombre: this.str(r?.nombre),
+          adminNombre: this.str(r?.adminNombre),
+          adminWhatsapp: this.str(r?.adminWhatsapp),
           activo,
           rutaAprobacion: defaultPath,
         };
@@ -84,85 +78,59 @@ export class PendingPaymentsRepository {
       .filter((c) => c.nombre && c.adminWhatsapp && c.activo);
   }
 
-  /**
-   * Construye un mapa usuario(username) -> conjunto a partir de la hoja usuarios.
-   */
-  async getUserToConjunto(): Promise<Map<string, string>> {
-    const rows = await this.sheets.read('usuarios');
-    const map = new Map<string, string>();
-    for (const r of rows) {
-      const usuario = this.str(r.dato_1).toLowerCase();
-      const conjunto = this.str(r.dato_9);
-      if (usuario && conjunto) map.set(usuario, conjunto);
-    }
-    return map;
-  }
-
-  /** Lee los pagos en estado pendiente (dato_6). */
-  async getPendingPayments(): Promise<PendingPayment[]> {
-    const rows = await this.sheets.read('pagos');
-    return rows
-      .filter((r) => this.str(r.dato_6).toLowerCase() === this.pendingStatus)
-      .map((r) => ({
-        id: this.str(r.dato_1),
-        usuario: this.str(r.dato_2),
-        concepto: this.str(r.dato_3),
-        valor: this.str(r.dato_4),
-        fecha: this.str(r.dato_5),
-        estado: this.str(r.dato_6),
-      }));
-  }
-
-  /**
-   * Agrupa los pagos pendientes por conjunto usando el mapa usuario->conjunto.
-   */
+  /** Pagos pendientes agrupados por conjunto (clave en minúsculas). */
   async getPendingByConjunto(): Promise<Map<string, PendingPayment[]>> {
-    const [pending, userMap] = await Promise.all([
-      this.getPendingPayments(),
-      this.getUserToConjunto(),
+    const [pagos, usuarios] = await Promise.all([
+      this.firebase.liveValues<any>('mirror/pagos'),
+      this.firebase.liveValues<any>('mirror/usuarios'),
     ]);
+    const conjuntoDe = new Map<string, string>();
+    for (const u of usuarios) {
+      const usuario = this.str(u?.usuario).toLowerCase();
+      const conjunto = this.str(u?.conjunto).toLowerCase();
+      if (usuario && conjunto) conjuntoDe.set(usuario, conjunto);
+    }
+
     const grouped = new Map<string, PendingPayment[]>();
-    for (const p of pending) {
-      const conjunto = userMap.get(p.usuario.toLowerCase());
+    for (const p of pagos) {
+      if (this.str(p?.estado).toLowerCase() !== this.pendingStatus) continue;
+      const usuario = this.str(p?.usuario);
+      const conjunto = conjuntoDe.get(usuario.toLowerCase());
       if (!conjunto) {
-        this.logger.debug(
-          `Pago ${p.id} de usuario '${p.usuario}' sin conjunto asociado. Se omite.`,
-        );
+        this.logger.debug(`Pago ${p?.id} de usuario '${usuario}' sin conjunto asociado. Se omite.`);
         continue;
       }
-      if (!grouped.has(conjunto)) grouped.set(conjunto, []);
-      grouped.get(conjunto)!.push(p);
+      const arr = grouped.get(conjunto) || [];
+      arr.push({
+        id: this.str(p?.id),
+        usuario,
+        concepto: this.str(p?.concepto),
+        valor: this.str(p?.valor),
+        fecha: this.str(p?.fecha),
+        estado: this.str(p?.estado),
+      });
+      grouped.set(conjunto, arr);
     }
     return grouped;
   }
 
-  /** Devuelve el set de "conjunto|fecha" que ya fueron notificados. */
+  /** Conjuntos (en minúsculas) ya notificados en `fecha` (YYYY-MM-DD). */
   async getEnviosDelDia(fecha: string): Promise<Set<string>> {
-    const rows = await this.sheets.read(PendingPaymentsRepository.SHEET_ENVIOS);
+    const snap = await this.firebase.db().ref(`${ENVIOS_ROOT}/${fecha}`).get();
     const set = new Set<string>();
-    for (const r of rows) {
-      const conjunto = this.str(r.dato_1);
-      const f = this.str(r.dato_2);
-      const estado = this.str(r.dato_4).toLowerCase();
-      if (f === fecha && estado === 'enviado') {
-        set.add(conjunto.toLowerCase());
+    if (snap.exists()) {
+      for (const v of Object.values<any>(snap.val() || {})) {
+        if (v?.conjunto) set.add(String(v.conjunto).toLowerCase());
       }
     }
     return set;
   }
 
-  /** Registra un envío en la hoja de control. */
-  async registrarEnvio(
-    conjunto: string,
-    fecha: string,
-    cantidad: number,
-  ): Promise<void> {
-    await this.sheets.create(PendingPaymentsRepository.SHEET_ENVIOS, [
-      conjunto,
-      fecha,
-      cantidad,
-      'enviado',
-      new Date().toISOString(),
-    ]);
+  /** Registra que el conjunto fue notificado hoy (un aviso por conjunto y día). */
+  async registrarEnvio(conjunto: string, fecha: string, cantidad: number): Promise<void> {
+    await this.firebase
+      .db()
+      .ref(`${ENVIOS_ROOT}/${fecha}/${this.safeKey(conjunto)}`)
+      .set({ conjunto: conjunto.toLowerCase(), cantidad, at: new Date().toISOString() });
   }
 }

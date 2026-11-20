@@ -1,9 +1,11 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Put, Query, Req } from '@nestjs/common';
 import { ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { UsersService, UserDTO } from './users.service';
 import { UsersImportService } from './users-import.service';
 import { UsersInviteService } from './users-invite.service';
 import { Public } from '../auth/public.decorator';
+import { FirebaseService } from '../firebase/firebase.service';
+import { conjuntoPropioDelRequest } from '../auth/conjunto-scope';
 
 /**
  * CRUD de usuarios contra Firebase (RTDB + Auth). Reemplaza las llamadas del
@@ -16,6 +18,7 @@ export class UsersController {
     private readonly users: UsersService,
     private readonly usersImport: UsersImportService,
     private readonly usersInvite: UsersInviteService,
+    private readonly firebase: FirebaseService,
   ) {}
 
   // ==========================================================================
@@ -77,8 +80,13 @@ export class UsersController {
   @ApiOperation({ summary: 'Lista de usuarios (opcionalmente filtrada por conjunto)' })
   @ApiQuery({ name: 'conjunto', required: false })
   @Get()
-  async list(@Query('conjunto') conjunto?: string) {
-    const data = await this.users.list(conjunto || '');
+  async list(@Req() req: any, @Query('conjunto') conjunto?: string) {
+    // Sin ?conjunto=, un usuario que no es superAdmin solo ve su propio conjunto
+    // (antes recibía los de toda la plataforma). Con ?conjunto=, el
+    // ConjuntoMembershipGuard ya validó que le pertenezca.
+    const propio = await conjuntoPropioDelRequest(req, this.firebase);
+    if (!conjunto && propio === '') return { success: true, data: [] };
+    const data = await this.users.list(conjunto || propio || '');
     return { success: true, data };
   }
 
