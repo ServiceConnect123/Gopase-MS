@@ -5,7 +5,8 @@ import { PaymentsService } from '../payments/payments.service';
 /**
  * Lógica del dashboard de la pantalla Home, movida del frontend al backend.
  *
- * Lee usuarios, pagos y reportes de Sheets y devuelve la data YA CALCULADA:
+ * Lee usuarios y pagos de Firebase RTDB y reportes (vigilante) de Sheets, y
+ * devuelve la data YA CALCULADA:
  *   - admin/superAdmin: lista de usuarios con su estado de pago (Al día/Pendiente)
  *     y el monto del mes seleccionado.
  *   - propietario: estado de pago por mes (ownerMonths) del propio usuario.
@@ -70,28 +71,51 @@ export class HomeService {
     return null;
   }
 
+  // Usuarios y pagos se leen de Firebase RTDB (mirror/*), con campos con nombre.
   private mapUsuario(u: any): DashboardUser {
     return {
-      username: String(u.dato_1 ?? ''),
-      name: String(u.dato_4 ?? ''),
-      role: String(u.dato_5 ?? ''),
-      complex: String(u.dato_9 ?? ''),
-      phone: String(u.dato_8 ?? ''),
-      placa1: String(u.dato_11 ?? ''),
-      placa2: String(u.dato_12 ?? ''),
-      fechaIngreso: String(u.dato_13 ?? ''),
+      username: String(u.usuario ?? ''),
+      name: String(u.nombre ?? ''),
+      role: String(u.rol ?? ''),
+      complex: String(u.conjunto ?? ''),
+      phone: String(u.phone ?? ''),
+      placa1: String(u.placa1 ?? ''),
+      placa2: String(u.placa2 ?? ''),
+      fechaIngreso: String(u.fechaIngreso ?? ''),
     };
   }
 
   private mapPago(p: any) {
     return {
-      usuario: String(p.dato_2 ?? ''),
-      estado: String(p.dato_6 ?? ''),
-      concepto: String(p.dato_3 ?? ''),
-      valor: p.dato_4 ?? 0,
-      fecha: String(p.dato_5 ?? '').split('T')[0],
-      referencia: String(p.dato_7 ?? ''),
+      usuario: String(p.usuario ?? ''),
+      estado: String(p.estado ?? ''),
+      concepto: String(p.concepto ?? ''),
+      valor: p.valor ?? 0,
+      fecha: String(p.fecha ?? '').split('T')[0],
+      referencia: String(p.referencia ?? ''),
     };
+  }
+
+  /**
+   * Lee 'reportes' de Sheets (vigilante en turno) con un tope de espera. Apps
+   * Script puede tardar decenas de segundos (timeout 40s x reintentos); como el
+   * vigilante es un dato secundario, no debe bloquear todo el dashboard.
+   */
+  private async readReportesConTope(maxMs = 8000): Promise<any[]> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.sheets.read('reportes'),
+        new Promise<any[]>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`reportes > ${maxMs}ms`)), maxMs);
+        }),
+      ]);
+    } catch (e: any) {
+      this.logger.warn(`Vigilante en turno no disponible: ${e?.message}`);
+      return [];
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /**
@@ -212,14 +236,19 @@ export class HomeService {
     const esSuperAdmin = role === 'superAdmin';
     const scopeGlobal = esSuperAdmin && params.verTodos !== false;
 
-    const [userRows, pagoRows, reporteRows] = await Promise.all([
-      this.sheets.read('usuarios'),
-      this.sheets.read('pagos'),
-      this.sheets.read('reportes'),
+    // Todas las lecturas en paralelo. Usuarios, pagos y el estado "al día" salen
+    // de Firebase (rápido y consistente con Pagos); solo 'reportes' sigue en
+    // Sheets. El propietario no necesita pagos ni el reporte global.
+    const esPropietario = role === 'propietario';
+    const [userDocs, pagoDocs, reporteRows, reporte] = await Promise.all([
+      this.payments.readCollection<any>('usuarios'),
+      esPropietario ? Promise.resolve([] as any[]) : this.payments.readCollection<any>('pagos'),
+      this.readReportesConTope(),
+      esPropietario ? Promise.resolve(null) : this.payments.getAlDiaReport(complex || '', scopeGlobal),
     ]);
 
-    const allUsers = userRows.map((u) => this.mapUsuario(u));
-    const pagos = pagoRows.map((p) => this.mapPago(p));
+    const allUsers = userDocs.map((u) => this.mapUsuario(u));
+    const pagos = pagoDocs.map((p) => this.mapPago(p));
 
     const vigilanteEnTurno = this.resolveVigilanteEnTurno(reporteRows, allUsers);
 
@@ -253,7 +282,7 @@ export class HomeService {
     // Home y el reporte coinciden siempre y reflejan los pagos reales.
     // En modo global pasa superAdmin=true (ignora conjunto); con conjunto
     // elegido, superAdmin=false para filtrar por ese conjunto (como admin).
-    const reporte = await this.payments.getAlDiaReport(complex || '', scopeGlobal);
+    if (!reporte) throw new Error('Reporte al día no disponible');
 
     // Mapa username(normalizado) -> alDia del reporte.
     const normU = (s: string) => String(s || '').trim().toLowerCase();
@@ -285,10 +314,7 @@ export class HomeService {
     });
 
     const counts = {
-      // Usar reporte.propietarios.length como fuente de verdad del total:
-      // ese reporte lee de Firebase RTDB directamente, igual que la pantalla
-      // de Pagos. filteredUsers viene del espejo de Sheets que puede estar
-      // desfasado y no reflejar el número real de propietarios del conjunto.
+      // Total y estados salen del mismo reporte (Firebase RTDB, igual que Pagos).
       total: reporte.propietarios.length,
       // Mismos orígenes para los tres números, así siempre suman el total.
       alDia: reporte.totalAlDia,
