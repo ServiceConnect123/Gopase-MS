@@ -16,6 +16,8 @@ import { NotificationsService } from './notifications.service';
 import { WhatsappService } from '../whatsapp/whatsapp.service';
 import { Public } from '../auth/public.decorator';
 import { FirebaseService } from '../firebase/firebase.service';
+import { PaymentsService } from '../payments/payments.service';
+import { BadRequestException } from '@nestjs/common';
 import {
   assertConjuntoPermitido,
   esSuperAdmin,
@@ -82,8 +84,18 @@ class ReceiptDataDto {
 }
 
 class SendReceiptDto {
-  @ApiProperty({ example: '573001112233' })
+  @ApiPropertyOptional({
+    example: '573001112233',
+    description: 'Teléfono destino. Con pagoIds es opcional: se usa el del propietario.',
+  })
   telefono: string;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'Ids de los pagos (del mismo propietario) para generar UN recibo en el servidor con los datos reales. Recomendado sobre `receipt`.',
+  })
+  pagoIds?: string[];
 
   @ApiPropertyOptional()
   caption?: string;
@@ -136,6 +148,7 @@ export class NotificationsController {
     private readonly whatsapp: WhatsappService,
     private readonly firebase: FirebaseService,
     private readonly config: ConfigService,
+    private readonly payments: PaymentsService,
   ) {}
 
   /**
@@ -258,6 +271,25 @@ export class NotificationsController {
   @Post('send-receipt')
   @UseGuards(WspAccessGuard)
   async sendReceipt(@Req() req: any, @Body() body: SendReceiptDto) {
+    // Recibo armado en el servidor desde los pagos reales (un solo recibo para
+    // varios meses). El conjunto y el teléfono salen de los datos, no del cliente.
+    if (Array.isArray(body?.pagoIds) && body.pagoIds.length > 0) {
+      const r = await this.payments.buildReceiptData(body.pagoIds);
+      if (!r.ok) throw new BadRequestException(r.message);
+      await assertConjuntoPermitido(req, this.firebase, r.conjunto);
+      let telefono = String(body.telefono || '').trim();
+      if (!telefono) {
+        const usuarios = (await this.firebase.liveVal<Record<string, any>>('mirror/usuarios')) || {};
+        const key = r.usuario.replace(/[.#$/\[\]]/g, '_');
+        telefono = String(usuarios[key]?.phone ?? '').trim();
+      }
+      return this.notifications.sendReceipt({
+        telefono,
+        caption: body.caption,
+        receipt: r.data,
+        conjunto: r.conjunto,
+      });
+    }
     // Sin conjunto = sesión GLOBAL de goPase. Un admin solo puede usarla para
     // enviar el comprobante de su suscripción a un superAdmin.
     const global = !String(body?.conjunto ?? '').trim();

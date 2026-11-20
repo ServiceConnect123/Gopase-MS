@@ -1,4 +1,20 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, Query } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  ForbiddenException,
+  Get,
+  Param,
+  Post,
+  Put,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
+import { FirebaseService } from '../firebase/firebase.service';
+import { assertConjuntoPermitido, esSuperAdmin, WspAccessGuard, WspRoles } from '../auth/wsp-access.guard';
+import { generateReceiptPng } from '../notifications/receipt-image.generator';
 import { ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { PaymentsService } from './payments.service';
 import { PaymentsImportService } from './payments-import.service';
@@ -13,7 +29,60 @@ export class PaymentsController {
   constructor(
     private readonly payments: PaymentsService,
     private readonly paymentsImport: PaymentsImportService,
+    private readonly firebase: FirebaseService,
   ) {}
+
+  /**
+   * Recibo de pago (PNG en base64) de uno o varios pagos del mismo propietario.
+   * Es el MISMO recibo que se envía por WhatsApp. Se arma en el servidor con los
+   * datos reales de RTDB. Lo puede pedir el propietario (sus pagos), el admin
+   * (pagos de su conjunto) o el superAdmin.
+   */
+  @ApiOperation({ summary: 'Meses que un propietario puede pagar (hasta dic. del año siguiente)' })
+  @ApiQuery({ name: 'usuario', required: true })
+  @ApiQuery({ name: 'fondo', required: false, description: 'Tipo de recaudo (por defecto Administración)' })
+  @Get('payable-months')
+  @UseGuards(WspAccessGuard)
+  @WspRoles('admin', 'superadmin', 'propietario')
+  async payableMonths(@Req() req: any, @Query('usuario') usuario?: string, @Query('fondo') fondo?: string) {
+    const u = String(usuario || '').trim();
+    if (!u) throw new BadRequestException('Falta el usuario.');
+    if (!esSuperAdmin(req)) {
+      if (String(req.user?.rol || '').toLowerCase() === 'propietario') {
+        if (String(req.user?.sub || '').toLowerCase() !== u.toLowerCase()) {
+          throw new ForbiddenException('Solo puedes consultar tus propios meses.');
+        }
+      } else {
+        const usuarios = (await this.firebase.liveVal<Record<string, any>>('mirror/usuarios')) || {};
+        const conj = String(usuarios[u.replace(/[.#$/\[\]]/g, '_')]?.conjunto || '');
+        await assertConjuntoPermitido(req, this.firebase, conj);
+      }
+    }
+    return { success: true, data: await this.payments.getPayableMonths(u, fondo || undefined) };
+  }
+
+  @ApiOperation({ summary: 'Recibo de pago (PNG base64) por ids de pago' })
+  @ApiQuery({ name: 'ids', required: true, description: 'Ids separados por coma' })
+  @Get('receipt')
+  @UseGuards(WspAccessGuard)
+  @WspRoles('admin', 'superadmin', 'propietario')
+  async receipt(@Req() req: any, @Query('ids') ids?: string) {
+    const lista = String(ids || '').split(',').map((x) => x.trim()).filter(Boolean);
+    const r = await this.payments.buildReceiptData(lista);
+    if (!r.ok) throw new BadRequestException(r.message);
+    if (!esSuperAdmin(req)) {
+      const rol = String(req.user?.rol || '').toLowerCase();
+      if (rol === 'propietario') {
+        if (String(req.user?.sub || '').toLowerCase() !== r.usuario.toLowerCase()) {
+          throw new ForbiddenException('Solo puedes ver tus propios recibos.');
+        }
+      } else {
+        await assertConjuntoPermitido(req, this.firebase, r.conjunto);
+      }
+    }
+    const png = await generateReceiptPng(r.data);
+    return { success: true, numeroRecibo: r.data.numeroRecibo, png: png.toString('base64') };
+  }
 
   // ==========================================================================
   // Carga masiva de PAGOS (Excel, una hoja por propietario)
@@ -285,9 +354,11 @@ export class PaymentsController {
       conjuntoId?: string;
       concepto?: string;
       tipoRecaudo?: string;
+      periodos?: Array<{ mes: string; anio: number }>;
     },
   ) {
     return this.payments.createPayments({
+      periodos: Array.isArray(body.periodos) ? body.periodos : undefined,
       usuario: body.usuario,
       montoPerMonth: body.montoPerMonth,
       meses: body.meses || [],
@@ -418,6 +489,8 @@ export class PaymentsController {
       monto?: number;
       concepto?: string;
       preferredMethod?: string;
+      periodos?: Array<{ mes: string; anio: number }>;
+      anio?: number;
     },
   ) {
     return this.payments.createPreference(body);

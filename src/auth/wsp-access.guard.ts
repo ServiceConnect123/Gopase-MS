@@ -13,7 +13,7 @@ import { conjuntoPropioDelRequest } from './conjunto-scope';
 import { IS_PUBLIC_KEY } from './public.decorator';
 
 /** Roles que pueden operar el WhatsApp (enviar, vincular, desvincular). */
-export type WspRol = 'admin' | 'superadmin';
+export type WspRol = 'admin' | 'superadmin' | 'propietario';
 
 const WSP_ROLES_KEY = 'wspRoles';
 
