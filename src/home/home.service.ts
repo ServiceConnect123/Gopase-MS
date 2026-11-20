@@ -101,11 +101,36 @@ export class HomeService {
    * Script puede tardar decenas de segundos (timeout 40s x reintentos); como el
    * vigilante es un dato secundario, no debe bloquear todo el dashboard.
    */
+  private reportesCache: { at: number; rows: any[] } | null = null;
+  private reportesInFlight: Promise<any[]> | null = null;
+  private static readonly REPORTES_TTL_MS = 60_000;
+
+  /**
+   * Lectura de 'reportes' compartida: caché de 60 s y una sola petición en
+   * vuelo a Apps Script aunque lleguen muchas cargas del Home a la vez.
+   */
+  private readReportesCompartido(): Promise<any[]> {
+    const hit = this.reportesCache;
+    if (hit && Date.now() - hit.at < HomeService.REPORTES_TTL_MS) return Promise.resolve(hit.rows);
+    if (!this.reportesInFlight) {
+      this.reportesInFlight = this.sheets
+        .read('reportes')
+        .then((rows) => {
+          this.reportesCache = { at: Date.now(), rows };
+          return rows;
+        })
+        .finally(() => {
+          this.reportesInFlight = null;
+        });
+    }
+    return this.reportesInFlight;
+  }
+
   private async readReportesConTope(maxMs = 8000): Promise<any[]> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        this.sheets.read('reportes'),
+        this.readReportesCompartido(),
         new Promise<any[]>((_, reject) => {
           timer = setTimeout(() => reject(new Error(`reportes > ${maxMs}ms`)), maxMs);
         }),
@@ -290,17 +315,24 @@ export class HomeService {
     for (const p of reporte.propietarios) alDiaByUser.set(normU(p.usuario), p.alDia);
 
     // Monto del mes seleccionado (solo informativo para la tarjeta; no define el estado).
-    const montoDelMes = (usuario: string) =>
-      pagos
-        .filter(
-          (p) =>
-            p.usuario === usuario &&
-            p.concepto &&
-            p.concepto.toLowerCase().includes(month.toLowerCase()) &&
-            p.concepto.includes(String(year)) &&
-            (p.estado || '').toLowerCase() === 'confirmado',
-        )
-        .reduce((sum: number, p: any) => sum + (parseFloat(p.valor) || 0), 0);
+    // Se suma en una sola pasada sobre los pagos (antes era usuarios x pagos).
+    const montoPorUsuario = new Map<string, number>();
+    const mesLower = month.toLowerCase();
+    const anioStr = String(year);
+    for (const p of pagos) {
+      if (
+        p.concepto &&
+        p.concepto.toLowerCase().includes(mesLower) &&
+        p.concepto.includes(anioStr) &&
+        (p.estado || '').toLowerCase() === 'confirmado'
+      ) {
+        montoPorUsuario.set(
+          p.usuario,
+          (montoPorUsuario.get(p.usuario) || 0) + (parseFloat(p.valor as any) || 0),
+        );
+      }
+    }
+    const montoDelMes = (usuario: string) => montoPorUsuario.get(usuario) || 0;
 
     const usersWithStatus: DashboardUser[] = filteredUsers.map((u) => {
       const alDia = alDiaByUser.get(normU(u.username)) ?? false;

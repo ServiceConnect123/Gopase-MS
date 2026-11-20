@@ -4,6 +4,7 @@ import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { json, urlencoded } from 'express';
+import compression from 'compression';
 import { AppModule } from './app.module';
 
 /**
@@ -32,6 +33,10 @@ async function bootstrap() {
   installGlobalErrorHandlers();
 
   const app = await NestFactory.create(AppModule);
+
+  // gzip de las respuestas: las listas de pagos/usuarios son JSON grandes y
+  // repetitivos (comprimen ~80-90%). Menos bytes por request en Render.
+  app.use(compression({ threshold: 1024 }));
 
   // Subir el límite del body: los comprobantes llegan como imagen en base64
   // (POST /drive/upload), que supera el default de Express (100kb).
