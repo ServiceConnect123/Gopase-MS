@@ -10,7 +10,6 @@ import makeWASocket, {
   isJidBroadcast,
   isJidGroup,
   isJidNewsletter,
-  areJidsSameUser,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import { monitorEventLoopDelay } from 'perf_hooks';
@@ -542,7 +541,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     session.connecting = false;
 
     session.sock.ev.on('creds.update', saveCreds);
-    this.ackIncomingWithoutDecrypt(session, state);
+    this.ackIncomingWithoutDecrypt(session);
 
     // Guardar mensajes en Firebase (TTL 24h) para que getMessage() los encuentre
     // tras un reinicio de Render.
@@ -701,10 +700,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
    * recibos (`CB:receipt`), incluidos los reintentos de lo que ENVIAMOS, no se
    * tocan.
    */
-  private ackIncomingWithoutDecrypt(
-    session: WhatsappSession,
-    state: { creds: { me?: { id?: string; lid?: string } | null } },
-  ): void {
+  private ackIncomingWithoutDecrypt(session: WhatsappSession): void {
     const sock: any = session.sock;
     const ws = sock?.ws;
     if (!ws?.listeners || typeof sock.sendMessageAck !== 'function') {
@@ -719,19 +715,11 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     let acked = 0;
     let timer: NodeJS.Timeout | null = null;
     ws.on('CB:message', (node: any) => {
-      const from: string | undefined = node?.attrs?.from;
-      const me = state.creds.me;
-      const own =
-        !!from && (areJidsSameUser(from, me?.id) || (!!me?.lid && areJidsSameUser(from, me.lid)));
-      // Del propio número solo pasan los mensajes de control del teléfono
-      // (category="peer": claves de app-state, etc.). Las copias de lo que el
-      // admin escribe desde su teléfono también llegan con from = número
-      // propio, y con la sesión Signal del teléfono dañada son las que fallaban
-      // en masa ("Bad MAC", 35k en cada reconexión).
-      if (own && node?.attrs?.category === 'peer') {
-        for (const fn of original) fn(node);
-        return;
-      }
+      // Ningún mensaje entrante se descifra, ni siquiera los de control del
+      // propio teléfono (category="peer"): con su sesión Signal dañada, cada
+      // uno probaba ~40 sesiones viejas (miles de "Bad MAC") y congelaba el
+      // event loop ~16 s. Solo sirven para sincronizar chats/contactos, que
+      // este servicio no usa. Los envíos y sus recibos no dependen de ellos.
       acked++;
       if (!timer) {
         timer = setTimeout(() => {
