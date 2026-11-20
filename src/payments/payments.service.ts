@@ -3,6 +3,7 @@ import { FirebaseService } from '../firebase/firebase.service';
 import { PropertiesService } from '../properties/properties.service';
 import { ReportsService } from '../reports/reports.service';
 import { FundsService, DEFAULT_FUND_NAME } from '../funds/funds.service';
+import { ReceiptData } from '../notifications/receipt-image.generator';
 
 /**
  * Lecturas y cálculos de la pantalla de Pagos, movidos del frontend al backend.
@@ -984,6 +985,78 @@ export class PaymentsService {
   }
 
   /** Crea uno o varios pagos (uno por mes) en mirror/pagos. Devuelve los ids creados. */
+  /**
+   * Datos del recibo de uno o varios pagos (p. ej. los meses registrados juntos),
+   * leídos de RTDB. El recibo se arma en el servidor a partir de los pagos
+   * reales: el cliente solo indica los ids (no puede inventar montos ni nombres).
+   *
+   * Devuelve también `usuario` y `conjunto` para que el controller verifique
+   * que quien lo pide puede verlo.
+   */
+  async buildReceiptData(ids: string[]): Promise<
+    | { ok: true; data: ReceiptData; usuario: string; conjunto: string }
+    | { ok: false; message: string }
+  > {
+    const unicos = Array.from(new Set((ids || []).map((x) => String(x || '').trim()).filter(Boolean)));
+    if (unicos.length === 0) return { ok: false, message: 'Indica al menos un pago.' };
+    if (unicos.length > 36) return { ok: false, message: 'Demasiados pagos para un recibo.' };
+
+    const todos = (await this.firebase.liveVal<Record<string, any>>('mirror/pagos')) || {};
+    const pagos = unicos.map((id) => todos[this.safeKey(id)]).filter(Boolean);
+    if (pagos.length !== unicos.length) return { ok: false, message: 'Pago no encontrado.' };
+
+    const usuario = String(pagos[0].usuario || '');
+    if (pagos.some((p) => String(p.usuario || '') !== usuario)) {
+      return { ok: false, message: 'Los pagos deben ser del mismo propietario.' };
+    }
+
+    const usuarios = (await this.firebase.liveVal<Record<string, any>>('mirror/usuarios')) || {};
+    const u = usuarios[this.safeKey(usuario)] || {};
+    const conjunto = String(u.conjunto || pagos[0].conjunto || '');
+
+    // Orden cronológico por el mes/año del concepto (cae al orden de creación).
+    const MESES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+    const clave = (p: any) => {
+      const c = String(p.concepto || '').toLowerCase();
+      const anio = Number((c.match(/\b(20\d{2})\b/) || [])[1] || 0);
+      const mes = MESES.findIndex((m) => c.includes(m));
+      return anio * 100 + (mes >= 0 ? mes : 0);
+    };
+    pagos.sort((a, b) => clave(a) - clave(b) || String(a.id).localeCompare(String(b.id)));
+
+    const confirmados = pagos.every((p) => String(p.estado || '').toLowerCase() === 'confirmado');
+    const fondos = Array.from(new Set(pagos.map((p) => String(p.tipoRecaudo || DEFAULT_FUND_NAME))));
+    const fechas = pagos.map((p) => String(p.fecha || '').split('T')[0]).filter(Boolean).sort();
+    const fecha = fechas[fechas.length - 1] || '';
+    const ultimoId = String(pagos[pagos.length - 1].id || unicos[0]);
+
+    let moneda = 'COP';
+    try {
+      const conjuntos = await this.firebase.liveValues<any>('mirror/conjuntos');
+      const c = conjuntos.find((x) => String(x?.nombre || '').trim().toLowerCase() === conjunto.trim().toLowerCase());
+      if (c?.moneda) moneda = String(c.moneda);
+    } catch {
+      /* COP por defecto */
+    }
+
+    const parcela = String(u.parcela || '').trim();
+    const data: ReceiptData = {
+      conjunto,
+      propietario: String(u.nombre || usuario),
+      unidad: parcela ? (/^\d+$/.test(parcela) ? `Unidad ${parcela}` : parcela) : undefined,
+      fecha,
+      estado: confirmados ? 'Confirmado' : 'Pendiente',
+      moneda,
+      tipoRecaudo: fondos.length === 1 ? fondos[0] : undefined,
+      referencia: String(pagos[0].referencia || '') || undefined,
+      // Número estable y único: fecha + últimos dígitos del id del pago.
+      numeroRecibo: `REC-${fecha.replace(/-/g, '') || 'S-F'}-${ultimoId.replace(/\D/g, '').slice(-5) || ultimoId.slice(-5)}`,
+      monto: pagos.reduce((s, p) => s + (Number(String(p.valor ?? 0).replace(/[^\d.-]/g, '')) || 0), 0),
+      items: pagos.map((p) => ({ concepto: String(p.concepto || 'Pago'), monto: p.valor ?? 0 })),
+    };
+    return { ok: true, data, usuario, conjunto };
+  }
+
   async createPayments(input: {
     usuario: string;
     montoPerMonth: string | number;
