@@ -96,8 +96,7 @@ export class PropertiesService {
    */
   async listPublic(): Promise<PropertyPublic[]> {
     if (!this.firebase.isEnabled()) throw new Error('Servicio no disponible.');
-    const snap = await this.firebase.db().ref(MIRROR_CONJUNTOS).get();
-    const mirror: Record<string, any> = snap.exists() ? snap.val() : {};
+    const mirror = (await this.firebase.liveVal<Record<string, any>>(MIRROR_CONJUNTOS)) || {};
 
     return Object.values(mirror).map((c: any) => {
       const secrets = c._secrets || {};
@@ -132,11 +131,10 @@ export class PropertiesService {
 
   /** Busca el nodo del conjunto por id o nombre. Devuelve {key, value} o null. */
   private async findConjunto(conjunto: string): Promise<{ key: string; value: any } | null> {
-    const snap = await this.firebase.db().ref(MIRROR_CONJUNTOS).get();
-    if (!snap.exists()) return null;
+    // Caché en vivo (listener RTDB): solo lectura del objeto devuelto.
+    const all = (await this.firebase.liveVal<Record<string, any>>(MIRROR_CONJUNTOS)) || {};
     const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
     const target = norm(conjunto);
-    const all = snap.val() || {};
     for (const key of Object.keys(all)) {
       const v = all[key];
       if (norm(v.id) === target || norm(v.nombre) === target) return { key, value: v };

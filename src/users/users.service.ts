@@ -85,10 +85,8 @@ export class UsersService {
     const raw = String(rawConjunto || '').trim();
     if (!raw) return '';
     try {
-      const snap = await this.firebase.db().ref(MIRROR_CONJUNTOS).get();
-      if (!snap.exists()) return '';
       const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
-      const conjuntos = Object.values(snap.val() || {}) as Array<{ id?: string; nombre?: string }>;
+      const conjuntos = await this.firebase.liveValues<{ id?: string; nombre?: string }>(MIRROR_CONJUNTOS);
       for (const c of conjuntos) {
         if (norm(c.id) === norm(raw) || norm(c.nombre) === norm(raw)) return String(c.id ?? '');
       }
@@ -101,9 +99,8 @@ export class UsersService {
   /** Lista de usuarios. Si se pasa conjunto, filtra por él (id o nombre crudo). */
   async list(conjunto?: string): Promise<any[]> {
     if (!this.firebase.isEnabled()) throw new Error('Servicio no disponible.');
-    const snap = await this.firebase.db().ref(MIRROR_USERS).get();
-    if (!snap.exists()) return [];
-    let users = Object.values(snap.val() || {}) as any[];
+    // Caché en vivo (listener RTDB); los elementos se copian abajo con spread.
+    let users = await this.firebase.liveValues<any>(MIRROR_USERS);
     if (conjunto) {
       const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
       users = users.filter((u) => norm(u.conjunto) === norm(conjunto));
@@ -164,9 +161,7 @@ export class UsersService {
   async usuariosPorEmail(email: string): Promise<Array<{ usuario: string; conjunto: string; nombre: string; rol: string }>> {
     const target = String(email || '').trim().toLowerCase();
     if (!target || !this.firebase.isEnabled()) return [];
-    const snap = await this.firebase.db().ref(MIRROR_USERS).get();
-    if (!snap.exists()) return [];
-    const all = snap.val() || {};
+    const all = (await this.firebase.liveVal<Record<string, any>>(MIRROR_USERS)) || {};
     const out: Array<{ usuario: string; conjunto: string; nombre: string; rol: string }> = [];
     for (const key of Object.keys(all)) {
       const u = all[key] || {};

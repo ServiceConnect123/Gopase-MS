@@ -172,13 +172,16 @@ export class PaymentsService {
     return null;
   }
 
-  /** Lee una colección "mirror/x" y la devuelve como array de valores. */
+  /**
+   * Lee una colección "mirror/x" y la devuelve como array de valores.
+   *
+   * Se sirve desde la caché en vivo de FirebaseService (listener RTDB): no
+   * descarga el árbol en cada petición. Los elementos son COMPARTIDOS entre
+   * peticiones: no mutarlos (copiar con spread si hace falta).
+   */
   async readCollection<T>(name: string): Promise<T[]> {
     if (!this.firebase.isEnabled()) throw new Error('Servicio no disponible.');
-    const snap = await this.firebase.db().ref(`mirror/${name}`).get();
-    if (!snap.exists()) return [];
-    const val = snap.val() || {};
-    return Object.values(val) as T[];
+    return this.firebase.liveValues<T>(`mirror/${name}`);
   }
 
   /** Pagos del año (filtra por que el concepto incluya el año). */
@@ -187,14 +190,34 @@ export class PaymentsService {
     return pagos.filter((p) => (p.concepto || '').includes(y));
   }
 
+  /** Índice usuario -> pagos, memoizado por array (vive lo que vive la petición). */
+  private readonly byUserIndex = new WeakMap<Pago[], Map<string, Pago[]>>();
+
+  /**
+   * Pagos de un usuario dentro de `pagos`, vía un índice construido una sola vez
+   * por array. Evita recorrer TODOS los pagos por cada usuario y mes (costo
+   * usuarios x meses x pagos, que bloqueaba el event loop con conjuntos grandes).
+   */
+  pagosDeUsuario(pagos: Pago[], username: string): Pago[] {
+    let index = this.byUserIndex.get(pagos);
+    if (!index) {
+      index = new Map<string, Pago[]>();
+      for (const p of pagos) {
+        const arr = index.get(p.usuario);
+        if (arr) arr.push(p);
+        else index.set(p.usuario, [p]);
+      }
+      this.byUserIndex.set(pagos, index);
+    }
+    return index.get(username) || [];
+  }
+
   /** ¿El usuario tiene pago Confirmado en ese mes+año? */
   private isPaidMonth(pagos: Pago[], username: string, idx: number, year: number): boolean {
     const month = MONTHS[idx];
-    return pagos.some((p) => {
-      const isMatch = p.usuario === username;
+    return this.pagosDeUsuario(pagos, username).some((p) => {
       const conceptLower = (p.concepto || '').toLowerCase();
       return (
-        isMatch &&
         conceptLower.includes(month.toLowerCase()) &&
         (p.concepto || '').includes(String(year)) &&
         (p.estado || '').toLowerCase() === 'confirmado'
@@ -272,11 +295,9 @@ export class PaymentsService {
     const isCurrentYear = year === new Date().getFullYear();
 
     return MONTHS.map((month, idx) => {
-      const userPayments = pagos.filter((p) => {
-        const isMatch = p.usuario === username;
-        const conceptLower = (p.concepto || '').toLowerCase();
-        return isMatch && conceptLower.includes(month.toLowerCase());
-      });
+      const userPayments = this.pagosDeUsuario(pagos, username).filter((p) =>
+        (p.concepto || '').toLowerCase().includes(month.toLowerCase()),
+      );
 
       let status = 'Pendiente';
       let color = '#F44336';
@@ -572,11 +593,9 @@ export class PaymentsService {
 
     const debtors = users
       .filter((u) => {
-        const userPayments = pagos.filter((p) => {
-          const isMatch = p.usuario === u.usuario;
-          const conceptLower = (p.concepto || '').toLowerCase();
-          return isMatch && conceptLower.includes(month.toLowerCase());
-        });
+        const userPayments = this.pagosDeUsuario(pagos, u.usuario).filter((p) =>
+          (p.concepto || '').toLowerCase().includes(month.toLowerCase()),
+        );
         return !userPayments.some((p) => p.estado === 'Confirmado');
       })
       // phone puede venir como número desde RTDB: se normaliza a string.

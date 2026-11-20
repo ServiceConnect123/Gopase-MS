@@ -26,6 +26,7 @@
     "@nestjs/swagger": "^8.1.1",
     "@sentry/nestjs": "11.10.0",
     "@whiskeysockets/baileys": "^6.7.9",
+    "compression": "^1.8.2",
     "exceljs": "^4.4.0",
     "firebase-admin": "^14.4.0",
     "googleapis": "^180.0.0",
@@ -41,6 +42,7 @@
   "devDependencies": {
     "@nestjs/cli": "^10.4.9",
     "@nestjs/schematics": "^10.2.3",
+    "@types/compression": "^1.8.1",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.5",
     "@types/qrcode": "^1.5.5",
