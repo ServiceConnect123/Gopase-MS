@@ -173,7 +173,7 @@ export class PaymentsService {
   }
 
   /** Lee una colección "mirror/x" y la devuelve como array de valores. */
-  private async readCollection<T>(name: string): Promise<T[]> {
+  async readCollection<T>(name: string): Promise<T[]> {
     if (!this.firebase.isEnabled()) throw new Error('Servicio no disponible.');
     const snap = await this.firebase.db().ref(`mirror/${name}`).get();
     if (!snap.exists()) return [];
