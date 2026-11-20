@@ -439,7 +439,7 @@ export class PaymentsController {
   }
 
   @ApiOperation({
-    summary: 'Chat financiero con IA (Gemini); la clave del conjunto no sale al cliente',
+    summary: 'Chat de finanzas con IA (Genkit + Gemini); la clave del conjunto no sale al cliente',
     description:
       'Responde preguntas de finanzas del conjunto. El cliente envía el conjunto, la pregunta ' +
       'y un contexto financiero ya resumido; el backend usa la geminiKey del conjunto.',
@@ -449,15 +449,21 @@ export class PaymentsController {
       type: 'object',
       properties: {
         conjunto: { type: 'string' },
-        question: { type: 'string', description: 'Pregunta del usuario. Vacío = análisis general.' },
+        question: { type: 'string', description: 'Pregunta del usuario. Vacío = resumen financiero general.' },
         context: { type: 'string', description: 'Contexto financiero ya resumido (datos del conjunto).' },
+        year: { type: 'number', description: 'Año consultado (por defecto el actual).' },
+        history: {
+          type: 'array',
+          description: 'Turnos previos de la conversación (máx. 20 se usan).',
+          items: { type: 'object', properties: { role: { type: 'string', enum: ['user', 'model'] }, text: { type: 'string' } } },
+        },
       },
       required: ['conjunto'],
     },
   })
   @Post('finance-chat')
   async financeChat(
-    @Body() body: { conjunto: string; question?: string; context?: string },
+    @Body() body: { conjunto: string; question?: string; context?: string; year?: number; history?: { role: 'user' | 'model'; text: string }[] },
   ) {
     return this.payments.financeChat(body);
   }
