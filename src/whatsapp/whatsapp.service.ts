@@ -12,6 +12,7 @@ import makeWASocket, {
   isJidNewsletter,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
+import { monitorEventLoopDelay } from 'perf_hooks';
 import * as qrcodeTerminal from 'qrcode-terminal';
 import * as QRCode from 'qrcode';
 import pino from 'pino';
@@ -51,6 +52,24 @@ setInterval(() => {
     );
     signalNoiseCount = 0;
   }
+}, 60_000).unref();
+
+/**
+ * Medidor del event loop: si algo síncrono (serialización, descifrado) lo
+ * bloquea, todas las peticiones HTTP esperan. Se reporta solo cuando el p99 del
+ * último minuto supera 200 ms, para poder confirmarlo en los logs de Render.
+ */
+const loopDelay = monitorEventLoopDelay({ resolution: 20 });
+loopDelay.enable();
+setInterval(() => {
+  const p99 = loopDelay.percentile(99) / 1e6;
+  const max = loopDelay.max / 1e6;
+  if (p99 > 200) {
+    new Logger('EventLoop').warn(
+      `Event loop bloqueado: p99=${Math.round(p99)}ms, max=${Math.round(max)}ms (último minuto).`,
+    );
+  }
+  loopDelay.reset();
 }, 60_000).unref();
 
 /**
@@ -136,7 +155,6 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
    * Usa un Map nativo (sin límite de keys) para evitar ECACHEFULL durante envíos masivos.
    */
   private readonly msgMap = new Map<string, { msg: any; ts: number }>();
-  private readonly MSG_STORE_PATH = 'wsp_msg_store';
   private readonly MSG_TTL_MS = 86400_000; // 24 h
   /** Tope de mensajes en memoria (los más viejos se descartan primero). */
   private readonly MSG_MAX = 5000;
@@ -160,59 +178,11 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     return undefined;
   }
 
-  /** Limpia entradas del Map con más de 24h y purga Firebase. Se llama al conectar. */
-  private async msgStorePurgeAll(sessionKey: string): Promise<void> {
-    // Limpiar Map en memoria.
+  /** Descarta del Map en memoria los mensajes con más de 24 h. */
+  private msgStorePurgeMemory(): void {
     const cutoff = Date.now() - this.MSG_TTL_MS;
     for (const [key, val] of this.msgMap.entries()) {
       if (val.ts < cutoff) this.msgMap.delete(key);
-    }
-    // Limpiar Firebase.
-    try {
-      const ref = this.firebase.db().ref(`${this.MSG_STORE_PATH}/${sessionKey}`);
-      const snap = await ref.orderByChild('ts').endAt(cutoff).limitToFirst(200).get();
-      if (!snap.exists()) return;
-      const updates: Record<string, null> = {};
-      snap.forEach((child) => { updates[child.key!] = null; });
-      await ref.update(updates);
-      this.logger.debug(`[msgStore] purgados ${Object.keys(updates).length} msgs de '${sessionKey}'`);
-    } catch (e: any) {
-      this.logger.warn(`[msgStore] purge error: ${e?.message}`);
-    }
-  }
-
-  /** Precarga en memoria los mensajes recientes desde Firebase (se llama una sola vez al conectar). */
-  private async msgStorePrefill(sessionKey: string): Promise<void> {
-    try {
-      const cutoff = Date.now() - this.MSG_TTL_MS;
-      const snap = await this.firebase.db()
-        .ref(`${this.MSG_STORE_PATH}/${sessionKey}`)
-        .orderByChild('ts').startAt(cutoff).get();
-      if (!snap.exists()) return;
-      let count = 0;
-      snap.forEach((child) => {
-        const { msg, ts } = child.val() ?? {};
-        if (msg) { this.msgMap.set(`${sessionKey}:${child.key}`, { msg, ts: ts ?? Date.now() }); count++; }
-      });
-      this.logger.debug(`[msgStore] precargados ${count} msgs de '${sessionKey}' en memoria`);
-    } catch (e: any) {
-      this.logger.warn(`[msgStore] prefill error: ${e?.message}`);
-    }
-  }
-
-  /** Elimina entradas con más de 24 h. Se llama al arrancar cada sesión. */
-  private async msgStorePurge(sessionKey: string): Promise<void> {
-    try {
-      const cutoff = Date.now() - this.MSG_TTL_MS;
-      const ref = this.firebase.db().ref(`${this.MSG_STORE_PATH}/${sessionKey}`);
-      const snap = await ref.orderByChild('ts').endAt(cutoff).limitToFirst(200).get();
-      if (!snap.exists()) return;
-      const updates: Record<string, null> = {};
-      snap.forEach((child) => { updates[child.key!] = null; });
-      await ref.update(updates);
-      this.logger.debug(`[msgStore] purgados ${Object.keys(updates).length} msgs de '${sessionKey}'`);
-    } catch (e: any) {
-      this.logger.warn(`[msgStore] purge error: ${e?.message}`);
     }
   }
 
@@ -567,11 +537,10 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         }
       }
     });
-    // Al conectar: precargar mensajes recientes en memoria y limpiar los viejos (fire-and-forget).
-    Promise.all([
-      this.msgStorePrefill(session.key),
-      this.msgStorePurgeAll(session.key),
-    ]).catch(() => {});
+    // Al conectar: limpiar mensajes viejos de memoria. (Antes además leía
+    // wsp_msg_store de RTDB sin índice: descargaba el nodo completo en cada
+    // reconexión aunque ya nadie escribe ahí.)
+    this.msgStorePurgeMemory();
 
     // Vinculación por CÓDIGO (pairing code): si se solicitó y la sesión aún no
     // está registrada, pedimos el código a WhatsApp en vez de usar el QR. Debe
