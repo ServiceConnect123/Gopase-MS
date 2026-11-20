@@ -45,6 +45,14 @@ const DEFAULT_SESSION_KEY = 'session';
 /** Nodo raíz donde se guardan las sesiones de WhatsApp. */
 export const WSP_SESSION_ROOT = 'mirror/wsp_session';
 const FORMAT_VERSION = 2;
+/** Entradas por escritura al migrar desde v1 (acota el pico de memoria). */
+const MIGRATION_CHUNK = 300;
+/**
+ * Categorías que no se cargan ni se migran: solo sirven para grupos, y el
+ * servicio ignora grupos (shouldIgnoreJid). En sesiones viejas eran la mayor
+ * parte del peso. Si alguna llegara a necesitarse, Signal la renegocia.
+ */
+const DROPPED_CATEGORIES = new Set(['sender-key', 'sender-key-memory']);
 
 /** Sanea una clave para usarla como nodo de RTDB (no admite . # $ / [ ]). */
 export function safeNodeKey(raw: string): string {
@@ -120,6 +128,12 @@ export async function useFirebaseAuthState(
         }
       }
       for (const [category, entries] of Object.entries<any>(val.keys || {})) {
+        if (DROPPED_CATEGORIES.has(category)) {
+          // Restos de grupos de una migración anterior: se borran de RTDB para
+          // no volver a descargarlos en cada arranque.
+          ref.child(`keys/${category}`).remove().catch(() => undefined);
+          continue;
+        }
         const cat: { [id: string]: any } = (keys[category] = {});
         for (const [encId, raw] of Object.entries<any>(entries || {})) {
           if (typeof raw !== 'string') continue;
@@ -135,7 +149,11 @@ export async function useFirebaseAuthState(
       try {
         const loaded = deserialize(val.payload);
         creds = loaded?.creds;
-        if (loaded?.keys && typeof loaded.keys === 'object') Object.assign(keys, loaded.keys);
+        if (loaded?.keys && typeof loaded.keys === 'object') {
+          for (const [category, entries] of Object.entries<any>(loaded.keys)) {
+            if (!DROPPED_CATEGORIES.has(category)) keys[category] = entries;
+          }
+        }
         needsMigration = true;
       } catch (e: any) {
         logger.warn(`No se pudo parsear la sesión v1 '${sessionKey}': ${e?.message}`);
@@ -148,25 +166,7 @@ export async function useFirebaseAuthState(
   const resolvedCreds: AuthenticationCreds = creds || initAuthCreds();
 
   if (needsMigration) {
-    const keysNode: Record<string, Record<string, string>> = {};
-    for (const [category, entries] of Object.entries(keys)) {
-      keysNode[category] = {};
-      for (const [id, value] of Object.entries(entries)) {
-        if (value) keysNode[category][encodeId(id)] = serialize(value);
-      }
-    }
-    try {
-      // `set` reemplaza el nodo completo, eliminando el `payload` v1.
-      await ref.set({
-        v: FORMAT_VERSION,
-        creds: serialize(resolvedCreds),
-        keys: keysNode,
-        updatedAt: new Date().toISOString(),
-      });
-      logger.log(`Sesión '${sessionKey}' migrada al formato por claves (v2).`);
-    } catch (e: any) {
-      logger.error(`No se pudo migrar la sesión '${sessionKey}' a v2: ${e?.message}`);
-    }
+    await migrateV1(ref, sessionKey, resolvedCreds, keys);
   }
 
   // --- Persistencia incremental: solo lo que cambió ---
@@ -284,4 +284,60 @@ export async function useFirebaseAuthState(
     clear,
     flush,
   };
+}
+
+/**
+ * Migra una sesión v1 (`payload` único) a v2 POR PARTES: sube las claves en
+ * lotes de MIGRATION_CHUNK y cede el event loop entre lotes, para no armar el
+ * árbol completo en memoria ni congelar la API. El `payload` v1 se borra y se
+ * marca `v: 2` en la ÚLTIMA escritura: si el proceso muere a mitad, el próximo
+ * arranque vuelve a leer el v1 intacto y repite la migración (idempotente).
+ */
+async function migrateV1(
+  ref: ReturnType<ReturnType<FirebaseService['db']>['ref']>,
+  sessionKey: string,
+  creds: AuthenticationCreds,
+  keys: { [category: string]: { [id: string]: any } },
+): Promise<void> {
+  const started = Date.now();
+  const counts: string[] = [];
+  let batch: Record<string, string> = {};
+  let inBatch = 0;
+  let total = 0;
+  const flushBatch = async () => {
+    if (!inBatch) return;
+    await ref.update(batch);
+    batch = {};
+    inBatch = 0;
+    await new Promise((r) => setImmediate(r));
+  };
+  try {
+    for (const [category, entries] of Object.entries(keys)) {
+      let n = 0;
+      for (const [id, value] of Object.entries(entries || {})) {
+        if (!value) continue;
+        batch[`keys/${category}/${encodeId(id)}`] = serialize(value);
+        inBatch++;
+        n++;
+        if (inBatch >= MIGRATION_CHUNK) await flushBatch();
+      }
+      counts.push(`${category}=${n}`);
+      total += n;
+    }
+    await flushBatch();
+    await ref.update({
+      v: FORMAT_VERSION,
+      creds: serialize(creds),
+      payload: null,
+      updatedAt: new Date().toISOString(),
+    });
+    logger.log(
+      `Sesión '${sessionKey}' migrada al formato por claves (v2): ${total} claves ` +
+        `(${counts.join(', ') || 'ninguna'}) en ${Date.now() - started} ms.`,
+    );
+  } catch (e: any) {
+    logger.error(
+      `No se pudo migrar la sesión '${sessionKey}' a v2 (se reintenta en el próximo arranque): ${e?.message}`,
+    );
+  }
 }

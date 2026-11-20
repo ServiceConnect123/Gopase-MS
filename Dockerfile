@@ -31,6 +31,11 @@ ENV APP_ENV=${APP_ENV}
 
 ENV PORT=3001
 ENV NODE_ENV=production
+# Tope del heap de V8 por debajo de los 512 MB del plan Starter de Render: el GC
+# trabaja antes y, si aun así se llena, Node escribe "heap out of memory" en
+# los logs en vez de que el contenedor muera sin dejar rastro. Si se sube de
+# plan, sobreescribir NODE_OPTIONS en las variables de entorno de Render.
+ENV NODE_OPTIONS=--max-old-space-size=384
 
 EXPOSE ${PORT}
 

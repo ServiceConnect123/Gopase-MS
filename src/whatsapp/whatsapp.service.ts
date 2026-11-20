@@ -61,13 +61,28 @@ setInterval(() => {
  */
 const loopDelay = monitorEventLoopDelay({ resolution: 20 });
 loopDelay.enable();
+/** Memoria del proceso en MB, para los logs. */
+export function memSummary(): string {
+  const m = process.memoryUsage();
+  const mb = (n: number) => Math.round(n / 1048576);
+  return `rss=${mb(m.rss)}MB heap=${mb(m.heapUsed)}/${mb(m.heapTotal)}MB external=${mb(m.external)}MB`;
+}
+let minutes = 0;
 setInterval(() => {
   const p99 = loopDelay.percentile(99) / 1e6;
   const max = loopDelay.max / 1e6;
+  const rssMb = process.memoryUsage().rss / 1048576;
+  minutes++;
   if (p99 > 200) {
     new Logger('EventLoop').warn(
-      `Event loop bloqueado: p99=${Math.round(p99)}ms, max=${Math.round(max)}ms (último minuto).`,
+      `Event loop bloqueado: p99=${Math.round(p99)}ms, max=${Math.round(max)}ms (último minuto). ${memSummary()}`,
     );
+  } else if (rssMb > 400) {
+    // Render Starter = 512 MB: por encima de ~400 MB el contenedor está cerca
+    // de que lo maten por memoria.
+    new Logger('Memoria').warn(`Memoria alta: ${memSummary()}`);
+  } else if (minutes % 5 === 0) {
+    new Logger('Memoria').log(memSummary());
   }
   loopDelay.reset();
 }, 60_000).unref();
@@ -474,6 +489,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       saveCreds = auth.saveCreds;
       session.clearSession = auth.clear;
       session.flushSession = auth.flush;
+      this.logger.log(`[${session.key}] Sesión cargada desde RTDB. ${memSummary()}`);
     } catch (e: any) {
       session.connecting = false;
       this.logger.error(
