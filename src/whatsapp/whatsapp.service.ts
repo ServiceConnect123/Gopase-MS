@@ -10,6 +10,7 @@ import makeWASocket, {
   isJidBroadcast,
   isJidGroup,
   isJidNewsletter,
+  areJidsSameUser,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import { monitorEventLoopDelay } from 'perf_hooks';
@@ -541,6 +542,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     session.connecting = false;
 
     session.sock.ev.on('creds.update', saveCreds);
+    this.ackIncomingWithoutDecrypt(session, state);
 
     // Guardar mensajes en Firebase (TTL 24h) para que getMessage() los encuentre
     // tras un reinicio de Render.
@@ -681,6 +683,57 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
           delay,
         );
       }
+    });
+  }
+
+  /**
+   * Este servicio SOLO envía: los mensajes que llegan al número vinculado no se
+   * usan. Aun así Baileys descifraba cada uno, y con sesiones Signal
+   * desincronizadas todos fallaban ("Bad MAC"): WhatsApp los reenviaba sin fin
+   * y al reconectar entregaba el atraso completo (35k+ por minuto en logs de
+   * producción). Ese descifrado congelaba el event loop ~2 min, la API dejaba
+   * de responder y WhatsApp cortaba por timeout (408), repitiendo el ciclo.
+   *
+   * Aquí se intercepta el evento de mensaje ANTES de Baileys: los de terceros
+   * solo se confirman (ack, sin descifrar) para que WhatsApp los dé por
+   * entregados y no los reenvíe. Los del propio número (el teléfono comparte
+   * por ahí claves con el dispositivo vinculado) siguen el flujo normal. Los
+   * recibos (`CB:receipt`), incluidos los reintentos de lo que ENVIAMOS, no se
+   * tocan.
+   */
+  private ackIncomingWithoutDecrypt(
+    session: WhatsappSession,
+    state: { creds: { me?: { id?: string; lid?: string } | null } },
+  ): void {
+    const sock: any = session.sock;
+    const ws = sock?.ws;
+    if (!ws?.listeners || typeof sock.sendMessageAck !== 'function') {
+      this.logger.warn(`[${session.key}] No se pudo instalar el filtro de mensajes entrantes.`);
+      return;
+    }
+    const original: ((node: any) => void)[] = ws.listeners('CB:message');
+    ws.removeAllListeners('CB:message');
+    let acked = 0;
+    let timer: NodeJS.Timeout | null = null;
+    ws.on('CB:message', (node: any) => {
+      const from: string | undefined = node?.attrs?.from;
+      const me = state.creds.me;
+      const own =
+        !!from && (areJidsSameUser(from, me?.id) || (!!me?.lid && areJidsSameUser(from, me.lid)));
+      if (own) {
+        for (const fn of original) fn(node);
+        return;
+      }
+      acked++;
+      if (!timer) {
+        timer = setTimeout(() => {
+          this.logger.log(`[${session.key}] ${acked} mensajes entrantes confirmados sin descifrar.`);
+          acked = 0;
+          timer = null;
+        }, 60_000);
+        timer.unref();
+      }
+      sock.sendMessageAck(node).catch(() => undefined);
     });
   }
 
