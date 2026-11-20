@@ -106,9 +106,7 @@ export class AuthLoginService {
     const correo = String(email || '').trim().toLowerCase();
     if (!correo) return [];
     try {
-      const snap = await this.firebase.db().ref('mirror/usuarios').get();
-      if (!snap.exists()) return [];
-      const all = snap.val() || {};
+      const all = (await this.firebase.liveVal<Record<string, any>>('mirror/usuarios')) || {};
       const out: Array<{ conjunto: string; usuario: string; rol: string }> = [];
       for (const key of Object.keys(all)) {
         const u = all[key] || {};
