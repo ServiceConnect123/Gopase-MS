@@ -713,6 +713,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     }
     const original: ((node: any) => void)[] = ws.listeners('CB:message');
     ws.removeAllListeners('CB:message');
+    this.logger.log(
+      `[${session.key}] Filtro de mensajes entrantes activo (se confirman sin descifrar; ${original.length} handler reemplazado).`,
+    );
     let acked = 0;
     let timer: NodeJS.Timeout | null = null;
     ws.on('CB:message', (node: any) => {
@@ -720,7 +723,12 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       const me = state.creds.me;
       const own =
         !!from && (areJidsSameUser(from, me?.id) || (!!me?.lid && areJidsSameUser(from, me.lid)));
-      if (own) {
+      // Del propio número solo pasan los mensajes de control del teléfono
+      // (category="peer": claves de app-state, etc.). Las copias de lo que el
+      // admin escribe desde su teléfono también llegan con from = número
+      // propio, y con la sesión Signal del teléfono dañada son las que fallaban
+      // en masa ("Bad MAC", 35k en cada reconexión).
+      if (own && node?.attrs?.category === 'peer') {
         for (const fn of original) fn(node);
         return;
       }
@@ -730,7 +738,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
           this.logger.log(`[${session.key}] ${acked} mensajes entrantes confirmados sin descifrar.`);
           acked = 0;
           timer = null;
-        }, 60_000);
+        }, 15_000);
         timer.unref();
       }
       sock.sendMessageAck(node).catch(() => undefined);
