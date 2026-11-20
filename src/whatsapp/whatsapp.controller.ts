@@ -31,7 +31,18 @@ export class WhatsappController {
   @ApiQuery({ name: 'conjunto', required: false })
   @Get('qr')
   async qr(@Query('conjunto') conjunto?: string) {
-    const data = await this.whatsapp.getQr(conjunto);
+    let data: Awaited<ReturnType<typeof this.whatsapp.getQr>> = null;
+    try {
+      data = await this.whatsapp.getQr(conjunto);
+    } catch (e: any) {
+      // Errores de descifrado WebSocket durante reconexión (Unsupported state,
+      // Connection Closed). No son accionables: el socket se recupera solo.
+      return {
+        ready: false,
+        conjunto: conjunto || null,
+        message: 'Reconectando WhatsApp... Vuelve a consultar en unos segundos.',
+      };
+    }
     if (!data) {
       const ready = this.whatsapp.isReady(conjunto);
       return {
@@ -118,7 +129,13 @@ export class WhatsappController {
   @ApiQuery({ name: 'conjunto', required: false })
   @Post('relogin')
   async relogin(@Query('conjunto') conjunto?: string) {
-    await this.whatsapp.relogin(conjunto);
+    try {
+      await this.whatsapp.relogin(conjunto);
+    } catch (e: any) {
+      // Baileys lanza Connection Closed / Timed Out al cerrar el socket durante
+      // el relogin. Son esperados y no impiden que el QR nuevo se genere.
+      // Los silenciamos para no contaminar Sentry con errores no accionables.
+    }
     return {
       ok: true,
       conjunto: conjunto || null,
