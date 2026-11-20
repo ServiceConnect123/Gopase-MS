@@ -49,6 +49,20 @@ export interface AdminListItem {
   paidCount: number;
   totalApplicable: number;
   isAlDia: boolean;
+  /** Unidad (casa/apto) del propietario. */
+  unit: string;
+  phone: string;
+  /**
+   * Estado de los 12 meses del año, un carácter por mes (Ene..Dic):
+   * p = pagado, c = por confirmar, m = pendiente vencido (mora),
+   * d = disponible (aún no vence), n = no aplica (antes del ingreso).
+   * Misma regla que getUserMonths, para la tira de meses de la lista.
+   */
+  months: string;
+  /** Meses con pago esperando confirmación. */
+  pendingCount: number;
+  /** Total confirmado en el año. */
+  paidTotal: number;
 }
 
 export interface MonthStatus {
@@ -257,6 +271,52 @@ export class PaymentsService {
     return { paidCount, totalApplicable, isAlDia };
   }
 
+  /**
+   * Estado compacto de los 12 meses de un usuario (ver AdminListItem.months).
+   * Misma regla que getUserMonths, pero en una sola pasada por los pagos del
+   * usuario (la lista admin lo calcula para todos los propietarios).
+   */
+  private monthCodes(pagos: Pago[], u: Usuario, year: number): { months: string; pendingCount: number; paidTotal: number } {
+    const now = new Date();
+    const isCurrentYear = year === now.getFullYear();
+    const todayMonthIndex = now.getMonth();
+    const ingreso = this.parseFechaIngreso(u.fechaIngreso);
+    const ingresoYear = ingreso?.year ?? 0;
+    const ingresoMonthIndex = ingreso?.monthIndex ?? -1;
+
+    const delUsuario = this.pagosDeUsuario(pagos, u.usuario);
+    const conceptos = delUsuario.map((p) => (p.concepto || '').toLowerCase());
+    let pendingCount = 0;
+    let paidTotal = 0;
+    let months = '';
+    for (let idx = 0; idx < 12; idx++) {
+      if (ingresoYear > 0 && (year < ingresoYear || (year === ingresoYear && idx < ingresoMonthIndex))) {
+        months += 'n';
+        continue;
+      }
+      const name = MONTHS[idx].toLowerCase();
+      let confirmed = false;
+      let pending = false;
+      let any = false;
+      for (let i = 0; i < delUsuario.length; i++) {
+        if (!conceptos[i].includes(name)) continue;
+        any = true;
+        const estado = delUsuario[i].estado;
+        if (estado === 'Confirmado') {
+          confirmed = true;
+          paidTotal += parseFloat(String(delUsuario[i].valor)) || 0;
+        } else if (estado === 'Pendiente') {
+          pending = true;
+        }
+      }
+      if (confirmed) months += 'p';
+      else if (pending) { months += 'c'; pendingCount++; }
+      else if (!any && ((isCurrentYear && idx >= todayMonthIndex) || year > now.getFullYear())) months += 'd';
+      else months += 'm';
+    }
+    return { months, pendingCount, paidTotal };
+  }
+
   // -------------------- API pública --------------------
 
   /** Lista de propietarios del conjunto con su estado de pago (vista admin). */
@@ -274,7 +334,19 @@ export class PaymentsService {
 
     const list: AdminListItem[] = users.map((u) => {
       const { paidCount, totalApplicable, isAlDia } = this.overallStatus(pagos, u, year);
-      return { username: u.usuario, name: u.nombre || u.usuario, paidCount, totalApplicable, isAlDia };
+      const { months, pendingCount, paidTotal } = this.monthCodes(pagos, u, year);
+      return {
+        username: u.usuario,
+        name: u.nombre || u.usuario,
+        paidCount,
+        totalApplicable,
+        isAlDia,
+        unit: u.parcela || '',
+        phone: u.phone || '',
+        months,
+        pendingCount,
+        paidTotal,
+      };
     });
 
     list.sort((a, b) => (a.isAlDia === b.isAlDia ? a.name.localeCompare(b.name) : a.isAlDia ? 1 : -1));
