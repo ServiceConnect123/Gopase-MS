@@ -112,7 +112,12 @@ async function bootstrap() {
 
   const port = process.env.PORT || 3001;
   await app.listen(port);
-  Logger.log(`wspsend-ms escuchando en el puerto ${port}`, 'Bootstrap');
+  const m = process.memoryUsage();
+  Logger.log(
+    `wspsend-ms escuchando en el puerto ${port} (rss=${Math.round(m.rss / 1048576)}MB, ` +
+      `heap=${Math.round(m.heapUsed / 1048576)}MB, max-old-space=${process.env.NODE_OPTIONS || 'default'})`,
+    'Bootstrap',
+  );
   Logger.log(`Swagger disponible en /docs`, 'Bootstrap');
 }
 bootstrap();
