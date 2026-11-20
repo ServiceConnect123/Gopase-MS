@@ -985,6 +985,162 @@ export class PaymentsService {
   }
 
   /** Crea uno o varios pagos (uno por mes) en mirror/pagos. Devuelve los ids creados. */
+  // -------------------- Pago de meses (varios años) --------------------
+  //
+  // Reglas (definidas con el negocio):
+  //  - Se puede pagar hasta DICIEMBRE DEL AÑO SIGUIENTE.
+  //  - Los meses se pagan SEGUIDOS, empezando por el más antiguo pendiente
+  //    (aplica igual al propietario y al admin).
+  //  - Un mes pagado o en revisión no se puede volver a registrar.
+  //  - Los meses futuros se cobran con la cuota vigente (si la cuota cambia,
+  //    la administración ajusta la diferencia).
+
+  private static readonly MESES_ES = [
+    'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+    'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre',
+  ];
+
+  /** Índice absoluto de un mes: año*12 + mes(0..11). */
+  private idxDe(anio: number, mes: number): number {
+    return anio * 12 + mes;
+  }
+
+  private mesIndex(nombre: string): number {
+    const n = String(nombre || '').trim().toLowerCase();
+    return PaymentsService.MESES_ES.findIndex((m) => m.toLowerCase() === n);
+  }
+
+  /**
+   * Meses cubiertos por los pagos de un usuario: 'pagado' (Confirmado) o
+   * 'revision' (Pendiente / Procesando). El mes y el año salen del concepto.
+   */
+  private async coberturaDe(usuario: string, fondo?: string): Promise<Map<number, 'pagado' | 'revision'>> {
+    const pagos = await this.readCollection<Pago>('pagos');
+    const out = new Map<number, 'pagado' | 'revision'>();
+    // Cada fondo (tipo de recaudo) tiene su propia cobertura: pagar marzo de
+    // Administración no cubre marzo de otro fondo.
+    const normF = (f: unknown) => String(f || DEFAULT_FUND_NAME).trim().toLowerCase();
+    const objetivo = normF(fondo);
+    for (const p of this.pagosDeUsuario(pagos, usuario)) {
+      if (normF((p as any).tipoRecaudo) !== objetivo) continue;
+      const est = String(p.estado || '').toLowerCase();
+      const tipo = est === 'confirmado' ? 'pagado' : est === 'pendiente' || est === 'procesando' ? 'revision' : null;
+      if (!tipo) continue;
+      const c = String(p.concepto || '').toLowerCase();
+      const anios = Array.from(new Set((c.match(/\b20\d{2}\b/g) || []).map(Number)));
+      const meses = PaymentsService.MESES_ES.map((m, i) => (c.includes(m.toLowerCase()) ? i : -1)).filter((i) => i >= 0);
+      for (const a of anios) {
+        for (const m of meses) {
+          const k = this.idxDe(a, m);
+          if (out.get(k) !== 'pagado') out.set(k, tipo);
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Meses que un propietario puede pagar, para el selector de la app: desde su
+   * ingreso (o enero del año actual) hasta diciembre del año siguiente, con el
+   * estado de cada mes, el primero pagable y hasta cuándo está al día.
+   */
+  async getPayableMonths(usuario: string, fondo?: string): Promise<{
+    usuario: string;
+    cuota: number;
+    meses: Array<{ anio: number; mes: string; idx: number; estado: 'pagado' | 'revision' | 'pendiente' | 'disponible' | 'noAplica' }>;
+    primeroPagable: { anio: number; mes: string } | null;
+    pagadoHasta: { anio: number; mes: string } | null;
+    maxAnio: number;
+  }> {
+    const hoy = new Date();
+    const curY = hoy.getFullYear();
+    const curIdx = this.idxDe(curY, hoy.getMonth());
+    const usuarios = await this.readCollection<Usuario>('usuarios');
+    const u = usuarios.find((x) => x.usuario === usuario);
+    const ingreso = this.parseFechaIngreso(u?.fechaIngreso);
+    // Inicio: mes de ingreso (si lo hay), sin ir más de 3 años atrás.
+    let inicio = ingreso ? this.idxDe(ingreso.year, ingreso.monthIndex) : this.idxDe(curY, 0);
+    inicio = Math.max(inicio, this.idxDe(curY - 3, 0));
+    const fin = this.idxDe(curY + 1, 11);
+    const cob = await this.coberturaDe(usuario, fondo);
+
+    const desde = this.idxDe(Math.floor(Math.min(inicio, this.idxDe(curY, 0)) / 12), 0);
+    const meses: Array<{ anio: number; mes: string; idx: number; estado: any }> = [];
+    let primero: number | null = null;
+    for (let i = desde; i <= fin; i++) {
+      let estado: string;
+      if (i < inicio) estado = 'noAplica';
+      else if (cob.has(i)) estado = cob.get(i)!;
+      else estado = i <= curIdx ? 'pendiente' : 'disponible';
+      if (primero === null && i >= inicio && !cob.has(i)) primero = i;
+      meses.push({ anio: Math.floor(i / 12), mes: PaymentsService.MESES_ES[i % 12], idx: i, estado });
+    }
+    const aPer = (i: number) => ({ anio: Math.floor(i / 12), mes: PaymentsService.MESES_ES[i % 12] });
+    const pagadoHastaIdx = primero === null ? fin : primero - 1;
+
+    let cuota = 0;
+    try {
+      const conjuntos = await this.firebase.liveValues<any>('mirror/conjuntos');
+      const conj = String(u?.conjunto || '').trim().toLowerCase();
+      const c = conjuntos.find((x) => String(x?.nombre || '').trim().toLowerCase() === conj || String(x?.id || '').trim().toLowerCase() === conj);
+      cuota = Number(String(c?.cuotaMonto ?? 0).replace(/[^\d.]/g, '')) || 0;
+    } catch {
+      /* sin cuota configurada */
+    }
+
+    return {
+      usuario,
+      cuota,
+      meses,
+      primeroPagable: primero === null ? null : aPer(primero),
+      pagadoHasta: pagadoHastaIdx >= inicio ? aPer(pagadoHastaIdx) : null,
+      maxAnio: curY + 1,
+    };
+  }
+
+  /**
+   * Valida y normaliza los periodos a pagar. Devuelve los periodos ordenados o
+   * un mensaje de error claro para mostrar en la app.
+   */
+  async validarPeriodos(
+    usuario: string,
+    periodos: Array<{ mes: string; anio: number }>,
+    fondo?: string,
+  ): Promise<{ ok: true; periodos: Array<{ mes: string; anio: number }> } | { ok: false; message: string }> {
+    if (!Array.isArray(periodos) || periodos.length === 0) return { ok: false, message: 'Selecciona al menos un mes.' };
+    const idxs: number[] = [];
+    for (const p of periodos) {
+      const m = this.mesIndex(p?.mes);
+      const a = Number(p?.anio);
+      if (m < 0 || !Number.isInteger(a)) return { ok: false, message: `Mes inválido: ${p?.mes} ${p?.anio}.` };
+      idxs.push(this.idxDe(a, m));
+    }
+    const unicos = Array.from(new Set(idxs)).sort((x, y) => x - y);
+    const nombre = (i: number) => `${PaymentsService.MESES_ES[i % 12]} ${Math.floor(i / 12)}`;
+
+    const info = await this.getPayableMonths(usuario, fondo);
+    const fin = this.idxDe(info.maxAnio, 11);
+    if (unicos[unicos.length - 1] > fin) {
+      return { ok: false, message: `Solo se puede pagar hasta diciembre de ${info.maxAnio}.` };
+    }
+    const porIdx = new Map(info.meses.map((m) => [m.idx, m.estado]));
+    for (const i of unicos) {
+      const est = porIdx.get(i);
+      if (est === 'pagado' || est === 'revision') return { ok: false, message: `${nombre(i)} ya está pagado o en revisión.` };
+      if (est === 'noAplica' || est === undefined) return { ok: false, message: `${nombre(i)} no se puede pagar.` };
+    }
+    for (let k = 1; k < unicos.length; k++) {
+      if (unicos[k] !== unicos[k - 1] + 1) return { ok: false, message: 'Los meses deben ser seguidos, sin saltos.' };
+    }
+    if (info.primeroPagable) {
+      const primero = this.idxDe(info.primeroPagable.anio, this.mesIndex(info.primeroPagable.mes));
+      if (unicos[0] !== primero) {
+        return { ok: false, message: `Primero se debe pagar ${info.primeroPagable.mes} ${info.primeroPagable.anio}.` };
+      }
+    }
+    return { ok: true, periodos: unicos.map((i) => ({ mes: PaymentsService.MESES_ES[i % 12], anio: Math.floor(i / 12) })) };
+  }
+
   /**
    * Datos del recibo de uno o varios pagos (p. ej. los meses registrados juntos),
    * leídos de RTDB. El recibo se arma en el servidor a partir de los pagos
@@ -1071,17 +1227,29 @@ export class PaymentsService {
     concepto?: string;
     // Tipo de recaudo (fondo) al que se asigna el pago. Por defecto 'Administración'.
     tipoRecaudo?: string;
-  }): Promise<{ success: boolean; ids: string[]; pagos: Pago[] }> {
+    // Meses de uno o varios años: [{ mes: 'Noviembre', anio: 2026 }, { mes: 'Enero', anio: 2027 }].
+    // Si no viene, se usan `meses` + `year` (clientes anteriores).
+    periodos?: Array<{ mes: string; anio: number }>;
+  }): Promise<{ success: boolean; ids: string[]; pagos: Pago[]; message?: string }> {
     const db = this.firebase.db();
     const hoy = new Date().toISOString().split('T')[0];
     const ids: string[] = [];
     const pagos: Pago[] = [];
     const updates: Record<string, any> = {};
 
-    // Conceptos a crear: uno por mes, o uno solo con el concepto libre.
-    const conceptos = input.concepto
-      ? [input.concepto]
-      : (input.meses || []).map((mes) => `Administración ${mes} ${input.year}`);
+    // Conceptos a crear: uno por mes (validados: seguidos, desde el más antiguo
+    // pendiente, sin repetir, hasta dic. del año siguiente) o uno con el concepto libre.
+    let conceptos: string[];
+    if (input.concepto) {
+      conceptos = [input.concepto];
+    } else {
+      const pedidos = input.periodos?.length
+        ? input.periodos
+        : (input.meses || []).map((mes) => ({ mes, anio: Number(input.year) }));
+      const v = await this.validarPeriodos(input.usuario, pedidos, input.tipoRecaudo);
+      if (!v.ok) return { success: false, ids: [], pagos: [], message: v.message };
+      conceptos = v.periodos.map((p) => `Administración ${p.mes} ${p.anio}`);
+    }
 
     for (const concepto of conceptos) {
       const id = Date.now().toString() + Math.random().toString().slice(2, 5);
@@ -1492,6 +1660,9 @@ Secciones: Inicio (resumen), Pagos (registrar/confirmar pagos y ver morosos), ` 
     monto?: number;
     concepto?: string;
     preferredMethod?: string;
+    /** Meses de uno o varios años. Si no viene, `meses` se toman del `anio` indicado (o el actual). */
+    periodos?: Array<{ mes: string; anio: number }>;
+    anio?: number;
     successUrl?: string;
     failureUrl?: string;
     pendingUrl?: string;
@@ -1504,12 +1675,21 @@ Secciones: Inicio (resumen), Pagos (registrar/confirmar pagos y ver morosos), ` 
     if (!monto || monto <= 0) return { success: false, message: 'Monto inválido.' };
 
     const nombreMostrar = input.nombre || input.usuario;
-    const meses = input.meses || [];
-    const year = new Date().getFullYear();
+    // Antes el año era SIEMPRE el actual: pagar enero del año siguiente quedaba
+    // registrado como enero del año en curso.
+    const pedidos = input.periodos?.length
+      ? input.periodos
+      : (input.meses || []).map((mes) => ({ mes, anio: Number(input.anio) || new Date().getFullYear() }));
+    let periodos: Array<{ mes: string; anio: number }> = [];
+    if (pedidos.length > 0) {
+      const v = await this.validarPeriodos(input.usuario, pedidos);
+      if (!v.ok) return { success: false, message: v.message };
+      periodos = v.periodos;
+    }
 
-    const items = meses.length > 0
-      ? meses.map((m) => ({
-          title: `Administración ${m} ${year}`,
+    const items = periodos.length > 0
+      ? periodos.map((p) => ({
+          title: `Administración ${p.mes} ${p.anio}`,
           description: `Pago administración ${input.conjunto} - ${nombreMostrar}`,
           quantity: 1,
           currency_id: 'COP',
@@ -1567,8 +1747,8 @@ Secciones: Inicio (resumen), Pagos (registrar/confirmar pagos y ver morosos), ` 
           createdAt: new Date().toISOString(), _fbWrite: true,
         };
       };
-      if (meses.length > 0) {
-        meses.forEach((m, j) => registrar(`${base}-${j}`, `Administración ${m} ${year}`));
+      if (periodos.length > 0) {
+        periodos.forEach((p, j) => registrar(`${base}-${j}`, `Administración ${p.mes} ${p.anio}`));
       } else {
         registrar(base, input.concepto || 'Pago Administración');
       }
