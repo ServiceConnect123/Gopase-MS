@@ -14,7 +14,12 @@ import * as QRCode from 'qrcode';
 import pino from 'pino';
 import NodeCache from 'node-cache';
 import { FirebaseService } from '../firebase/firebase.service';
-import { clearFirebaseSession, useFirebaseAuthState } from './firebase-auth-state';
+import {
+  clearFirebaseSession,
+  safeNodeKey,
+  useFirebaseAuthState,
+  WSP_SESSION_ROOT,
+} from './firebase-auth-state';
 
 /**
  * Representa una sesión de WhatsApp vinculada (una por conjunto, más una
@@ -43,6 +48,26 @@ interface WhatsappSession {
   pairingPhone: string | null;
   /** Último código de emparejamiento emitido (8 caracteres) o null. */
   pairingCode: string | null;
+  /**
+   * Sesión apagada a propósito (unlink, o restauración automática que resultó
+   * no estar vinculada). Con true, el handler de cierre NO reconecta: antes,
+   * tras un unlink el socket viejo reconectaba solo y quedaba emitiendo QR.
+   */
+  stopped: boolean;
+  /**
+   * Reconexión automática al arrancar el proceso. Si en vez de conectar emite
+   * un QR (la sesión no estaba vinculada), se apaga en lugar de quedarse
+   * generando QR indefinidamente.
+   */
+  autoRestore: boolean;
+}
+
+/** Resultado detallado de un envío (para la cola y los reportes). */
+export interface SendResult {
+  ok: boolean;
+  /** Motivo del fallo: sin sesión lista, número inválido, sin WhatsApp o error. */
+  reason?: 'sin_sesion' | 'numero_invalido' | 'sin_whatsapp' | 'error';
+  error?: string;
 }
 
 /**
@@ -162,6 +187,63 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       .catch((e) =>
         this.logger.error(`Fallo al iniciar la sesión por defecto: ${e?.message}`),
       );
+
+    // Reconecta las sesiones de conjuntos que ya estaban vinculadas. Antes solo
+    // volvían cuando el admin pedía su QR; mientras tanto sus mensajes salían
+    // en silencio desde el número global de goPase.
+    setTimeout(() => {
+      this.restoreConjuntoSessions().catch((e) =>
+        this.logger.error(`Fallo restaurando sesiones de conjuntos: ${e?.message}`),
+      );
+    }, 5000);
+  }
+
+  /**
+   * Arranca, escalonadas, las sesiones de los conjuntos que tienen credenciales
+   * guardadas en RTDB. Si alguna resulta no estar vinculada (pide QR), se apaga
+   * sola (ver `autoRestore` en el handler de conexión).
+   */
+  private async restoreConjuntoSessions(): Promise<void> {
+    if (!this.firebase.isEnabled()) return;
+    const conjuntos = await this.firebase.liveValues<any>('mirror/conjuntos');
+    let restauradas = 0;
+    for (const c of conjuntos) {
+      const key = this.normalizeKey(c?.nombre);
+      if (key === WhatsappService.DEFAULT_KEY || this.sessions.has(key)) continue;
+      const node = safeNodeKey(this.rowKeyFor(key));
+      try {
+        // Solo el campo chico `updatedAt`: no descarga el payload de la sesión.
+        const snap = await this.firebase.db().ref(`${WSP_SESSION_ROOT}/${node}/updatedAt`).get();
+        if (!snap.exists()) continue;
+      } catch {
+        continue;
+      }
+      const { session, connect } = this.ensureSession(key);
+      session.autoRestore = true;
+      connect().catch((e) =>
+        this.logger.error(`[${key}] Error restaurando sesión: ${e?.message}`),
+      );
+      restauradas++;
+      // Escalonar: varios handshakes simultáneos pesan en CPU/RAM de Render.
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    if (restauradas) this.logger.log(`Restauración: ${restauradas} sesiones de conjunto en curso.`);
+  }
+
+  /** Apaga una sesión sin borrar sus credenciales y la quita del mapa. */
+  private stopSession(session: WhatsappSession): void {
+    session.stopped = true;
+    session.ready = false;
+    session.currentQr = null;
+    const sock = session.sock;
+    session.sock = null;
+    session.connecting = false;
+    try {
+      sock?.end(undefined);
+    } catch {
+      // no-op
+    }
+    if (this.sessions.get(session.key) === session) this.sessions.delete(session.key);
   }
 
   async onModuleDestroy() {
@@ -217,6 +299,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         usePairing: false,
         pairingPhone: null,
         pairingCode: null,
+        stopped: false,
+        autoRestore: false,
       };
       this.sessions.set(key, session);
     }
@@ -226,6 +310,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   /** Arranca la conexión de una sesión si aún no está lista ni conectando. */
   private ensureConnected(key: string): WhatsappSession {
     const { session, connect } = this.ensureSession(key);
+    // Pedido explícito (QR del admin): la sesión vuelve a estar habilitada.
+    session.stopped = false;
+    session.autoRestore = false;
     if (!session.ready && !session.connecting && !session.sock) {
       connect().catch((e) =>
         this.logger.error(`Error conectando sesión '${key}': ${e?.message}`),
@@ -281,6 +368,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`[${key}] Pairing code solicitado para número: ${digits} (${digits.length} dígitos)`);
 
     const { session } = this.ensureSession(key);
+    session.stopped = false;
+    session.autoRestore = false;
     if (session.ready) {
       return { ready: true, code: null, message: 'WhatsApp ya está conectado.' };
     }
@@ -346,6 +435,10 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private async connect(session: WhatsappSession): Promise<void> {
     // Evita conexiones concurrentes de la misma sesión: dos sockets con la
     // misma credencial rompen el descifrado ("unable to authenticate data").
+    if (session.stopped) {
+      this.logger.debug(`connect('${session.key}') ignorado: sesión apagada.`);
+      return;
+    }
     if (session.connecting) {
       this.logger.debug(
         `connect('${session.key}') ignorado: ya hay una conexión en curso.`,
@@ -471,6 +564,17 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     session.sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect, qr } = update;
 
+      if (qr && session.autoRestore) {
+        // Restauración automática al arrancar, pero la sesión NO estaba
+        // vinculada (pide QR): se apaga en vez de quedar emitiendo QR. Se
+        // vuelve a encender cuando el admin pida su QR (getQr/pairing).
+        this.logger.warn(
+          `[${session.key}] No estaba vinculada (pidió QR); se apaga la restauración automática.`,
+        );
+        this.stopSession(session);
+        return;
+      }
+
       if (qr) {
         session.currentQr = qr;
         this.logger.warn(
@@ -481,6 +585,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
       if (connection === 'open') {
         session.ready = true;
+        // Ya probó estar vinculada: desde aquí se comporta como una sesión normal.
+        session.autoRestore = false;
         session.currentQr = null;
         session.consecutiveFailures = 0;
         // Vinculación completada: ya no se necesita el código ni el modo pairing.
@@ -492,6 +598,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
       if (connection === 'close') {
         session.ready = false;
+        // Sesión apagada a propósito (unlink / restauración no vinculada): no reconectar.
+        if (session.stopped) return;
         const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
         const loggedOut = statusCode === DisconnectReason.loggedOut;
         session.consecutiveFailures++;
@@ -550,6 +658,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     this.logger.warn(
       `[${key}] Relogin solicitado: cerrando sesión y limpiando credenciales...`,
     );
+    session.stopped = false;
+    session.autoRestore = false;
     session.ready = false;
     session.currentQr = null;
     // Relogin vuelve al método por defecto (QR). Si el admin quiere código,
@@ -604,6 +714,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.logger.warn(`[${key}] Desvinculación solicitada: cerrando y apagando sesión.`);
+    // Antes de cerrar: evita que el handler de cierre del socket reconecte.
+    session.stopped = true;
     session.ready = false;
     session.currentQr = null;
 
@@ -659,25 +771,21 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
+  /** Envía texto. Devuelve true si salió. Ver `sendMessageDetailed` para el motivo. */
   async sendMessage(
     phone: string | number,
     text: string,
     conjunto?: string | null,
   ): Promise<boolean> {
-    const session = this.resolveSenderSession(conjunto);
-    if (!session) {
-      this.logger.warn('WhatsApp no está listo. Mensaje no enviado.');
-      return false;
-    }
-    try {
-      const jid = this.toJid(phone);
-      await session.sock!.sendMessage(jid, { text });
-      this.logger.log(`[${session.key}] Mensaje enviado a ${phone}`);
-      return true;
-    } catch (error: any) {
-      this.logger.error(`Error enviando a ${phone}: ${error?.message}`);
-      return false;
-    }
+    return (await this.sendMessageDetailed(phone, text, conjunto)).ok;
+  }
+
+  async sendMessageDetailed(
+    phone: string | number,
+    text: string,
+    conjunto?: string | null,
+  ): Promise<SendResult> {
+    return this.deliver(phone, { text }, conjunto);
   }
 
   /**
@@ -690,10 +798,17 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     opts: { imageUrl?: string; imageBase64?: string; caption?: string },
     conjunto?: string | null,
   ): Promise<boolean> {
-    const session = this.resolveSenderSession(conjunto);
-    if (!session) {
+    return (await this.sendImageDetailed(phone, opts, conjunto)).ok;
+  }
+
+  async sendImageDetailed(
+    phone: string | number,
+    opts: { imageUrl?: string; imageBase64?: string; caption?: string },
+    conjunto?: string | null,
+  ): Promise<SendResult> {
+    if (!this.resolveSenderSession(conjunto)) {
       this.logger.warn('WhatsApp no está listo. Imagen no enviada.');
-      return false;
+      return { ok: false, reason: 'sin_sesion' };
     }
 
     let buffer: Buffer | null = null;
@@ -710,22 +825,79 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
     if (!buffer || buffer.length === 0) {
       // Si no se logró obtener la imagen pero hay caption, al menos manda el texto.
-      if (opts.caption) return this.sendMessage(phone, opts.caption, conjunto);
+      if (opts.caption) return this.deliver(phone, { text: opts.caption }, conjunto);
       this.logger.warn('No se pudo obtener la imagen a enviar.');
-      return false;
+      return { ok: false, reason: 'error', error: 'No se pudo obtener la imagen.' };
     }
 
+    return this.deliver(phone, { image: buffer, caption: opts.caption || undefined }, conjunto);
+  }
+
+  /**
+   * Envío común: resuelve la sesión, normaliza el número, verifica que tenga
+   * WhatsApp (onWhatsApp, con caché) y envía. Antes un número sin WhatsApp se
+   * contaba como "enviado".
+   */
+  private async deliver(
+    phone: string | number,
+    content: { text: string } | { image: Buffer; caption?: string },
+    conjunto?: string | null,
+  ): Promise<SendResult> {
+    const session = this.resolveSenderSession(conjunto);
+    if (!session) {
+      this.logger.warn('WhatsApp no está listo. Mensaje no enviado.');
+      return { ok: false, reason: 'sin_sesion' };
+    }
+    let jid: string;
     try {
-      const jid = this.toJid(phone);
-      await session.sock!.sendMessage(jid, {
-        image: buffer,
-        caption: opts.caption || undefined,
-      });
-      this.logger.log(`[${session.key}] Imagen enviada a ${phone}`);
-      return true;
+      jid = this.toJid(phone);
+    } catch (e: any) {
+      this.logger.warn(`Número inválido "${phone}": ${e?.message}`);
+      return { ok: false, reason: 'numero_invalido', error: e?.message };
+    }
+    const verificado = await this.checkOnWhatsapp(session, jid);
+    if (verificado === null) {
+      this.logger.warn(`El número ${phone} no tiene WhatsApp. No se envía.`);
+      return { ok: false, reason: 'sin_whatsapp' };
+    }
+    try {
+      await session.sock!.sendMessage(verificado, content as any);
+      this.logger.log(`[${session.key}] ${'image' in content ? 'Imagen' : 'Mensaje'} enviado a ${phone}`);
+      return { ok: true };
     } catch (error: any) {
-      this.logger.error(`Error enviando imagen a ${phone}: ${error?.message}`);
-      return false;
+      this.logger.error(`Error enviando a ${phone}: ${error?.message}`);
+      return { ok: false, reason: 'error', error: error?.message };
+    }
+  }
+
+  /** Caché de onWhatsApp: número -> jid verificado (o null si no tiene WhatsApp). */
+  private readonly waCheckCache = new Map<string, { jid: string | null; at: number }>();
+  private static readonly WA_CHECK_TTL_OK_MS = 24 * 3600_000;
+  private static readonly WA_CHECK_TTL_NO_MS = 6 * 3600_000;
+
+  /**
+   * Devuelve el jid con el que WhatsApp reconoce el número, o null si el número
+   * no tiene WhatsApp. Si la verificación falla (red/protocolo), devuelve el
+   * jid original para no bloquear el envío.
+   */
+  private async checkOnWhatsapp(session: WhatsappSession, jid: string): Promise<string | null> {
+    const now = Date.now();
+    const hit = this.waCheckCache.get(jid);
+    if (hit) {
+      const ttl = hit.jid ? WhatsappService.WA_CHECK_TTL_OK_MS : WhatsappService.WA_CHECK_TTL_NO_MS;
+      if (now - hit.at < ttl) return hit.jid;
+    }
+    try {
+      const res = await session.sock!.onWhatsApp(jid);
+      const r = Array.isArray(res) ? res[0] : undefined;
+      if (!r) return jid; // respuesta vacía: no concluyente
+      const value = r.exists ? String(r.jid || jid) : null;
+      if (this.waCheckCache.size > 5000) this.waCheckCache.clear();
+      this.waCheckCache.set(jid, { jid: value, at: now });
+      return value;
+    } catch (e: any) {
+      this.logger.debug(`onWhatsApp falló para ${jid}: ${e?.message}`);
+      return jid;
     }
   }
 
@@ -734,35 +906,123 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   // ---------------------------------------------------------------------------
 
   /**
-   * Normaliza un número colombiano a JID de WhatsApp.
-   * Acepta formatos como "3001234567", "573001234567", "+57 300 123 4567".
+   * Normaliza un teléfono a JID de WhatsApp.
+   *   - "+<cc>..." o "00<cc>...": se respeta el indicativo internacional.
+   *   - 10 dígitos sin indicativo: se antepone WHATSAPP_DEFAULT_CC (57 = Colombia).
+   *   - Resto: se asume que ya trae indicativo. Fuera de 10..15 dígitos => inválido.
    */
   private toJid(phone: string | number): string {
-    let digits = String(phone == null ? '' : phone).replace(/\D/g, '');
+    const raw = String(phone == null ? '' : phone).trim();
+    let digits = raw.replace(/\D/g, '');
     if (!digits) throw new Error('Número de WhatsApp vacío');
-    if (digits.length === 10) digits = `57${digits}`;
+    const internacional = raw.startsWith('+') || digits.startsWith('00');
+    if (digits.startsWith('00')) digits = digits.slice(2);
+    if (!internacional && digits.length === 10) {
+      const cc = String(process.env.WHATSAPP_DEFAULT_CC || '57').replace(/\D/g, '') || '57';
+      digits = `${cc}${digits}`;
+    }
+    if (digits.length < 10 || digits.length > 15) {
+      throw new Error(`longitud inválida (${digits.length} dígitos)`);
+    }
     return `${digits}@s.whatsapp.net`;
   }
 
+  /** Hosts desde los que se aceptan imágenes (comprobantes y noticias en Google Drive). */
+  private static readonly IMAGE_HOSTS = [
+    'drive.google.com',
+    'docs.google.com',
+    'drive.usercontent.google.com',
+  ];
+  private static readonly IMAGE_HOST_SUFFIXES = ['.googleusercontent.com'];
+  /** Tope de tamaño de una imagen descargada. */
+  private static readonly IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+
+  private isAllowedImageUrl(u: URL): boolean {
+    if (u.protocol !== 'https:') return false;
+    const host = u.hostname.toLowerCase();
+    return (
+      WhatsappService.IMAGE_HOSTS.includes(host) ||
+      WhatsappService.IMAGE_HOST_SUFFIXES.some((suf) => host.endsWith(suf))
+    );
+  }
+
   /**
-   * Descarga una imagen desde una URL (p. ej. el comprobante en Google Drive)
-   * y devuelve su contenido como Buffer. Devuelve null si falla.
+   * Descarga una imagen (p. ej. el comprobante en Google Drive) como Buffer, o
+   * null si falla.
+   *
+   * Seguridad: antes descargaba CUALQUIER URL recibida por un endpoint público
+   * (SSRF: peticiones a la red interna; y sin tope de tamaño). Ahora:
+   *   - Solo https y hosts de Google Drive (lista blanca), también en cada
+   *     redirección (se siguen a mano, máx. 5).
+   *   - Tope de 10 MB (por Content-Length y mientras se lee el cuerpo).
+   *   - Debe ser una imagen (Content-Type image/*).
    */
   private async downloadImage(url: string): Promise<Buffer | null> {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 20000);
     try {
-      const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), 20000);
-      const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(t);
+      let current: URL;
+      try {
+        current = new URL(url);
+      } catch {
+        this.logger.warn(`URL de imagen inválida: ${url}`);
+        return null;
+      }
+      let res: Response | null = null;
+      for (let hop = 0; hop <= 5; hop++) {
+        if (!this.isAllowedImageUrl(current)) {
+          this.logger.warn(`Imagen rechazada: host no permitido (${current.hostname}).`);
+          return null;
+        }
+        res = await fetch(current, { signal: controller.signal, redirect: 'manual' });
+        if (res.status >= 300 && res.status < 400) {
+          const loc = res.headers.get('location');
+          if (!loc) return null;
+          current = new URL(loc, current);
+          res = null;
+          continue;
+        }
+        break;
+      }
+      if (!res) {
+        this.logger.warn(`Demasiadas redirecciones descargando la imagen: ${url}`);
+        return null;
+      }
       if (!res.ok) {
         this.logger.warn(`No se pudo descargar la imagen (${res.status}): ${url}`);
         return null;
       }
-      const arrayBuffer = await res.arrayBuffer();
-      return Buffer.from(arrayBuffer);
+      const tipo = String(res.headers.get('content-type') || '').toLowerCase();
+      if (tipo && !tipo.startsWith('image/')) {
+        this.logger.warn(`El recurso no es una imagen (${tipo}): ${url}`);
+        return null;
+      }
+      const declarado = Number(res.headers.get('content-length') || 0);
+      if (declarado > WhatsappService.IMAGE_MAX_BYTES) {
+        this.logger.warn(`Imagen demasiado grande (${declarado} bytes): ${url}`);
+        return null;
+      }
+      if (!res.body) return null;
+      const chunks: Buffer[] = [];
+      let total = 0;
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > WhatsappService.IMAGE_MAX_BYTES) {
+          controller.abort();
+          this.logger.warn(`Imagen supera ${WhatsappService.IMAGE_MAX_BYTES} bytes: ${url}`);
+          return null;
+        }
+        chunks.push(Buffer.from(value));
+      }
+      return Buffer.concat(chunks);
     } catch (e: any) {
       this.logger.error(`Error descargando imagen: ${e?.message}`);
       return null;
+    } finally {
+      clearTimeout(t);
     }
   }
 

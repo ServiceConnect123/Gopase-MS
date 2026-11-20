@@ -38,10 +38,10 @@ export interface FirebaseAuthStateResult {
 
 const DEFAULT_SESSION_KEY = 'session';
 /** Nodo raíz donde se guardan las sesiones de WhatsApp. */
-const WSP_SESSION_ROOT = 'mirror/wsp_session';
+export const WSP_SESSION_ROOT = 'mirror/wsp_session';
 
 /** Sanea una clave para usarla como nodo de RTDB (no admite . # $ / [ ]). */
-function safeNodeKey(raw: string): string {
+export function safeNodeKey(raw: string): string {
   return String(raw ?? '').trim().replace(/[.#$/\[\]]/g, '_') || DEFAULT_SESSION_KEY;
 }
 

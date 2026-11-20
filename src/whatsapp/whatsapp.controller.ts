@@ -1,15 +1,22 @@
-import { Controller, Get, Header, Post, Query } from '@nestjs/common';
+import { Controller, Get, Header, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { WhatsappService } from './whatsapp.service';
 import { Public } from '../auth/public.decorator';
+import { FirebaseService } from '../firebase/firebase.service';
+import { assertConjuntoPermitido, WspAccessGuard } from '../auth/wsp-access.guard';
 
 @ApiTags('whatsapp')
 @Controller('whatsapp')
-// Público para el JwtAuthGuard: gestión de la sesión de WhatsApp (QR, estado,
-// relogin), que se consulta en estados sin sesión de usuario plena.
-@Public()
+// Solo `status` es público. QR, código de vinculación, relogin y unlink exigen
+// JWT de admin del conjunto (o superAdmin): antes cualquiera podía desvincular
+// el WhatsApp de un conjunto y vincular SU número en su lugar. Sin conjunto =
+// sesión global de goPase => solo superAdmin.
+@UseGuards(WspAccessGuard)
 export class WhatsappController {
-  constructor(private readonly whatsapp: WhatsappService) {}
+  constructor(
+    private readonly whatsapp: WhatsappService,
+    private readonly firebase: FirebaseService,
+  ) {}
 
   /**
    * Estado de la conexión de WhatsApp para un conjunto.
@@ -17,6 +24,7 @@ export class WhatsappController {
    */
   @ApiOperation({ summary: 'Estado de la conexión de WhatsApp (por conjunto)' })
   @ApiQuery({ name: 'conjunto', required: false })
+  @Public()
   @Get('status')
   status(@Query('conjunto') conjunto?: string) {
     return {
@@ -30,7 +38,8 @@ export class WhatsappController {
   @ApiOperation({ summary: 'QR actual en JSON (string + PNG base64) por conjunto' })
   @ApiQuery({ name: 'conjunto', required: false })
   @Get('qr')
-  async qr(@Query('conjunto') conjunto?: string) {
+  async qr(@Req() req: any, @Query('conjunto') conjunto?: string) {
+    await assertConjuntoPermitido(req, this.firebase, conjunto);
     let data: Awaited<ReturnType<typeof this.whatsapp.getQr>> = null;
     try {
       data = await this.whatsapp.getQr(conjunto);
@@ -73,9 +82,11 @@ export class WhatsappController {
   @ApiQuery({ name: 'phone', required: true, description: 'Número en formato internacional (ej: 573001112233)' })
   @Get('pairing-code')
   async pairingCode(
+    @Req() req: any,
     @Query('phone') phone: string,
     @Query('conjunto') conjunto?: string,
   ) {
+    await assertConjuntoPermitido(req, this.firebase, conjunto);
     if (!phone) {
       return {
         ready: false,
@@ -93,7 +104,8 @@ export class WhatsappController {
   @ApiQuery({ name: 'conjunto', required: false })
   @Get('qr/view')
   @Header('Content-Type', 'text/html; charset=utf-8')
-  async qrView(@Query('conjunto') conjunto?: string) {
+  async qrView(@Req() req: any, @Query('conjunto') conjunto?: string) {
+    await assertConjuntoPermitido(req, this.firebase, conjunto);
     const data = await this.whatsapp.getQr(conjunto);
     if (this.whatsapp.isReady(conjunto)) {
       return `<html><body style="font-family:sans-serif;text-align:center;padding:40px">
@@ -128,7 +140,8 @@ export class WhatsappController {
   })
   @ApiQuery({ name: 'conjunto', required: false })
   @Post('relogin')
-  async relogin(@Query('conjunto') conjunto?: string) {
+  async relogin(@Req() req: any, @Query('conjunto') conjunto?: string) {
+    await assertConjuntoPermitido(req, this.firebase, conjunto);
     try {
       await this.whatsapp.relogin(conjunto);
     } catch (e: any) {
@@ -155,7 +168,8 @@ export class WhatsappController {
   })
   @ApiQuery({ name: 'conjunto', required: false })
   @Post('unlink')
-  async unlink(@Query('conjunto') conjunto?: string) {
+  async unlink(@Req() req: any, @Query('conjunto') conjunto?: string) {
+    await assertConjuntoPermitido(req, this.firebase, conjunto);
     await this.whatsapp.unlink(conjunto);
     return {
       ok: true,

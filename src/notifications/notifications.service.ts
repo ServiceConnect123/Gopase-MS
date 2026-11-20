@@ -8,6 +8,7 @@ import {
   PendingPaymentsRepository,
 } from './pending-payments.repository';
 import { generateReceiptPng, ReceiptData } from './receipt-image.generator';
+import { WspQueueService } from './wsp-queue.service';
 
 @Injectable()
 export class NotificationsService implements OnModuleInit {
@@ -18,6 +19,7 @@ export class NotificationsService implements OnModuleInit {
     private readonly repo: PendingPaymentsRepository,
     private readonly whatsapp: WhatsappService,
     private readonly config: ConfigService,
+    private readonly queue: WspQueueService,
   ) {}
 
   async onModuleInit() {
@@ -151,7 +153,7 @@ export class NotificationsService implements OnModuleInit {
           continue;
         }
 
-        const pagos = pendingByConjunto.get(conjunto.nombre) || [];
+        const pagos = pendingByConjunto.get(key) || [];
         if (pagos.length === 0) {
           this.logger.debug(`"${conjunto.nombre}" sin pagos pendientes.`);
           continue;
@@ -220,115 +222,96 @@ export class NotificationsService implements OnModuleInit {
   }
 
   /**
-   * Envía recordatorios de cobro a una lista de deudores, con un delay entre
-   * cada mensaje para no ser bloqueado por WhatsApp. Como el servicio puede
-   * estar dormido (Render), primero espera a que la conexión esté lista.
+   * Encola recordatorios de cobro (o invitaciones a eventos) para una lista de
+   * destinatarios. El envío real lo hace WspQueueService: persistido, con pausa
+   * entre mensajes, reanudable tras un reinicio y deduplicado.
    *
-   * El mensaje soporta placeholders {nombre}, {mes}, {año}.
+   * El mensaje soporta placeholders {nombre}, {mes}, {año}/{anio}.
    */
-  async notifyDebtors(payload: {
-    mensaje: string;
-    destinatarios: Array<{ nombre: string; telefono: string; mes?: string; anio?: string }>;
-    conjunto?: string;
-  }): Promise<{ ok: boolean; enviados: number; fallidos: number; total: number; message: string }> {
+  async notifyDebtors(
+    payload: {
+      mensaje: string;
+      destinatarios: Array<{ nombre: string; telefono: string; mes?: string; anio?: string }>;
+      conjunto?: string;
+    },
+    creadoPor = '',
+  ): Promise<{ ok: boolean; total: number; jobId?: string; duplicado?: boolean; message: string }> {
     const lista = (payload?.destinatarios || []).filter((d) => d && d.telefono);
-    const total = lista.length;
-    if (total === 0) {
-      return { ok: true, enviados: 0, fallidos: 0, total: 0, message: 'No hay destinatarios con teléfono.' };
+    if (lista.length === 0) {
+      return { ok: true, total: 0, message: 'No hay destinatarios con teléfono.' };
     }
-
-    const conjunto = payload?.conjunto;
-
-    // Delay entre mensajes (ms). Configurable; por defecto 4s.
-    const delayMs = Number(this.config.get<string>('WHATSAPP_MESSAGE_DELAY_MS', '4000'));
-
-    const ready = await this.waitForWhatsapp(conjunto);
-    if (!ready) {
-      return {
-        ok: false, enviados: 0, fallidos: total, total,
-        message: 'WhatsApp no está conectado. Intenta de nuevo en un momento.',
-      };
-    }
-
-    let enviados = 0;
-    let fallidos = 0;
-    for (let i = 0; i < lista.length; i++) {
-      const d = lista[i];
-      const texto = (payload.mensaje || 'Hola {nombre}, tienes un pago pendiente.')
-        .replace(/\{nombre\}/g, d.nombre || '')
-        .replace(/\{mes\}/g, d.mes || '')
-        .replace(/\{año\}/g, d.anio || '')
-        .replace(/\{anio\}/g, d.anio || '');
-
-      const ok = await this.whatsapp.sendMessage(d.telefono, texto, conjunto);
-      if (ok) enviados++;
-      else fallidos++;
-
-      // Delay entre mensajes (no tras el último).
-      if (i < lista.length - 1) await this.sleep(delayMs);
-    }
-
-    this.logger.log(`Notificación de cobro: ${enviados}/${total} enviados, ${fallidos} fallidos.`);
+    const plantilla = payload.mensaje || 'Hola {nombre}, tienes un pago pendiente.';
+    const job = await this.queue.crear({
+      tipo: 'recordatorio',
+      conjunto: payload.conjunto || '',
+      creadoPor,
+      destinatarios: lista.map((d) => ({
+        nombre: d.nombre || '',
+        telefono: d.telefono,
+        texto: plantilla
+          .replace(/\{nombre\}/g, d.nombre || '')
+          .replace(/\{mes\}/g, d.mes || '')
+          .replace(/\{año\}/g, d.anio || '')
+          .replace(/\{anio\}/g, d.anio || ''),
+      })),
+    });
     return {
-      ok: true, enviados, fallidos, total,
-      message: `Se enviaron ${enviados} de ${total} mensajes.`,
+      ok: true,
+      total: job.total,
+      jobId: job.id,
+      duplicado: job.duplicado,
+      message: job.duplicado
+        ? 'Este envío ya estaba en proceso; no se duplicó.'
+        : `Notificación en proceso: se enviarán ${job.total} mensajes con pausa entre cada uno.`,
     };
   }
 
   /**
-   * Difunde una NOTICIA del conjunto por WhatsApp a una lista de destinatarios.
-   * Envía la imagen (si viene) con el texto como caption; si no hay imagen,
-   * manda solo texto. Pausa entre mensajes para no ser bloqueado por WhatsApp.
+   * Encola la difusión de una NOTICIA (imagen opcional + texto como caption).
    * El texto soporta el placeholder {nombre}.
    */
-  async notifyNews(payload: {
-    titulo?: string;
-    texto: string;
-    imageUrl?: string;
-    destinatarios: Array<{ nombre: string; telefono: string }>;
-    conjunto?: string;
-  }): Promise<{ ok: boolean; enviados: number; fallidos: number; total: number; message: string }> {
+  async notifyNews(
+    payload: {
+      titulo?: string;
+      texto: string;
+      imageUrl?: string;
+      destinatarios: Array<{ nombre: string; telefono: string }>;
+      conjunto?: string;
+    },
+    creadoPor = '',
+  ): Promise<{ ok: boolean; total: number; jobId?: string; duplicado?: boolean; message: string }> {
     const lista = (payload?.destinatarios || []).filter((d) => d && d.telefono);
-    const total = lista.length;
-    if (total === 0) {
-      return { ok: true, enviados: 0, fallidos: 0, total: 0, message: 'No hay destinatarios con teléfono.' };
+    if (lista.length === 0) {
+      return { ok: true, total: 0, message: 'No hay destinatarios con teléfono.' };
     }
-
-    const conjunto = payload?.conjunto;
+    const base =
+      String(payload?.texto ?? '').trim() || String(payload?.titulo ?? 'Nueva noticia del conjunto.');
     const imageUrl = String(payload?.imageUrl ?? '').trim();
-    const base = String(payload?.texto ?? '').trim() || String(payload?.titulo ?? 'Nueva noticia del conjunto.');
-    const delayMs = Number(this.config.get<string>('WHATSAPP_MESSAGE_DELAY_MS', '4000'));
-
-    const ready = await this.waitForWhatsapp(conjunto);
-    if (!ready) {
-      return {
-        ok: false, enviados: 0, fallidos: total, total,
-        message: 'WhatsApp no está conectado. Intenta de nuevo en un momento.',
-      };
-    }
-
-    let enviados = 0;
-    let fallidos = 0;
-    for (let i = 0; i < lista.length; i++) {
-      const d = lista[i];
-      const texto = base.replace(/\{nombre\}/g, d.nombre || '');
-      let ok = false;
-      if (imageUrl) {
-        // sendImage degrada a texto si no logra obtener la imagen (ver whatsapp.service).
-        ok = await this.whatsapp.sendImage(d.telefono, { imageUrl, caption: texto }, conjunto);
-      } else {
-        ok = await this.whatsapp.sendMessage(d.telefono, texto, conjunto);
-      }
-      if (ok) enviados++;
-      else fallidos++;
-      if (i < lista.length - 1) await this.sleep(delayMs);
-    }
-
-    this.logger.log(`Noticia por WhatsApp: ${enviados}/${total} enviados, ${fallidos} fallidos.`);
+    const job = await this.queue.crear({
+      tipo: 'noticia',
+      conjunto: payload.conjunto || '',
+      creadoPor,
+      imageUrl: imageUrl || undefined,
+      destinatarios: lista.map((d) => ({
+        nombre: d.nombre || '',
+        telefono: d.telefono,
+        texto: base.replace(/\{nombre\}/g, d.nombre || ''),
+      })),
+    });
     return {
-      ok: true, enviados, fallidos, total,
-      message: `Se enviaron ${enviados} de ${total} mensajes.`,
+      ok: true,
+      total: job.total,
+      jobId: job.id,
+      duplicado: job.duplicado,
+      message: job.duplicado
+        ? 'Esta noticia ya se estaba enviando; no se duplicó.'
+        : `Noticia en proceso: se enviarán ${job.total} mensajes con pausa entre cada uno.`,
     };
+  }
+
+  /** Avance de un envío masivo. */
+  getJob(id: string) {
+    return this.queue.obtener(id);
   }
 
   /**

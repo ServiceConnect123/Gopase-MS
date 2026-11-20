@@ -2,12 +2,14 @@ import { Module } from '@nestjs/common';
 import { NotificationsService } from './notifications.service';
 import { NotificationsController } from './notifications.controller';
 import { PendingPaymentsRepository } from './pending-payments.repository';
-import { SheetsModule } from '../sheets/sheets.module';
+import { WspQueueService } from './wsp-queue.service';
+import { FirebaseModule } from '../firebase/firebase.module';
+import { AuthModule } from '../auth/auth.module';
 import { WhatsappModule } from '../whatsapp/whatsapp.module';
 
 @Module({
-  imports: [SheetsModule, WhatsappModule],
+  imports: [FirebaseModule, AuthModule, WhatsappModule],
   controllers: [NotificationsController],
-  providers: [NotificationsService, PendingPaymentsRepository],
+  providers: [NotificationsService, PendingPaymentsRepository, WspQueueService],
 })
 export class NotificationsModule {}
