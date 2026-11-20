@@ -16,6 +16,7 @@
     "test": "jest"
   },
   "dependencies": {
+    "@genkit-ai/google-genai": "^1.44.0",
     "@hapi/boom": "^10.0.1",
     "@nestjs/common": "^10.4.15",
     "@nestjs/config": "^3.3.0",
@@ -29,6 +30,7 @@
     "compression": "^1.8.2",
     "exceljs": "^4.4.0",
     "firebase-admin": "^14.4.0",
+    "genkit": "^1.44.0",
     "googleapis": "^180.0.0",
     "livekit-server-sdk": "^2.19.2",
     "node-cache": "5.1.2",
