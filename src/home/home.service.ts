@@ -285,9 +285,14 @@ export class HomeService {
     });
 
     const counts = {
-      total: usersWithStatus.length,
-      alDia: usersWithStatus.filter((u) => u.paymentStatus === 'Al día').length,
-      pendientes: usersWithStatus.filter((u) => u.paymentStatus === 'Pendiente').length,
+      // Usar reporte.propietarios.length como fuente de verdad del total:
+      // ese reporte lee de Firebase RTDB directamente, igual que la pantalla
+      // de Pagos. filteredUsers viene del espejo de Sheets que puede estar
+      // desfasado y no reflejar el número real de propietarios del conjunto.
+      total: reporte.propietarios.length,
+      // Mismos orígenes para los tres números, así siempre suman el total.
+      alDia: reporte.totalAlDia,
+      pendientes: reporte.totalMora,
     };
 
     return { role, vigilanteEnTurno, usuarios: usersWithStatus, ownerMonths: [], counts };
