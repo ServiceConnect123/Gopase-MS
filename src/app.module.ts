@@ -25,6 +25,7 @@ import { NoticiasModule } from './noticias/noticias.module';
 import { BillingModule } from './billing/billing.module';
 import { PlansModule } from './plans/plans.module';
 import { TenantsModule } from './tenants/tenants.module';
+import { StaysModule } from './stays/stays.module';
 import { TagsModule } from './tags/tags.module';
 import { OnboardingModule } from './onboarding/onboarding.module';
 import { MinutasModule } from './minutas/minutas.module';
@@ -113,6 +114,7 @@ import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
     BillingModule,
     PlansModule,
     TenantsModule,
+    StaysModule,
     TagsModule,
     OnboardingModule,
     MinutasModule,
