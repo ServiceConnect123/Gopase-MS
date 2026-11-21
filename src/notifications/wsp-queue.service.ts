@@ -22,6 +22,8 @@ export interface JobItem {
   estado: ItemEstado;
   error?: string;
   at?: string;
+  /** Id del mensaje en WhatsApp: su entrega se consulta en `wsp_entrega`. */
+  msgId?: string;
 }
 
 export type JobEstado = 'pendiente' | 'procesando' | 'completado' | 'expirado';
@@ -350,6 +352,7 @@ export class WspQueueService implements OnApplicationBootstrap {
         estado,
         at: new Date().toISOString(),
         ...(r.error ? { error: String(r.error).slice(0, 200) } : {}),
+        ...(r.messageId ? { msgId: r.messageId } : {}),
       });
     }
 

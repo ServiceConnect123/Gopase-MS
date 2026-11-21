@@ -24,6 +24,7 @@ import {
   useFirebaseAuthState,
   WSP_SESSION_ROOT,
 } from './firebase-auth-state';
+import { Entrega, SentMessageStore } from './sent-message.store';
 
 /**
  * libsignal (dependencia de Baileys) imprime con console.error un stack completo
@@ -132,8 +133,10 @@ interface WhatsappSession {
 export interface SendResult {
   ok: boolean;
   /** Motivo del fallo: sin sesión lista, número inválido, sin WhatsApp o error. */
-  reason?: 'sin_sesion' | 'numero_invalido' | 'sin_whatsapp' | 'error';
+  reason?: 'sin_sesion' | 'numero_invalido' | 'sin_whatsapp' | 'texto_vacio' | 'error';
   error?: string;
+  /** Id del mensaje en WhatsApp (para consultar su estado de entrega). */
+  messageId?: string;
 }
 
 /**
@@ -165,43 +168,17 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private readonly msgRetryCounterCache = new NodeCache({ stdTTL: 60 });
 
   /**
-   * Store de mensajes respaldado en Firebase RTDB (nodo wsp_msg_store).
-   * TTL = 24 h. Sobrevive reinicios de Render (cold start).
-   * Usa un Map nativo (sin límite de keys) para evitar ECACHEFULL durante envíos masivos.
+   * Mensajes enviados (para reenvíos sin burbujas vacías) y su estado de
+   * entrega. Ver `SentMessageStore`.
    */
-  private readonly msgMap = new Map<string, { msg: any; ts: number }>();
-  private readonly MSG_TTL_MS = 86400_000; // 24 h
-  /** Tope de mensajes en memoria (los más viejos se descartan primero). */
-  private readonly MSG_MAX = 5000;
+  private readonly store: SentMessageStore;
+  /** Revisión periódica de entregas (reintentos / sin entregar). */
+  private revisionTimer: NodeJS.Timeout | null = null;
+  private static readonly REVISION_MS = 10 * 60_000;
 
-  private async msgStoreSave(sessionKey: string, id: string, message: any): Promise<void> {
-    // Solo memoria: persistir en Firebase genera demasiadas escrituras durante
-    // envíos masivos y satura el Free tier de Render. El Map sobrevive mientras
-    // el proceso esté vivo; tras un cold start los mensajes se pierden (aceptable).
-    this.msgMap.set(`${sessionKey}:${id}`, { msg: message, ts: Date.now() });
-    // Map conserva orden de inserción: el primero es el más viejo.
-    while (this.msgMap.size > this.MSG_MAX) {
-      const oldest = this.msgMap.keys().next().value;
-      if (oldest === undefined) break;
-      this.msgMap.delete(oldest);
-    }
+  constructor(private readonly firebase: FirebaseService) {
+    this.store = new SentMessageStore(firebase, this.logger);
   }
-
-  private async msgStoreGet(sessionKey: string, id: string): Promise<any> {
-    const entry = this.msgMap.get(`${sessionKey}:${id}`);
-    if (entry) return entry.msg;
-    return undefined;
-  }
-
-  /** Descarta del Map en memoria los mensajes con más de 24 h. */
-  private msgStorePurgeMemory(): void {
-    const cutoff = Date.now() - this.MSG_TTL_MS;
-    for (const [key, val] of this.msgMap.entries()) {
-      if (val.ts < cutoff) this.msgMap.delete(key);
-    }
-  }
-
-  constructor(private readonly firebase: FirebaseService) {}
 
   async onModuleInit() {
     // Arranca la sesión por defecto (retrocompatibilidad con el número global).
@@ -221,6 +198,24 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         this.logger.error(`Fallo restaurando sesiones de conjuntos: ${e?.message}`),
       );
     }, 5000);
+
+    // Entregas: recarga las pendientes de hoy/ayer (tras un reinicio), borra
+    // los días vencidos y revisa cada 10 min qué reenviar. Todo en segundo
+    // plano, fuera del arranque de la API.
+    const arranque = setTimeout(() => {
+      this.store
+        .cargarRecientes()
+        .then((n) => n && this.logger.log(`Entregas de WhatsApp recargadas: ${n}.`))
+        .catch(() => undefined);
+      this.store.limpiarViejos().catch(() => undefined);
+    }, 20_000);
+    arranque.unref?.();
+    this.revisionTimer = setInterval(() => {
+      this.revisarEntregas().catch((e) =>
+        this.logger.warn(`Revisión de entregas falló: ${e?.message}`),
+      );
+    }, WhatsappService.REVISION_MS);
+    this.revisionTimer.unref?.();
   }
 
   /**
@@ -272,6 +267,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
+    if (this.revisionTimer) clearInterval(this.revisionTimer);
+    await this.store.flush().catch(() => undefined);
     for (const session of this.sessions.values()) {
       try {
         await session.flushSession?.();
@@ -507,18 +504,12 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       logger: pino({ level: 'silent' }),
       printQRInTerminal: false,
       // ── Corrección "Esperando mensaje" en el dispositivo vinculado ──────────
-      // getMessage devuelve el mensaje desde el store en memoria cuando WhatsApp
-      // solicita re-cifrar la copia deviceSentMessage para el teléfono principal.
-      // Sin un mensaje real, imágenes y documentos quedan en "Waiting for this
-      // message". El fallback { conversation: '' } solo sirve para texto simple.
-      getMessage: async (key) => {
-        const id = key.id;
-        if (id) {
-          const stored = await this.msgStoreGet(session.key, id);
-          if (stored) return stored;
-        }
-        return { conversation: '' };
-      },
+      // getMessage: WhatsApp lo pide cuando un dispositivo (el destinatario o
+      // el propio teléfono del emisor) no pudo descifrar un mensaje y solicita
+      // reenviarlo. Se busca en memoria y, tras un reinicio, en RTDB.
+      // Si no existe se devuelve undefined: Baileys no reenvía. NUNCA
+      // `{ conversation: '' }`: eso se reenviaba y llegaba como burbuja VACÍA.
+      getMessage: async (key) => (key.id ? this.store.get(session.key, key.id) : undefined),
       // Evita descargar el historial completo al reconectar (reduce pre-keys
       // duplicadas y colisiones de senderKeys que causan descifrado fallido).
       syncFullHistory: false,
@@ -550,14 +541,31 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         // Solo los mensajes PROPIOS: getMessage() los pide para reenviar la
         // copia al teléfono principal. Guardar los entrantes solo llenaba RAM.
         if (msg.key?.fromMe && msg.key?.id && msg.message) {
-          this.msgStoreSave(session.key, msg.key.id, msg.message);
+          this.store.remember(session.key, msg.key.id, msg.message);
         }
       }
     });
-    // Al conectar: limpiar mensajes viejos de memoria. (Antes además leía
-    // wsp_msg_store de RTDB sin índice: descargaba el nodo completo en cada
-    // reconexión aunque ya nadie escribe ahí.)
-    this.msgStorePurgeMemory();
+
+    // Recibos de entrega/lectura (y errores) de los mensajes que envió el
+    // servicio. Los de mensajes escritos desde el teléfono se ignoran.
+    session.sock.ev.on('messages.update', (updates) => {
+      for (const u of updates) {
+        const status = u.update?.status;
+        if (!u.key?.fromMe || !u.key.id || status == null) continue;
+        const error = Array.isArray(u.update?.messageStubParameters)
+          ? String(u.update.messageStubParameters[0] ?? '')
+          : undefined;
+        const e = this.store.actualizarEstado(u.key.id, Number(status), error);
+        if (e?.estado === 'error' && e.reintentos < this.store.maxReintentos) {
+          // Error en el acuse del servidor: un reenvío con el MISMO id (el
+          // destinatario nunca ve duplicados) a los 10 s.
+          const t = setTimeout(() => {
+            this.reenviar(e).catch(() => undefined);
+          }, 10_000);
+          t.unref?.();
+        }
+      }
+    });
 
     // Vinculación por CÓDIGO (pairing code): si se solicitó y la sesión aún no
     // está registrada, pedimos el código a WhatsApp en vez de usar el QR. Debe
@@ -928,6 +936,11 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     content: { text: string } | { image: Buffer; caption?: string },
     conjunto?: string | null,
   ): Promise<SendResult> {
+    // Nunca enviar un mensaje de texto vacío (llega como burbuja en blanco).
+    if ('text' in content && !String(content.text ?? '').trim()) {
+      this.logger.warn(`Mensaje vacío para ${phone}: no se envía.`);
+      return { ok: false, reason: 'texto_vacio', error: 'El mensaje está vacío.' };
+    }
     const session = this.resolveSenderSession(conjunto);
     if (!session) {
       this.logger.warn('WhatsApp no está listo. Mensaje no enviado.');
@@ -946,13 +959,63 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       return { ok: false, reason: 'sin_whatsapp' };
     }
     try {
-      await session.sock!.sendMessage(verificado, content as any);
+      const sent = await session.sock!.sendMessage(verificado, content as any);
+      const messageId = sent?.key?.id || undefined;
+      // Se guarda el mensaje YA (no depende de messages.upsert) para poder
+      // reenviarlo si el destinatario lo pide, y se empieza a seguir su entrega.
+      // No bloquea: la escritura a RTDB va en un lote en segundo plano.
+      if (messageId && sent?.message) {
+        this.store.registrarEnvio({
+          sesion: session.key,
+          conjunto: this.normalizeKey(conjunto),
+          to: verificado,
+          id: messageId,
+          message: sent.message,
+          tipo: 'image' in content ? 'imagen' : 'texto',
+        });
+      }
       this.logger.log(`[${session.key}] ${'image' in content ? 'Imagen' : 'Mensaje'} enviado a ${phone}`);
-      return { ok: true };
+      return { ok: true, messageId };
     } catch (error: any) {
       this.logger.error(`Error enviando a ${phone}: ${error?.message}`);
       return { ok: false, reason: 'error', error: error?.message };
     }
+  }
+
+  /**
+   * Reenvía un mensaje con su MISMO id (WhatsApp lo trata como el mismo
+   * mensaje: el destinatario no ve duplicados). Solo si la sesión que lo envió
+   * está conectada y el mensaje sigue guardado.
+   */
+  private async reenviar(e: Entrega): Promise<boolean> {
+    const session = this.sessions.get(e.sesion);
+    if (!session?.ready || !session.sock) return false;
+    const msg = await this.store.get(e.sesion, e.id);
+    if (!msg) return false;
+    try {
+      await session.sock.relayMessage(e.to, msg, { messageId: e.id });
+      this.store.marcarReintento(e.id);
+      this.logger.log(`[${e.sesion}] Reenvío ${e.reintentos}/${this.store.maxReintentos} del mensaje ${e.id}.`);
+      return true;
+    } catch (err: any) {
+      this.logger.warn(`[${e.sesion}] Reenvío de ${e.id} falló: ${err?.message}`);
+      return false;
+    }
+  }
+
+  /** Revisión periódica: reenvía los que no se entregaron y marca los vencidos. */
+  private async revisarEntregas(): Promise<void> {
+    const pendientes = this.store.revisar();
+    for (const e of pendientes) {
+      await this.reenviar(e);
+      // Pausa corta entre reenvíos (mismo criterio que los envíos masivos).
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+
+  /** Estado de entrega de los mensajes de un día (yyyymmdd), por conjunto. */
+  async listarEntregas(fecha: string, conjunto?: string | null) {
+    return this.store.listar(fecha, conjunto ? this.normalizeKey(conjunto) : null);
   }
 
   /** Caché de onWhatsApp: número -> jid verificado (o null si no tiene WhatsApp). */
