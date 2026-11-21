@@ -412,7 +412,10 @@ export class PaymentsController {
   })
   @Post('review')
   async review(
-    @Body() body: { id: string; estado: 'Confirmado' | 'Rechazado'; valor?: string | number; referencia?: string },
+    @Body() body: {
+      id: string; estado: 'Confirmado' | 'Rechazado'; valor?: string | number; referencia?: string;
+      motivo?: string; tipoRechazo?: string; montoEsperado?: number; completo?: boolean;
+    },
   ) {
     return this.payments.reviewPayment(body);
   }

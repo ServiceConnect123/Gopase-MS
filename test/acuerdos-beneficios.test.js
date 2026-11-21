@@ -155,3 +155,80 @@ test('el abono, las cuotas y los beneficios aparecen en la lista de Pagos del a�
   // Del propietario también.
   assert.ok((await s.getOwnerPayments('carlos', Y)).some((p) => p.concepto === 'Abono inicial acuerdo de pago'));
 });
+
+test('pago parcial de una cuota: queda Parcial, la cuota no se paga y se completa con el complemento', async () => {
+  const fb = fakeFirebase(base({ abonoInicialEstado: 'aceptado' }));
+  const s = svc(fb);
+  const c = await s.createPayments({ usuario: 'carlos', montoPerMonth: 120000, year: Y, estado: 'Pendiente', referencia: 'IMG:u | ACUERDO:agr_1 | CUOTA:1', concepto: 'Acuerdo de pago · cuota 1 de 2' });
+  const id = c.ids[0];
+  // El admin confirma solo 80.000 (pagó menos).
+  const r = await s.reviewPayment({ id, estado: 'Confirmado', valor: 80000 });
+  assert.strictEqual(r.parcial, true);
+  assert.strictEqual(r.faltante, 40000);
+  const pago = fb.data.mirror.pagos[id];
+  assert.strictEqual(pago.estado, 'Parcial');
+  assert.strictEqual(pago.faltante, 40000);
+  let cuota = fb.data.mirror.acuerdos.agr_1.cuotas[0];
+  assert.strictEqual(cuota.estado, 'parcial');
+  assert.strictEqual(fb.data.mirror.acuerdos.agr_1.saldoPendiente, 160000, 'descuenta lo abonado');
+  // El propietario anexa el resto; al aprobarlo se integra y la cuota queda pagada.
+  const comp = await s.createPayments({ usuario: 'carlos', montoPerMonth: 40000, year: Y, estado: 'Pendiente', referencia: `IMG:u2 | COMPLEMENTO:${id}`, concepto: 'Acuerdo de pago · cuota 1 de 2 (complemento)' });
+  const r2 = await s.reviewPayment({ id: comp.ids[0], estado: 'Confirmado' });
+  assert.ok(r2.success);
+  assert.match(r2.reservaMsg, /Pago completado/);
+  assert.strictEqual(fb.data.mirror.pagos[comp.ids[0]], undefined, 'el complemento se integra al original');
+  assert.strictEqual(fb.data.mirror.pagos[id].estado, 'Confirmado');
+  assert.strictEqual(fb.data.mirror.pagos[id].valor, '120000');
+  cuota = fb.data.mirror.acuerdos.agr_1.cuotas[0];
+  assert.strictEqual(cuota.estado, 'pagado');
+});
+
+test('mensualidad pagada de menos: parcial (el mes no queda pagado) o aceptada como completa', async () => {
+  const fb = fakeFirebase(base());
+  const s = svc(fb);
+  const a = await s.createPayments({ usuario: 'carlos', montoPerMonth: 100000, year: Y, estado: 'Pendiente', referencia: 'IMG:u', concepto: `Administración Febrero ${Y}` });
+  await s.reviewPayment({ id: a.ids[0], estado: 'Confirmado', valor: 70000 });
+  assert.strictEqual(fb.data.mirror.pagos[a.ids[0]].estado, 'Parcial');
+  const meses = await s.getPayableMonths('carlos');
+  assert.strictEqual(meses.meses.find((m) => m.mes === 'Febrero' && m.anio === Y).estado, 'revision', 'no se puede volver a pagar; falta completar');
+  const b = await s.createPayments({ usuario: 'carlos', montoPerMonth: 100000, year: Y, estado: 'Pendiente', referencia: 'IMG:u', concepto: `Administración Marzo ${Y}` });
+  await s.reviewPayment({ id: b.ids[0], estado: 'Confirmado', valor: 90000, completo: true });
+  assert.strictEqual(fb.data.mirror.pagos[b.ids[0]].estado, 'Confirmado');
+});
+
+test('rechazo por comprobante falso: guarda el motivo y suma una alerta al propietario', async () => {
+  const fb = fakeFirebase(base());
+  const s = svc(fb);
+  const a = await s.createPayments({ usuario: 'carlos', montoPerMonth: 100000, year: Y, estado: 'Pendiente', referencia: 'IMG:u', concepto: `Administración Febrero ${Y}` });
+  const r = await s.reviewPayment({ id: a.ids[0], estado: 'Rechazado', motivo: 'El comprobante está editado', tipoRechazo: 'falso' });
+  assert.strictEqual(r.alertaComprobantes, 1);
+  const p = fb.data.mirror.pagos[a.ids[0]];
+  assert.strictEqual(p.motivoRechazo, 'El comprobante está editado');
+  assert.strictEqual(p.tipoRechazo, 'falso');
+  const b = await s.createPayments({ usuario: 'carlos', montoPerMonth: 100000, year: Y, estado: 'Pendiente', referencia: 'IMG:u', concepto: `Administración Marzo ${Y}` });
+  const r2 = await s.reviewPayment({ id: b.ids[0], estado: 'Rechazado', motivo: 'Otra vez', tipoRechazo: 'falso' });
+  assert.strictEqual(r2.alertaComprobantes, 2);
+  // Otro motivo no suma alerta.
+  const c = await s.createPayments({ usuario: 'carlos', montoPerMonth: 100000, year: Y, estado: 'Pendiente', referencia: 'IMG:u', concepto: `Administración Abril ${Y}` });
+  const r3 = await s.reviewPayment({ id: c.ids[0], estado: 'Rechazado', motivo: 'No llegó', tipoRechazo: 'no_llego' });
+  assert.strictEqual(r3.alertaComprobantes, undefined);
+  const lista = await s.getAdminList('C', Y);
+  assert.strictEqual(lista.find((u) => u.username === 'carlos').alertaComprobantes, 2);
+});
+
+test('beneficio pagado de menos: no cubre meses hasta completarlo', async () => {
+  const seed = base();
+  seed.mirror.beneficios.b1 = { id: 'b1', tipo: 'plan_meses', mesesCubiertos: 2, montoPago: 200000, solicitantes: ['carlos'], solicitudes: [{ usuario: 'carlos', pagoId: 'pb', estado: 'pendiente' }] };
+  seed.mirror.pagos.pb = { id: 'pb', usuario: 'carlos', concepto: 'Beneficio: X', valor: '200000', estado: 'Pendiente', referencia: 'IMG:u | BENEFICIO:b1', fecha: `${Y}-11-01` };
+  const fb = fakeFirebase(seed);
+  const s = svc(fb);
+  const r = await s.reviewPayment({ id: 'pb', estado: 'Confirmado', valor: 150000 });
+  assert.strictEqual(r.parcial, true);
+  assert.strictEqual(fb.data.mirror.beneficios.b1.solicitudes[0].estado, 'parcial');
+  assert.ok(!confirmados(fb, 'carlos').includes(`Administración Febrero ${Y}`));
+  const comp = await s.createPayments({ usuario: 'carlos', montoPerMonth: 50000, year: Y, estado: 'Pendiente', referencia: 'IMG:u | COMPLEMENTO:pb', concepto: 'Beneficio: X (complemento)' });
+  await s.reviewPayment({ id: comp.ids[0], estado: 'Confirmado' });
+  assert.ok(confirmados(fb, 'carlos').includes(`Administración Febrero ${Y}`));
+  assert.ok(confirmados(fb, 'carlos').includes(`Administración Marzo ${Y}`));
+  assert.strictEqual(fb.data.mirror.beneficios.b1.solicitudes[0].estado, 'aprobada');
+});

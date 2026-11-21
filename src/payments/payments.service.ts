@@ -64,6 +64,8 @@ export interface AdminListItem {
   pendingCount: number;
   /** Total confirmado en el año. */
   paidTotal: number;
+  /** Comprobantes rechazados por falsos/alterados (alerta para el admin). */
+  alertaComprobantes?: number;
 }
 
 export interface MonthStatus {
@@ -329,6 +331,10 @@ export class PaymentsService {
           paidTotal += parseFloat(String(delUsuario[i].valor)) || 0;
         } else if (estado === 'Pendiente') {
           pending = true;
+        } else if (estado === 'Parcial') {
+          // Pagó una parte: el dinero cuenta, el mes aún no (falta el resto).
+          pending = true;
+          paidTotal += parseFloat(String(delUsuario[i].valor)) || 0;
         }
       }
       if (confirmed) months += 'p';
@@ -354,10 +360,12 @@ export class PaymentsService {
       users = users.filter((u) => (u.conjunto || '') === conjunto);
     }
 
+    const alertas = await this.alertasComprobantes();
     const list: AdminListItem[] = users.map((u) => {
       const { paidCount, totalApplicable, isAlDia } = this.overallStatus(pagos, u, year);
       const { months, pendingCount, paidTotal } = this.monthCodes(pagos, u, year);
       return {
+        alertaComprobantes: alertas.get(String(u.usuario).toLowerCase()) || 0,
         username: u.usuario,
         name: u.nombre || u.usuario,
         paidCount,
@@ -405,7 +413,7 @@ export class PaymentsService {
 
       if (userPayments.length > 0) {
         const hasConfirmed = userPayments.some((p) => p.estado === 'Confirmado');
-        const hasPending = userPayments.some((p) => p.estado === 'Pendiente');
+        const hasPending = userPayments.some((p) => p.estado === 'Pendiente' || p.estado === 'Parcial');
         if (hasConfirmed) { status = 'Pagado'; color = '#4CAF50'; icon = 'checkmark-circle'; }
         else if (hasPending) { status = 'Por confirmar'; color = '#FF9800'; icon = 'time'; }
       } else if ((isCurrentYear && idx >= todayMonthIndex) || year > new Date().getFullYear()) {
@@ -439,7 +447,7 @@ export class PaymentsService {
   }> {
     const pagosAll = await this.readCollection<Pago>('pagos');
     const pagos = this.pagosDelAnio(pagosAll, year).filter(
-      (p) => p.usuario === username && String(p.estado || '').toLowerCase() === 'confirmado',
+      (p) => p.usuario === username && ['confirmado', 'parcial'].includes(String(p.estado || '').toLowerCase()),
     );
     const porFondo = new Map<string, { total: number; count: number }>();
     let total = 0;
@@ -802,8 +810,9 @@ export class PaymentsService {
       );
       pagosConjunto = pagosAll.filter((p) => delConjunto.has(p.usuario));
     }
+    // Lo recibido de un pago parcial también es dinero en caja.
     const pagosConfirmados = pagosConjunto.filter(
-      (p) => String(p.estado || '').toLowerCase() === 'confirmado',
+      (p) => ['confirmado', 'parcial'].includes(String(p.estado || '').toLowerCase()),
     );
 
     // Reportes del conjunto (gastos/ingresos extra/ajustes). Monto en dato_8.
@@ -1118,7 +1127,7 @@ export class PaymentsService {
     for (const p of this.pagosDeUsuario(pagos, usuario)) {
       if (normF((p as any).tipoRecaudo) !== objetivo) continue;
       const est = String(p.estado || '').toLowerCase();
-      const tipo = est === 'confirmado' ? 'pagado' : est === 'pendiente' || est === 'procesando' ? 'revision' : null;
+      const tipo = est === 'confirmado' ? 'pagado' : est === 'pendiente' || est === 'procesando' || est === 'parcial' ? 'revision' : null;
       if (!tipo) continue;
       const c = String(p.concepto || '').toLowerCase();
       const anios = Array.from(new Set((c.match(/\b20\d{2}\b/g) || []).map(Number)));
@@ -1403,9 +1412,10 @@ export class PaymentsService {
   async aplicarPagoACuota(
     acuerdoId: string,
     n: number,
-    estado: 'en_revision' | 'pagado' | 'pendiente',
+    estado: 'en_revision' | 'pagado' | 'pendiente' | 'parcial',
     pagoId: string,
     fecha: string,
+    abonado = 0,
   ): Promise<string> {
     const aRef = this.firebase.db().ref(`mirror/acuerdos/${this.safeKey(acuerdoId)}`);
     const snap = await aRef.get();
@@ -1420,10 +1430,13 @@ export class PaymentsService {
     if (estado === 'pendiente' && c.estado === 'pagado' && c.pagoId && c.pagoId !== pagoId) return '';
     if (estado === 'pagado') cuotas[idx] = { ...c, estado: 'pagado', pagoId, fechaPago: fecha };
     else if (estado === 'en_revision') cuotas[idx] = { ...c, estado: 'en_revision', pagoId, fechaPago: null };
-    else cuotas[idx] = { ...c, estado: 'pendiente', pagoId: null, fechaPago: null };
+    else if (estado === 'parcial') cuotas[idx] = { ...c, estado: 'parcial', pagoId, fechaPago: null, abonado };
+    else cuotas[idx] = { ...c, estado: 'pendiente', pagoId: null, fechaPago: null, abonado: 0 };
+    if (estado === 'pagado' || estado === 'pendiente') delete cuotas[idx].abonado;
+    // Saldo: lo que falta de cada cuota no pagada (descontando lo abonado en parciales).
     const saldoPendiente = cuotas
       .filter((q) => q.estado !== 'pagado')
-      .reduce((t, q) => t + (Number(q.monto) || 0), 0);
+      .reduce((t, q) => t + Math.max(0, (Number(q.monto) || 0) - (q.estado === 'parcial' ? Number(q.abonado) || 0 : 0)), 0);
     const liquidado = cuotas.length > 0 && cuotas.every((q) => q.estado === 'pagado');
     const patch: Record<string, any> = { cuotas, saldoPendiente, _fbWrite: true };
     if (liquidado) patch.estado = 'liquidado';
@@ -1431,6 +1444,7 @@ export class PaymentsService {
     await aRef.update(patch);
     if (estado === 'pagado') return liquidado ? ` Cuota ${n} pagada: acuerdo liquidado.` : ` Cuota ${n} del acuerdo pagada.`;
     if (estado === 'pendiente') return ` Cuota ${n} del acuerdo vuelve a pendiente.`;
+    if (estado === 'parcial') return ` Cuota ${n}: pago parcial.`;
     return '';
   }
 
@@ -1725,6 +1739,150 @@ export class PaymentsService {
     return { success: true };
   }
 
+  // ==================== Rechazos, pagos parciales y alertas ====================
+
+  /** Propietarios con comprobantes rechazados por falsos: usuario -> cantidad. */
+  private async alertasComprobantes(): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    try {
+      const snap = await this.firebase.db().ref('mirror/alertas_pagos').get();
+      for (const a of Object.values<any>(snap.exists() ? snap.val() || {} : {})) {
+        if (a?.usuario) out.set(String(a.usuario).toLowerCase(), Number(a.rechazosFalsos) || 0);
+      }
+    } catch {
+      /* sin alertas */
+    }
+    return out;
+  }
+
+  /** Suma un comprobante falso/alterado al historial del propietario. */
+  private async registrarComprobanteFalso(pago: any, pagoId: string): Promise<number> {
+    const usuario = String(pago?.usuario || '');
+    if (!usuario) return 0;
+    const ref = this.firebase.db().ref(`mirror/alertas_pagos/${this.safeKey(usuario.toLowerCase())}`);
+    const snap = await ref.get();
+    const prev = snap.exists() ? snap.val() || {} : {};
+    const n = (Number(prev.rechazosFalsos) || 0) + 1;
+    const pagos: string[] = Array.isArray(prev.pagos) ? prev.pagos : [];
+    await ref.update({
+      usuario,
+      conjunto: String(pago?.conjunto || prev.conjunto || ''),
+      rechazosFalsos: n,
+      ultimo: new Date().toISOString(),
+      pagos: [...pagos, pagoId].slice(-20),
+      _fbWrite: true,
+    });
+    return n;
+  }
+
+  /**
+   * Monto que se esperaba recibir con un pago: la cuota del acuerdo, el abono,
+   * el monto del beneficio o, en una mensualidad, lo que declaró el propietario.
+   */
+  private async montoEsperadoDe(pago: any, referencia: string, sugerido?: number): Promise<number> {
+    if (Number(pago?.montoEsperado) > 0) return Number(pago.montoEsperado);
+    const db = this.firebase.db();
+    const cuota = this.vinculoCuota(referencia);
+    try {
+      if (cuota) {
+        const a = (await db.ref(`mirror/acuerdos/${this.safeKey(cuota.acuerdoId)}`).get()).val() || {};
+        const c = (Array.isArray(a.cuotas) ? a.cuotas : []).find((q: any) => Number(q?.n) === cuota.cuota);
+        if (c) return Number(c.monto) || 0;
+      }
+      const ac = referencia.match(/ACUERDO:\s*([^\s|]+)/);
+      if (ac && !cuota) {
+        const a = (await db.ref(`mirror/acuerdos/${this.safeKey(ac[1].trim())}`).get()).val() || {};
+        if (Number(a.abonoInicialMonto) > 0) return Number(a.abonoInicialMonto);
+      }
+      const bn = referencia.match(/BENEFICIO:\s*([^\s|]+)/);
+      if (bn) {
+        const b = (await db.ref(`mirror/beneficios/${this.safeKey(bn[1].trim())}`).get()).val() || {};
+        if (b.tipo === 'plan_meses' && Number(b.montoPago) > 0) return Number(b.montoPago);
+      }
+    } catch {
+      /* sin vínculo legible: se usa el monto declarado */
+    }
+    if (Number(sugerido) > 0) return Number(sugerido);
+    return Number(String(pago?.valor ?? 0).replace(/[^\d.]/g, '')) || 0;
+  }
+
+  /**
+   * El propietario pagó menos de lo esperado: el pago queda "Parcial" con lo
+   * recibido y lo que falta. No se aplica nada (mes, cuota, beneficio) hasta
+   * completarlo; el dinero recibido sí cuenta en caja.
+   */
+  private async marcarParcial(id: string, pago: any, referencia: string, recibido: number, esperado: number) {
+    const db = this.firebase.db();
+    const faltante = Math.max(0, Math.round((esperado - recibido) * 100) / 100);
+    await db.ref(`mirror/pagos/${this.safeKey(id)}`).update({
+      estado: 'Parcial',
+      valor: String(recibido),
+      montoEsperado: esperado,
+      faltante,
+      fechaRevision: new Date().toISOString(),
+      _fbWrite: true,
+    });
+    const cuota = this.vinculoCuota(referencia);
+    if (cuota) {
+      await this.aplicarPagoACuota(cuota.acuerdoId, cuota.cuota, 'parcial', id, String(pago.fecha || ''), recibido).catch(() => '');
+    } else {
+      const ac = referencia.match(/ACUERDO:\s*([^\s|]+)/);
+      if (ac) await db.ref(`mirror/acuerdos/${this.safeKey(ac[1].trim())}`).update({ abonoInicialEstado: 'parcial', _fbWrite: true }).catch(() => undefined);
+    }
+    const bn = referencia.match(/BENEFICIO:\s*([^\s|]+)/);
+    if (bn) {
+      const bRef = db.ref(`mirror/beneficios/${this.safeKey(bn[1].trim())}`);
+      const b = (await bRef.get()).val() || {};
+      const sol: any[] = Array.isArray(b.solicitudes) ? b.solicitudes : [];
+      await bRef.update({ solicitudes: sol.map((x) => (String(x?.pagoId) === String(id) ? { ...x, estado: 'parcial', faltante } : x)), _fbWrite: true }).catch(() => undefined);
+    }
+    return faltante;
+  }
+
+  /**
+   * Revisión del COMPLEMENTO de un pago parcial (lo que faltaba). Al aprobarlo
+   * se suma al pago original; si ya completa el monto, el original queda
+   * Confirmado y se aplica normalmente (mes, cuota o beneficio).
+   */
+  private async revisarComplemento(input: any, comp: any, origId: string): Promise<{ success: boolean; message?: string; reservaMsg?: string; parcial?: boolean; faltante?: number }> {
+    const db = this.firebase.db();
+    const oRef = db.ref(`mirror/pagos/${this.safeKey(origId)}`);
+    const oSnap = await oRef.get();
+    if (!oSnap.exists()) return { success: false, message: 'No se encontró el pago original de este complemento.' };
+    const orig = oSnap.val() || {};
+    const cRef = db.ref(`mirror/pagos/${this.safeKey(input.id)}`);
+    if (input.estado === 'Rechazado') {
+      await cRef.update({
+        estado: 'Rechazado',
+        motivoRechazo: String(input.motivo || '').slice(0, 300),
+        tipoRechazo: String(input.tipoRechazo || ''),
+        fechaRevision: new Date().toISOString(),
+        _fbWrite: true,
+      });
+      if (input.tipoRechazo === 'falso') await this.registrarComprobanteFalso(comp, input.id);
+      return { success: true, reservaMsg: ' Complemento rechazado; el pago sigue parcial.' };
+    }
+    const recibido = Number(String(input.valor ?? comp.valor ?? 0).replace(/[^\d.]/g, '')) || 0;
+    const total = (Number(String(orig.valor ?? 0).replace(/[^\d.]/g, '')) || 0) + recibido;
+    const esperado = Number(orig.montoEsperado) || total;
+    const complementos: any[] = Array.isArray(orig.complementos) ? orig.complementos : [];
+    // El complemento se integra al original (un solo registro del dinero).
+    await db.ref().update({
+      [`mirror/pagos/${this.safeKey(origId)}/valor`]: String(total),
+      [`mirror/pagos/${this.safeKey(origId)}/complementos`]: [...complementos, { id: input.id, valor: recibido, referencia: String(comp.referencia || ''), fecha: String(comp.fecha || '') }],
+      [`mirror/pagos/${this.safeKey(origId)}/_fbWrite`]: true,
+      [`mirror/pagos/${this.safeKey(input.id)}`]: null,
+    });
+    const refOrig = String(orig.referencia || '');
+    if (total + 0.5 >= esperado) {
+      await oRef.update({ faltante: 0, _fbWrite: true });
+      const r = await this.reviewPayment({ id: origId, estado: 'Confirmado', valor: total, completo: true });
+      return { ...r, reservaMsg: ` Pago completado.${r.reservaMsg || ''}` };
+    }
+    const faltante = await this.marcarParcial(origId, orig, refOrig, total, esperado);
+    return { success: true, parcial: true, faltante, reservaMsg: ` Sigue parcial: faltan ${faltante}.` };
+  }
+
   /**
    * Aprueba/rechaza un pago. Actualiza su estado y, si su referencia contiene
    * "RESERVA:<id>", pone la reserva vinculada en Activa (Confirmado) o Cancelada
@@ -1735,15 +1893,44 @@ export class PaymentsService {
     estado: 'Confirmado' | 'Rechazado';
     valor?: string | number;
     referencia?: string;
-  }): Promise<{ success: boolean; message?: string; reservaMsg?: string }> {
+    /** Rechazo: motivo y tipo ('falso' | 'no_llego' | 'monto' | 'otro'). */
+    motivo?: string;
+    tipoRechazo?: string;
+    /** Confirmación: monto esperado (si el cliente lo sabe) y "aceptar como completo". */
+    montoEsperado?: number;
+    completo?: boolean;
+  }): Promise<{ success: boolean; message?: string; reservaMsg?: string; parcial?: boolean; faltante?: number; alertaComprobantes?: number }> {
     const db = this.firebase.db();
     const ref = db.ref(`mirror/pagos/${this.safeKey(input.id)}`);
     const snap = await ref.get();
     if (!snap.exists()) return { success: false, message: 'El pago no existe.' };
     const pago = snap.val();
 
-    const patch: Record<string, any> = { estado: input.estado, _fbWrite: true };
+    const refPago = String(input.referencia ?? pago.referencia ?? '');
+    // Complemento de un pago parcial: se suma al pago original.
+    const comp = refPago.match(/COMPLEMENTO:\s*([^\s|]+)/);
+    if (comp) return this.revisarComplemento(input, pago, comp[1].trim());
+
+    // Pagó menos de lo esperado: queda Parcial (salvo que el admin lo acepte como completo).
+    if (input.estado === 'Confirmado' && !input.completo) {
+      const recibido = Number(String(input.valor ?? pago.valor ?? 0).replace(/[^\d.]/g, '')) || 0;
+      const esperado = await this.montoEsperadoDe(pago, refPago, Number(input.montoEsperado) || undefined);
+      if (esperado > 0 && recibido + 0.5 < esperado) {
+        const faltante = await this.marcarParcial(input.id, pago, refPago, recibido, esperado);
+        return { success: true, parcial: true, faltante, reservaMsg: ` Pago parcial: faltan ${faltante}.` };
+      }
+    }
+
+    const patch: Record<string, any> = { estado: input.estado, fechaRevision: new Date().toISOString(), _fbWrite: true };
     if (input.valor !== undefined) patch.valor = String(input.valor);
+    let alertaComprobantes: number | undefined;
+    if (input.estado === 'Rechazado') {
+      patch.motivoRechazo = String(input.motivo || '').slice(0, 300);
+      patch.tipoRechazo = String(input.tipoRechazo || '');
+      if (input.tipoRechazo === 'falso') alertaComprobantes = await this.registrarComprobanteFalso(pago, input.id);
+    } else {
+      patch.faltante = 0;
+    }
     await ref.update(patch);
 
     // Vínculo con reserva.
@@ -1847,7 +2034,7 @@ export class PaymentsService {
       }
     }
 
-    return { success: true, reservaMsg };
+    return { success: true, reservaMsg, alertaComprobantes };
   }
 
   // ==================== OCR / Mercado Pago (claves en el backend) ====================
