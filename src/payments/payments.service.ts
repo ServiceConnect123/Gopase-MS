@@ -1,4 +1,5 @@
 import { runFinanceChat, type ChatTurn, type OwnerRow } from './finance-chat.ai';
+import { tieneCartera } from '../tenants/tenant-rules';
 import { Injectable, Logger } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
 import { PropertiesService } from '../properties/properties.service';
@@ -359,7 +360,7 @@ export class PaymentsService {
     ]);
     const pagos = this.filterPagosByYear(pagosAll, year);
 
-    let users = usuarios.filter((u) => u.rol !== 'superAdmin' && u.rol !== 'vigilante');
+    let users = usuarios.filter((u) => tieneCartera(u.rol));
     if (!isSuperAdmin && conjunto) {
       users = users.filter((u) => (u.conjunto || '') === conjunto);
     }
@@ -642,7 +643,7 @@ export class PaymentsService {
     const now = new Date();
     const diaDelMes = now.getDate();
 
-    let users = usuarios.filter((u) => u.rol !== 'superAdmin' && u.rol !== 'vigilante');
+    let users = usuarios.filter((u) => tieneCartera(u.rol));
     if (!isSuperAdmin && conjunto) {
       users = users.filter((u) => (u.conjunto || '') === conjunto);
     }
@@ -737,7 +738,7 @@ export class PaymentsService {
       this.readCollection<Usuario>('usuarios'),
     ]);
     const pagos = this.filterPagosByYear(pagosAll, year);
-    let users = usuarios.filter((u) => u.rol !== 'superAdmin' && u.rol !== 'vigilante');
+    let users = usuarios.filter((u) => tieneCartera(u.rol));
     if (conjunto) users = users.filter((u) => (u.conjunto || '') === conjunto);
 
     const debtors = users

@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { tieneCartera } from '../tenants/tenant-rules';
 import { SheetsService } from '../sheets/sheets.service';
 import { PaymentsService } from '../payments/payments.service';
 
@@ -280,7 +281,7 @@ export class HomeService {
     // Filtrado por rol/conjunto. Se filtra por conjunto salvo en modo global
     // (superAdmin viendo "Todos"). Un superAdmin con conjunto elegido filtra
     // igual que un admin.
-    let filteredUsers = allUsers.filter((u) => u.role !== 'superAdmin' && u.role !== 'vigilante');
+    let filteredUsers = allUsers.filter((u) => tieneCartera(u.role));
     if (!scopeGlobal) {
       filteredUsers = filteredUsers.filter((u) => (u.complex || '') === (complex || ''));
     }
