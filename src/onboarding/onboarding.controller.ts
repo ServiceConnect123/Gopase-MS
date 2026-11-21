@@ -40,13 +40,14 @@ export class OnboardingController {
         nombreConjunto: { type: 'string' },
         ciudad: { type: 'string' },
         tipo: { type: 'string', enum: ['Campestre', 'Urbano'] },
+        unidades: { type: 'number', description: 'Número de apartamentos o casas (1..10000). Define el precio del plan.' },
         nombreAdmin: { type: 'string' },
         email: { type: 'string' },
         telefono: { type: 'string' },
         mensaje: { type: 'string' },
         password: { type: 'string', description: 'Cifrada con encriptarAES (igual que POST /users).' },
       },
-      required: ['nombreConjunto', 'nombreAdmin', 'email', 'telefono', 'password'],
+      required: ['nombreConjunto', 'unidades', 'nombreAdmin', 'email', 'telefono', 'password'],
     },
   })
   @Post('register')
