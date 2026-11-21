@@ -25,6 +25,7 @@ import {
   WSP_SESSION_ROOT,
 } from './firebase-auth-state';
 import { Entrega, SentMessageStore } from './sent-message.store';
+import { SessionLock } from './session-lock';
 
 /**
  * libsignal (dependencia de Baileys) imprime con console.error un stack completo
@@ -127,6 +128,12 @@ interface WhatsappSession {
    * generando QR indefinidamente.
    */
   autoRestore: boolean;
+  /** Esta instancia tiene el candado de la sesión (ver `SessionLock`). */
+  lockHeld: boolean;
+  /** Esperando a que otra instancia libere el candado. */
+  waitingLock: boolean;
+  /** Reintento programado mientras se espera el candado. */
+  lockTimer: NodeJS.Timeout | null;
 }
 
 /** Resultado detallado de un envío (para la cola y los reportes). */
@@ -176,8 +183,18 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private revisionTimer: NodeJS.Timeout | null = null;
   private static readonly REVISION_MS = 10 * 60_000;
 
+  /**
+   * Una sola instancia por número: candado en RTDB con renovación periódica.
+   * Ver `SessionLock` (evita dos conexiones al mismo WhatsApp en los deploys).
+   */
+  private readonly lock: SessionLock;
+  private lockTimer: NodeJS.Timeout | null = null;
+  private shuttingDown = false;
+  private static readonly LOCK_RETRY_MS = 5_000;
+
   constructor(private readonly firebase: FirebaseService) {
     this.store = new SentMessageStore(firebase, this.logger);
+    this.lock = new SessionLock(firebase as any, this.logger);
   }
 
   async onModuleInit() {
@@ -216,6 +233,35 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       );
     }, WhatsappService.REVISION_MS);
     this.revisionTimer.unref?.();
+
+    // Renueva los candados de las sesiones de esta instancia. Si alguno se
+    // perdió (otra instancia lo tomó), se cierra ese socket: así nunca hay dos
+    // conexiones al mismo número.
+    this.lockTimer = setInterval(() => {
+      this.renovarCandados().catch(() => undefined);
+    }, Math.round(this.lock.ttlMs / 3));
+    this.lockTimer.unref?.();
+    this.logger.log(`Instancia de WhatsApp: ${this.lock.owner}`);
+  }
+
+  private async renovarCandados(): Promise<void> {
+    if (this.shuttingDown) return;
+    for (const session of this.sessions.values()) {
+      if (!session.lockHeld) continue;
+      const ok = await this.lock.renew(session.sessionKey);
+      if (ok || this.shuttingDown) continue;
+      this.logger.error(
+        `[${session.key}] Otra instancia tomó el candado de esta sesión: se cierra la conexión local.`,
+      );
+      session.lockHeld = false;
+      session.ready = false;
+      // El cierre dispara la reconexión, que espera el candado antes de conectar.
+      try {
+        session.sock?.end(undefined);
+      } catch {
+        // no-op
+      }
+    }
   }
 
   /**
@@ -263,24 +309,47 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     } catch {
       // no-op
     }
+    if (session.lockTimer) clearTimeout(session.lockTimer);
+    session.lockTimer = null;
+    session.waitingLock = false;
+    if (session.lockHeld) {
+      session.lockHeld = false;
+      this.lock.release(session.sessionKey).catch(() => undefined);
+    }
     if (this.sessions.get(session.key) === session) this.sessions.delete(session.key);
   }
 
+  /**
+   * Apagado limpio (SIGTERM de Render en cada deploy; requiere
+   * `app.enableShutdownHooks()` en main.ts). Orden: guardar las llaves de
+   * cifrado pendientes, cerrar el socket SIN reconectar y liberar el candado,
+   * para que la instancia nueva cargue llaves al día y conecte enseguida.
+   */
   async onModuleDestroy() {
+    this.shuttingDown = true;
     if (this.revisionTimer) clearInterval(this.revisionTimer);
+    if (this.lockTimer) clearInterval(this.lockTimer);
     await this.store.flush().catch(() => undefined);
     for (const session of this.sessions.values()) {
+      if (session.lockTimer) clearTimeout(session.lockTimer);
+      session.ready = false;
       try {
         await session.flushSession?.();
       } catch {
         // no-op
       }
       try {
+        session.sock?.ev.removeAllListeners('connection.update');
         await session.sock?.end(undefined);
       } catch {
         // no-op
       }
+      if (session.lockHeld) {
+        session.lockHeld = false;
+        await this.lock.release(session.sessionKey);
+      }
     }
+    this.logger.log('WhatsApp: sesiones guardadas y candados liberados.');
   }
 
   // ---------------------------------------------------------------------------
@@ -323,6 +392,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         pairingCode: null,
         stopped: false,
         autoRestore: false,
+        lockHeld: false,
+        waitingLock: false,
+        lockTimer: null,
       };
       this.sessions.set(key, session);
     }
@@ -461,6 +533,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       this.logger.debug(`connect('${session.key}') ignorado: sesión apagada.`);
       return;
     }
+    if (this.shuttingDown) return;
     if (session.connecting) {
       this.logger.debug(
         `connect('${session.key}') ignorado: ya hay una conexión en curso.`,
@@ -468,6 +541,35 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     session.connecting = true;
+    if (session.lockTimer) {
+      clearTimeout(session.lockTimer);
+      session.lockTimer = null;
+    }
+
+    // Una sola instancia por número: si otra (p. ej. la vieja durante un
+    // deploy) tiene el candado, se espera a que lo libere ANTES de cargar las
+    // llaves, para leerlas ya guardadas y no pisarlas.
+    if (!(await this.lock.acquire(session.sessionKey))) {
+      session.connecting = false;
+      session.lockHeld = false;
+      if (!session.waitingLock) {
+        this.logger.warn(
+          `[${session.key}] Otra instancia usa este WhatsApp; se espera a que lo libere...`,
+        );
+      }
+      session.waitingLock = true;
+      if (!session.stopped && !this.shuttingDown) {
+        session.lockTimer = setTimeout(() => {
+          session.lockTimer = null;
+          this.connect(session).catch((e) => this.logger.error(e));
+        }, WhatsappService.LOCK_RETRY_MS);
+        session.lockTimer.unref?.();
+      }
+      return;
+    }
+    if (session.waitingLock) this.logger.log(`[${session.key}] Candado obtenido: conectando.`);
+    session.waitingLock = false;
+    session.lockHeld = true;
 
     // Cerrar cualquier socket previo de esta sesión antes de crear uno nuevo.
     try {
@@ -643,8 +745,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
       if (connection === 'close') {
         session.ready = false;
-        // Sesión apagada a propósito (unlink / restauración no vinculada): no reconectar.
-        if (session.stopped) return;
+        // Sesión apagada a propósito (unlink / restauración no vinculada) o
+        // proceso apagándose: no reconectar.
+        if (session.stopped || this.shuttingDown) return;
         const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
         const loggedOut = statusCode === DisconnectReason.loggedOut;
         session.consecutiveFailures++;
@@ -941,7 +1044,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`Mensaje vacío para ${phone}: no se envía.`);
       return { ok: false, reason: 'texto_vacio', error: 'El mensaje está vacío.' };
     }
-    const session = this.resolveSenderSession(conjunto);
+    const session = this.resolveSenderSession(conjunto) ?? (await this.esperarSesion(conjunto));
     if (!session) {
       this.logger.warn('WhatsApp no está listo. Mensaje no enviado.');
       return { ok: false, reason: 'sin_sesion' };
@@ -980,6 +1083,25 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       this.logger.error(`Error enviando a ${phone}: ${error?.message}`);
       return { ok: false, reason: 'error', error: error?.message };
     }
+  }
+
+  /**
+   * Si la sesión está conectando o esperando el candado (p. ej. los segundos
+   * de un deploy en que la conexión pasa de una instancia a otra), espera hasta
+   * `maxMs` a que quede lista en lugar de fallar el envío.
+   */
+  private async esperarSesion(conjunto?: string | null, maxMs = 20_000): Promise<WhatsappSession | null> {
+    const enTransito = (s?: WhatsappSession) => !!s && !s.stopped && (s.connecting || s.waitingLock || (s.lockHeld && !s.ready));
+    const propia = this.sessions.get(this.normalizeKey(conjunto));
+    const def = this.sessions.get(WhatsappService.DEFAULT_KEY);
+    if (!enTransito(propia) && !enTransito(def)) return null;
+    const hasta = Date.now() + maxMs;
+    while (Date.now() < hasta && !this.shuttingDown) {
+      await new Promise((r) => setTimeout(r, 500));
+      const s = this.resolveSenderSession(conjunto);
+      if (s) return s;
+    }
+    return null;
   }
 
   /**
