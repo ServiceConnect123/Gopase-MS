@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
-import { RANGOS_DEFAULT, normRangos, normUnidades, precioPara, validarRangos } from './pricing';
+import { RANGOS_DEFAULT, contarUnidades, normRangos, normUnidades, precioPara, unidadesInfo, validarRangos } from './pricing';
+import type { UnidadesInfo } from './pricing';
 
 /**
  * Planes SaaS de goPase y su catálogo de módulos habilitados. Cada conjunto
@@ -22,9 +23,15 @@ import { RANGOS_DEFAULT, normRangos, normUnidades, precioPara, validarRangos } f
  * Cuando se consulta con un conjunto (catálogo del conjunto o su plan), cada
  * plan sale con el precio YA calculado para ese conjunto en precioMensual, más
  * precioReferencia, aLaMedida, rango y unidades.
+ *
+ * Unidades con las que se cobra: el MAYOR entre las declaradas por el conjunto
+ * y las reales (unidades distintas de sus propietarios). Así un conjunto que
+ * declara 40 y registra 63 propietarios paga el rango de 63, sin bloquearle la
+ * creación de usuarios. Ver contarUnidades en ./pricing.
  */
 const MIRROR_PLANES = 'mirror/planes';
 const MIRROR_CONJUNTOS = 'mirror/conjuntos';
+const MIRROR_USUARIOS = 'mirror/usuarios';
 
 // Módulos (rutas) que SIEMPRE están disponibles, no dependen del plan.
 export const MODULOS_SIEMPRE = ['/app/home', '/app/profile', '/app/settings'];
@@ -156,15 +163,23 @@ export class PlansService {
    * precioMensual pasa a ser lo que paga ESE conjunto (0 si es a la medida) y
    * se conserva el original en precioReferencia.
    */
-  private conPrecio(plan: any, unidades: number): any {
-    const calc = precioPara(plan, unidades);
+  private conPrecio(plan: any, info: UnidadesInfo): any {
+    const calc = precioPara(plan, info.efectivas);
+    // ¿Las unidades reales lo movieron a un rango (o precio) distinto al declarado?
+    const segunDeclaradas = precioPara(plan, info.declaradas);
     return {
       ...plan,
       precioReferencia: Number(plan.precioMensual) || 0,
       precioMensual: calc.precioMensual,
       aLaMedida: calc.aLaMedida,
       rango: calc.rango,
-      unidades,
+      unidades: info.efectivas,
+      unidadesDeclaradas: info.declaradas,
+      unidadesReales: info.reales,
+      excedeUnidades: info.reales > info.declaradas,
+      cambioDeRango:
+        info.reales > info.declaradas &&
+        (segunDeclaradas.aLaMedida !== calc.aLaMedida || segunDeclaradas.precioMensual !== calc.precioMensual),
     };
   }
 
@@ -212,8 +227,8 @@ export class PlansService {
     let planes = all.map((p) => this.strip(p));
     if (target) {
       // Catálogo de un conjunto: cada plan con el precio para su tamaño.
-      const unidades = await this.unidadesDe(String(conjunto));
-      planes = planes.map((p) => this.conPrecio(p, unidades));
+      const info = await this.unidadesDe(String(conjunto));
+      planes = planes.map((p) => this.conPrecio(p, info));
     }
     const orden = (p: any) => Number(p.precioReferencia ?? p.precioMensual) || 0;
     return planes.sort((a, b) => {
@@ -248,11 +263,26 @@ export class PlansService {
       }));
   }
 
-  /** Unidades registradas del conjunto (0 si no tiene o no existe). */
-  async unidadesDe(conjunto: string): Promise<number> {
-    if (!String(conjunto ?? '').trim()) return 0;
+  /** Unidades declaradas, reales y efectivas (con las que se cobra) de un conjunto. */
+  async unidadesDe(conjunto: string): Promise<UnidadesInfo> {
+    if (!String(conjunto ?? '').trim()) return unidadesInfo(0, 0);
     const found = await this.findConjunto(conjunto);
-    return normUnidades(found?.value?.unidades);
+    const reales = await this.unidadesReales(conjunto, found?.value?.nombre);
+    return unidadesInfo(found?.value?.unidades, reales);
+  }
+
+  /** Unidades distintas ocupadas por los propietarios del conjunto (por nombre). */
+  private async unidadesReales(conjunto: string, nombre?: unknown): Promise<number> {
+    const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
+    const objetivos = new Set([norm(conjunto), norm(nombre)].filter(Boolean));
+    try {
+      const usuarios = await this.firebase.liveValues<any>(MIRROR_USUARIOS);
+      return contarUnidades(usuarios.filter((u) => objetivos.has(norm(u?.conjunto))));
+    } catch (e: any) {
+      // Si no se pueden leer los usuarios, se cobra con las declaradas.
+      this.logger.warn(`[plans] no se pudieron contar las unidades de '${conjunto}': ${e?.message}`);
+      return 0;
+    }
   }
 
   /**
@@ -436,9 +466,9 @@ export class PlansService {
     await this.ensureBase();
     const basico = (await this.getById('basico')) || this.strip(this.buildRecord(PLANES_BASE[0]));
     const found = await this.findConjunto(conjunto);
-    const unidades = normUnidades(found?.value?.unidades);
+    const info = unidadesInfo(found?.value?.unidades, await this.unidadesReales(conjunto, found?.value?.nombre));
     const planId = found?.value?.planId ? String(found.value.planId) : '';
     const plan = (planId && (await this.getById(planId))) || basico;
-    return this.conPrecio(plan, unidades);
+    return this.conPrecio(plan, info);
   }
 }

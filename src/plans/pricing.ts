@@ -127,3 +127,56 @@ export function montoPorCiclo(precioMensual: number, ciclo: string, descuentoAnu
   const desc = Number.isFinite(d) && d >= 0 && d < 1 ? d : 0.1;
   return ciclo === 'anual' ? Math.round(precioMensual * 12 * (1 - desc)) : Math.round(precioMensual);
 }
+
+// ---------------------------------------------------------------------------
+// Unidades REALES del conjunto (las que usa), para no depender solo de las
+// declaradas al registrarse. El precio se calcula con el MAYOR de los dos.
+// ---------------------------------------------------------------------------
+
+/**
+ * Clave normalizada de una unidad a partir de la `parcela` del propietario
+ * (casa/apartamento/torre). Ignora mayúsculas, tildes, signos y palabras como
+ * "casa", "apto" o "torre", para que "Casa 5", "casa #5" y "5" cuenten igual.
+ * Devuelve '' si no hay nada que identifique la unidad.
+ */
+export function claveUnidad(raw: unknown): string {
+  return String(raw ?? '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/\b(casa|casas|apto|apt|apartamento|torre|lote|parcela|unidad|interior|int|bloque|manzana|mz|no|numero|nro|num)\b\.?/g, ' ')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * Cuenta las unidades distintas que ocupan los PROPIETARIOS de un conjunto.
+ * Varios propietarios con la misma parcela (familia, copropietarios) cuentan
+ * como una unidad. Un propietario sin parcela cuenta como una unidad propia,
+ * para que dejar el campo vacío no reduzca el conteo.
+ */
+export function contarUnidades(usuarios: Array<{ rol?: unknown; parcela?: unknown }>): number {
+  const claves = new Set<string>();
+  let sinParcela = 0;
+  for (const u of usuarios || []) {
+    if (String(u?.rol ?? '').trim().toLowerCase() !== 'propietario') continue;
+    const k = claveUnidad(u?.parcela);
+    if (k) claves.add(k);
+    else sinParcela++;
+  }
+  return claves.size + sinParcela;
+}
+
+export interface UnidadesInfo {
+  /** Las que el conjunto declaró (registro o superAdmin). 0 si no hay. */
+  declaradas: number;
+  /** Las que tiene en uso según sus propietarios. */
+  reales: number;
+  /** Con las que se cobra: el mayor de los dos. */
+  efectivas: number;
+}
+
+export function unidadesInfo(declaradasRaw: unknown, reales: number): UnidadesInfo {
+  const declaradas = normUnidades(declaradasRaw);
+  const r = Math.max(0, Math.floor(Number(reales) || 0));
+  return { declaradas, reales: r, efectivas: Math.max(declaradas, Math.min(r, UNIDADES_MAX)) };
+}
