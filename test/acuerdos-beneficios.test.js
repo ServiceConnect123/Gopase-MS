@@ -139,3 +139,19 @@ test('rechazar el pago de un beneficio marca la solicitud como rechazada', async
   assert.strictEqual(fb.data.mirror.beneficios.b1.solicitudes[0].estado, 'rechazada');
   assert.deepStrictEqual(fb.data.mirror.beneficios.b1.solicitantes, []);
 });
+
+test('el abono, las cuotas y los beneficios aparecen en la lista de Pagos del año (para aprobarlos)', async () => {
+  const fb = fakeFirebase(base());
+  const s = svc(fb);
+  const r = await s.acogerseAcuerdo({ acuerdoId: 'agr_1', usuario: 'carlos', comprobanteUrl: 'u' });
+  await s.createPayments({ usuario: 'carlos', montoPerMonth: 120000, year: Y, estado: 'Pendiente', referencia: 'ACUERDO:agr_1 | CUOTA:1', concepto: 'Acuerdo de pago · cuota 1 de 2' });
+  const lista = await s.getPaymentsList('C', Y);
+  const conceptos = lista.map((p) => p.concepto);
+  assert.ok(conceptos.includes('Abono inicial acuerdo de pago'), 'el abono aparece para aprobar');
+  assert.ok(conceptos.includes('Acuerdo de pago · cuota 1 de 2'), 'la cuota aparece para aprobar');
+  assert.ok(lista.find((p) => p.id === r.pagoId && p.estado === 'Pendiente'));
+  // No aparecen en otro año.
+  assert.ok(!(await s.getPaymentsList('C', Y - 1)).some((p) => p.concepto === 'Abono inicial acuerdo de pago'));
+  // Del propietario también.
+  assert.ok((await s.getOwnerPayments('carlos', Y)).some((p) => p.concepto === 'Abono inicial acuerdo de pago'));
+});

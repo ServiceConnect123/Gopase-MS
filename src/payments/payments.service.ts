@@ -206,6 +206,27 @@ export class PaymentsService {
     return pagos.filter((p) => (p.concepto || '').includes(y));
   }
 
+  /**
+   * ¿El pago es del año? Si el concepto trae el año (cuotas de administración)
+   * manda el concepto; si no lo trae (abono o cuota de un acuerdo, beneficio,
+   * reserva) se usa el año de su fecha. Antes esos pagos no aparecían en Pagos
+   * (no se podían aprobar) ni sumaban al recaudo del año.
+   *
+   * Solo para LISTAS y TOTALES de dinero. El estado de cada mes sigue usando
+   * filterPagosByYear (concepto con mes y año), así no cambia en datos viejos.
+   */
+  private esDelAnio(p: Pago, year: number): boolean {
+    const c = String(p.concepto || '');
+    if (/\b20\d{2}\b/.test(c)) return c.includes(String(year));
+    const f = String(p.fecha || (p as any).createdAt || '');
+    const m = f.match(/\b(20\d{2})\b/);
+    return m ? Number(m[1]) === year : false;
+  }
+
+  private pagosDelAnio(pagos: Pago[], year: number): Pago[] {
+    return pagos.filter((p) => this.esDelAnio(p, year));
+  }
+
   /** Índice usuario -> pagos, memoizado por array (vive lo que vive la petición). */
   private readonly byUserIndex = new WeakMap<Pago[], Map<string, Pago[]>>();
 
@@ -417,7 +438,7 @@ export class PaymentsService {
     total: number;
   }> {
     const pagosAll = await this.readCollection<Pago>('pagos');
-    const pagos = this.filterPagosByYear(pagosAll, year).filter(
+    const pagos = this.pagosDelAnio(pagosAll, year).filter(
       (p) => p.usuario === username && String(p.estado || '').toLowerCase() === 'confirmado',
     );
     const porFondo = new Map<string, { total: number; count: number }>();
@@ -612,7 +633,7 @@ export class PaymentsService {
   /** Pagos de un propietario en el año (su propia vista). */
   async getOwnerPayments(username: string, year: number): Promise<Pago[]> {
     const pagosAll = await this.readCollection<Pago>('pagos');
-    return this.filterPagosByYear(pagosAll, year).filter((p) => p.usuario === username);
+    return this.pagosDelAnio(pagosAll, year).filter((p) => p.usuario === username);
   }
 
   /**
@@ -627,7 +648,7 @@ export class PaymentsService {
     ]);
     // year <= 0 => TODOS los años (usado por el cuadre de caja global). En otro
     // caso, filtra por el año indicado (vía el texto del concepto).
-    const pagos = year > 0 ? this.filterPagosByYear(pagosAll, year) : pagosAll;
+    const pagos = year > 0 ? this.pagosDelAnio(pagosAll, year) : pagosAll;
     let filtered = pagos;
     if (!isSuperAdmin && conjunto) {
       const usuariosDelConjunto = new Set(
@@ -849,7 +870,7 @@ export class PaymentsService {
     const saldoInicial = sumPrevPagos + sumPrev(extraGeneral) + sumPrev(ajustesGeneral) - sumPrev(gastosGeneral);
 
     // --- Pagos/reportes del año seleccionado (caja general) ---
-    const pagosYear = pagosGeneral.filter((p) => (p.concepto || '').includes(String(year)));
+    const pagosYear = pagosGeneral.filter((p) => this.esDelAnio(p, year));
     const inYear = (arr: any[]) =>
       arr.filter((r) => fechaReporte(r).includes(String(year)));
     const gastosYear = inYear(gastosGeneral);
@@ -1016,7 +1037,7 @@ export class PaymentsService {
 
         // Movimiento del año seleccionado.
         const pagosAnio = pagosDe
-          .filter((p) => (p.concepto || '').includes(String(year)))
+          .filter((p) => this.esDelAnio(p, year))
           .reduce((s, p) => s + (parseFloat(String(p.valor)) || 0), 0);
         const inYearSumDe = (arr: any[]) =>
           arr.filter((r) => fechaReporte(r).includes(String(year)))
