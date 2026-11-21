@@ -1349,7 +1349,68 @@ export class PaymentsService {
     }
 
     await db.ref().update(updates);
+
+    // Pago de una cuota de acuerdo (referencia "ACUERDO:<id> | CUOTA:<n>"): la
+    // cuota queda "en revisión" (pago pendiente) o pagada (registrado ya
+    // confirmado por el admin). Así Pagos y Acuerdos nunca se contradicen.
+    const vinculo = this.vinculoCuota(input.referencia);
+    if (vinculo && ids.length) {
+      const confirmado = String(input.estado).toLowerCase() === 'confirmado';
+      await this.aplicarPagoACuota(vinculo.acuerdoId, vinculo.cuota, confirmado ? 'pagado' : 'en_revision', ids[0], hoy)
+        .catch((e) => this.logger.warn(`No se pudo vincular el pago ${ids[0]} a la cuota: ${e?.message}`));
+    }
     return { success: true, ids, pagos };
+  }
+
+  /** Extrae "ACUERDO:<id> | CUOTA:<n>" de la referencia de un pago. */
+  private vinculoCuota(referencia: string): { acuerdoId: string; cuota: number } | null {
+    const ref = String(referencia || '');
+    const a = ref.match(/ACUERDO:\s*([^\s|]+)/);
+    const c = ref.match(/CUOTA:\s*(\d+)/);
+    if (!a || !c) return null;
+    const cuota = Number(c[1]);
+    return cuota > 0 ? { acuerdoId: a[1].trim(), cuota } : null;
+  }
+
+  /**
+   * Actualiza la cuota N de un acuerdo según el estado de su pago:
+   *   - 'en_revision': el propietario reportó el pago (pendiente en Pagos).
+   *   - 'pagado': pago confirmado. Recalcula el saldo y liquida el acuerdo si
+   *     era la última cuota.
+   *   - 'pendiente': pago rechazado, la cuota vuelve a estar por pagar.
+   */
+  async aplicarPagoACuota(
+    acuerdoId: string,
+    n: number,
+    estado: 'en_revision' | 'pagado' | 'pendiente',
+    pagoId: string,
+    fecha: string,
+  ): Promise<string> {
+    const aRef = this.firebase.db().ref(`mirror/acuerdos/${this.safeKey(acuerdoId)}`);
+    const snap = await aRef.get();
+    if (!snap.exists()) return ` (No se encontró el acuerdo ${acuerdoId}.)`;
+    const acuerdo = snap.val() || {};
+    const cuotas: any[] = Array.isArray(acuerdo.cuotas) ? acuerdo.cuotas.map((c: any) => ({ ...c })) : [];
+    let idx = cuotas.findIndex((c) => Number(c?.n) === n);
+    if (idx < 0 && n - 1 < cuotas.length) idx = n - 1;
+    if (idx < 0) return ` (El acuerdo no tiene la cuota ${n}.)`;
+    const c = cuotas[idx];
+    // Un rechazo no deshace una cuota ya pagada con OTRO pago.
+    if (estado === 'pendiente' && c.estado === 'pagado' && c.pagoId && c.pagoId !== pagoId) return '';
+    if (estado === 'pagado') cuotas[idx] = { ...c, estado: 'pagado', pagoId, fechaPago: fecha };
+    else if (estado === 'en_revision') cuotas[idx] = { ...c, estado: 'en_revision', pagoId, fechaPago: null };
+    else cuotas[idx] = { ...c, estado: 'pendiente', pagoId: null, fechaPago: null };
+    const saldoPendiente = cuotas
+      .filter((q) => q.estado !== 'pagado')
+      .reduce((t, q) => t + (Number(q.monto) || 0), 0);
+    const liquidado = cuotas.length > 0 && cuotas.every((q) => q.estado === 'pagado');
+    const patch: Record<string, any> = { cuotas, saldoPendiente, _fbWrite: true };
+    if (liquidado) patch.estado = 'liquidado';
+    else if (acuerdo.estado === 'liquidado') patch.estado = 'activo';
+    await aRef.update(patch);
+    if (estado === 'pagado') return liquidado ? ` Cuota ${n} pagada: acuerdo liquidado.` : ` Cuota ${n} del acuerdo pagada.`;
+    if (estado === 'pendiente') return ` Cuota ${n} del acuerdo vuelve a pendiente.`;
+    return '';
   }
 
   /** Actualiza un pago existente (merge de campos) en mirror/pagos. */
@@ -1431,7 +1492,21 @@ export class PaymentsService {
 
     // Vínculo con acuerdo de pago: ACUERDO:<id> en la referencia.
     const matchAcuerdo = referencia.match(/ACUERDO:\s*([^\s|]+)/);
-    if (matchAcuerdo) {
+    const vinculoCuota = this.vinculoCuota(referencia);
+    if (vinculoCuota) {
+      // Pago de una cuota: marca la cuota (no toca el abono inicial).
+      try {
+        reservaMsg += await this.aplicarPagoACuota(
+          vinculoCuota.acuerdoId,
+          vinculoCuota.cuota,
+          input.estado === 'Confirmado' ? 'pagado' : 'pendiente',
+          input.id,
+          String(pago.fecha || new Date().toISOString().split('T')[0]),
+        );
+      } catch {
+        reservaMsg += ' (Error actualizando la cuota del acuerdo.)';
+      }
+    } else if (matchAcuerdo) {
       const acuerdoId = matchAcuerdo[1].trim();
       try {
         const aRef = db.ref(`mirror/acuerdos/${this.safeKey(acuerdoId)}`);
