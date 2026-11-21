@@ -64,6 +64,8 @@ export class AgreementsService {
       condonacionCondicionada: dto.condonacionCondicionada !== false,
       diasGracia: Number(dto.diasGracia ?? 5),
       cuotas: Array.isArray(dto.cuotas) ? dto.cuotas : [],
+      // Meses adeudados que el acuerdo deja al día al acogerse: [{ mes, anio, monto }].
+      mesesCubiertos: Array.isArray(dto.mesesCubiertos) ? dto.mesesCubiertos : [],
       firmaUrl: dto.firmaUrl ?? '',
       fechaAprobacion: dto.fechaAprobacion ?? '',
       createdBy: String(dto.createdBy ?? ''),
@@ -138,7 +140,7 @@ export class AgreementsService {
         'numCuotas', 'frecuenciaCuotas', 'montoCuota', 'fechaPrimerCuota', 'fechaInicio',
         'fechaFin', 'estado', 'aplicaA', 'condonacionMora', 'condonacionMonto',
         'condonacionCondicionada', 'diasGracia', 'cuotas', 'firmaUrl', 'fechaAprobacion',
-        'conjunto',
+        'conjunto', 'mesesCubiertos',
       ].forEach((f) => {
         if (dto[f] !== undefined) patch[f] = dto[f];
       });

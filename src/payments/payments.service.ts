@@ -1413,6 +1413,261 @@ export class PaymentsService {
     return '';
   }
 
+  // ==================== Acuerdos: cobertura de meses ====================
+  //
+  // Un acuerdo puede incluir meses adeudados (mesesCubiertos). Al acogerse el
+  // propietario, esos meses quedan "al día": se crea por cada uno un pago
+  // Confirmado de $0 con concepto "Administración <Mes> <Año>" (el estado de
+  // cada mes se calcula así en toda la app). El dinero real entra con el abono
+  // y las cuotas del acuerdo, así que las finanzas no se cuentan dos veces.
+
+  /** Normaliza mesesCubiertos [{ mes, anio, monto }] ordenados del más antiguo. */
+  private mesesDelAcuerdo(acuerdo: any): Array<{ mes: string; anio: number; monto: number; idx: number }> {
+    const lista: any[] = Array.isArray(acuerdo?.mesesCubiertos) ? acuerdo.mesesCubiertos : [];
+    return lista
+      .map((m) => {
+        const mi = this.mesIndex(m?.mes);
+        const anio = Number(m?.anio);
+        return mi < 0 || !anio ? null : { mes: PaymentsService.MESES_ES[mi], anio, monto: Number(m?.monto) || 0, idx: this.idxDe(anio, mi) };
+      })
+      .filter((m): m is { mes: string; anio: number; monto: number; idx: number } => !!m)
+      .sort((a, b) => a.idx - b.idx);
+  }
+
+  /** Deja "al día" los meses del acuerdo (idempotente: no duplica ni pisa pagos). */
+  async cubrirMesesAcuerdo(acuerdoId: string): Promise<{ meses: string[]; ids: string[] }> {
+    const db = this.firebase.db();
+    const aRef = db.ref(`mirror/acuerdos/${this.safeKey(acuerdoId)}`);
+    const snap = await aRef.get();
+    if (!snap.exists()) return { meses: [], ids: [] };
+    const acuerdo = snap.val() || {};
+    const usuario = String(acuerdo.usuario || '');
+    const meses = this.mesesDelAcuerdo(acuerdo);
+    if (!usuario || !meses.length) return { meses: [], ids: [] };
+    const ya: string[] = Array.isArray(acuerdo.coberturaPagoIds) ? acuerdo.coberturaPagoIds : [];
+    const cob = await this.coberturaDe(usuario);
+    const hoy = new Date().toISOString().split('T')[0];
+    const updates: Record<string, any> = {};
+    const ids: string[] = [];
+    const cubiertos: string[] = [];
+    for (const m of meses) {
+      cubiertos.push(`${m.mes} ${m.anio}`);
+      if (cob.get(m.idx) === 'pagado') continue; // ya pagado (o cubierto antes)
+      const id = Date.now().toString() + Math.random().toString().slice(2, 7);
+      updates[`mirror/pagos/${this.safeKey(id)}`] = {
+        id,
+        usuario,
+        usuarioId: usuario,
+        concepto: `Administración ${m.mes} ${m.anio}`,
+        valor: '0',
+        fecha: hoy,
+        estado: 'Confirmado',
+        referencia: `Cubierto por acuerdo de pago | ACUERDO:${acuerdoId} | CUBIERTO`,
+        conjunto: String(acuerdo.conjunto || ''),
+        conjuntoId: '',
+        tipoRecaudo: 'Administración',
+        cubiertoPorAcuerdo: acuerdoId,
+        createdAt: new Date().toISOString(),
+        _fbWrite: true,
+      };
+      ids.push(id);
+    }
+    updates[`mirror/acuerdos/${this.safeKey(acuerdoId)}/coberturaPagoIds`] = [...ya, ...ids];
+    updates[`mirror/acuerdos/${this.safeKey(acuerdoId)}/coberturaAplicada`] = true;
+    updates[`mirror/acuerdos/${this.safeKey(acuerdoId)}/_fbWrite`] = true;
+    await db.ref().update(updates);
+    return { meses: cubiertos, ids };
+  }
+
+  /**
+   * Quita la cobertura de meses de un acuerdo. Conserva los meses más antiguos
+   * que alcanza a cubrir `montoPagado` (lo que el propietario sí pagó); los
+   * demás vuelven a quedar en mora. Devuelve los meses que se revirtieron.
+   */
+  async revertirCoberturaAcuerdo(acuerdoId: string, montoPagado = 0): Promise<{ revertidos: string[]; conservados: string[] }> {
+    const db = this.firebase.db();
+    const aRef = db.ref(`mirror/acuerdos/${this.safeKey(acuerdoId)}`);
+    const snap = await aRef.get();
+    if (!snap.exists()) return { revertidos: [], conservados: [] };
+    const acuerdo = snap.val() || {};
+    const meses = this.mesesDelAcuerdo(acuerdo);
+    const ids: string[] = Array.isArray(acuerdo.coberturaPagoIds) ? acuerdo.coberturaPagoIds : [];
+    const pagos = await this.readCollection<Pago>('pagos');
+    const porId = new Map(pagos.map((p) => [String(p.id), p]));
+    // Meses que se conservan: los más antiguos cuyo valor acumulado cabe en lo pagado.
+    let disponible = Math.max(0, Number(montoPagado) || 0);
+    const conservar = new Set<string>();
+    for (const m of meses) {
+      const valor = m.monto || 0;
+      if (valor > 0 && disponible >= valor) {
+        disponible -= valor;
+        conservar.add(`${m.mes} ${m.anio}`.toLowerCase());
+      } else {
+        break;
+      }
+    }
+    const updates: Record<string, any> = {};
+    const quedan: string[] = [];
+    const revertidos: string[] = [];
+    const conservados: string[] = [];
+    for (const id of ids) {
+      const p = porId.get(String(id));
+      if (!p) continue;
+      const mes = String(p.concepto || '').replace(/^Administración\s+/i, '');
+      if (conservar.has(mes.toLowerCase())) {
+        quedan.push(id);
+        conservados.push(mes);
+      } else {
+        updates[`mirror/pagos/${this.safeKey(id)}`] = null;
+        revertidos.push(mes);
+      }
+    }
+    updates[`mirror/acuerdos/${this.safeKey(acuerdoId)}/coberturaPagoIds`] = quedan;
+    updates[`mirror/acuerdos/${this.safeKey(acuerdoId)}/coberturaAplicada`] = quedan.length > 0;
+    await db.ref().update(updates);
+    return { revertidos, conservados };
+  }
+
+  /** Lo que el propietario ya pagó de un acuerdo (abono aceptado + cuotas pagadas). */
+  private pagadoDelAcuerdo(acuerdo: any): number {
+    const abono = acuerdo?.abonoInicialEstado === 'aceptado' ? Number(acuerdo.abonoInicialMonto) || 0 : 0;
+    const cuotas: any[] = Array.isArray(acuerdo?.cuotas) ? acuerdo.cuotas : [];
+    return abono + cuotas.filter((c) => c?.estado === 'pagado').reduce((t, c) => t + (Number(c.monto) || 0), 0);
+  }
+
+  /**
+   * El propietario se acoge a un acuerdo: si hay abono crea su pago Pendiente
+   * (comprobante obligatorio), deja el acuerdo activo y cubre sus meses (CA 1).
+   */
+  async acogerseAcuerdo(input: { acuerdoId: string; usuario: string; comprobanteUrl?: string }): Promise<{
+    success: boolean; message?: string; pagoId?: string; mesesCubiertos?: string[];
+  }> {
+    const db = this.firebase.db();
+    const aRef = db.ref(`mirror/acuerdos/${this.safeKey(input.acuerdoId)}`);
+    const snap = await aRef.get();
+    if (!snap.exists()) return { success: false, message: 'El acuerdo no existe.' };
+    const acuerdo = snap.val() || {};
+    if (String(acuerdo.usuario || '').toLowerCase() !== String(input.usuario || '').toLowerCase()) {
+      return { success: false, message: 'Este acuerdo no es tuyo.' };
+    }
+    if (['incumplido', 'anulado', 'liquidado'].includes(String(acuerdo.estado))) {
+      return { success: false, message: 'Este acuerdo ya no está disponible.' };
+    }
+    if (['en_revision', 'aceptado'].includes(String(acuerdo.abonoInicialEstado))) {
+      return { success: false, message: 'Ya te acogiste a este acuerdo.' };
+    }
+    const abono = Number(acuerdo.abonoInicialMonto) || 0;
+    let pagoId: string | undefined;
+    if (abono > 0) {
+      if (!input.comprobanteUrl) return { success: false, message: 'Adjunta el comprobante del abono inicial.' };
+      const r = await this.createPayments({
+        usuario: acuerdo.usuario,
+        montoPerMonth: abono,
+        year: new Date().getFullYear(),
+        estado: 'Pendiente',
+        referencia: `IMG:${input.comprobanteUrl} | Abono inicial | ACUERDO:${input.acuerdoId}`,
+        conjunto: acuerdo.conjunto,
+        concepto: 'Abono inicial acuerdo de pago',
+        tipoRecaudo: 'Administración',
+      });
+      if (!r.success) return { success: false, message: r.message || 'No se pudo registrar el abono.' };
+      pagoId = r.ids[0];
+    }
+    await aRef.update({
+      estado: 'activo',
+      abonoInicialEstado: abono > 0 ? 'en_revision' : 'aceptado',
+      fechaAceptacion: new Date().toISOString(),
+      _fbWrite: true,
+    });
+    const cob = await this.cubrirMesesAcuerdo(input.acuerdoId);
+    return { success: true, pagoId, mesesCubiertos: cob.meses };
+  }
+
+  /**
+   * Finaliza un acuerdo por incumplimiento (CA 2): queda "incumplido", se pierde
+   * la condonación condicionada y los meses no cubiertos por lo pagado vuelven a mora.
+   */
+  async incumplirAcuerdo(input: { acuerdoId: string; motivo?: string; usuarioAdmin?: string }): Promise<{
+    success: boolean; message?: string; revertidos?: string[]; conservados?: string[];
+  }> {
+    const db = this.firebase.db();
+    const aRef = db.ref(`mirror/acuerdos/${this.safeKey(input.acuerdoId)}`);
+    const snap = await aRef.get();
+    if (!snap.exists()) return { success: false, message: 'El acuerdo no existe.' };
+    const acuerdo = snap.val() || {};
+    if (['incumplido', 'anulado', 'liquidado'].includes(String(acuerdo.estado))) {
+      return { success: false, message: 'El acuerdo ya está finalizado.' };
+    }
+    const rev = await this.revertirCoberturaAcuerdo(input.acuerdoId, this.pagadoDelAcuerdo(acuerdo));
+    await aRef.update({
+      estado: 'incumplido',
+      motivoIncumplimiento: String(input.motivo || '').slice(0, 300),
+      fechaIncumplimiento: new Date().toISOString(),
+      condonacionRevocada: !!acuerdo.condonacionMora && acuerdo.condonacionCondicionada !== false,
+      ultimoUsuario: String(input.usuarioAdmin || ''),
+      _fbWrite: true,
+    });
+    return { success: true, ...rev };
+  }
+
+  // ==================== Beneficios: meses cubiertos (CA 5) ====================
+
+  /**
+   * Al aprobar el pago de un beneficio "plan_meses", el monto se reparte en N
+   * pagos mensuales Confirmados desde el primer mes sin pagar (el siguiente al
+   * último pagado). El pago original pasa a ser el primero de esos meses.
+   */
+  async aplicarBeneficioMeses(pagoId: string, beneficio: any): Promise<string[]> {
+    const db = this.firebase.db();
+    const pRef = db.ref(`mirror/pagos/${this.safeKey(pagoId)}`);
+    const snap = await pRef.get();
+    if (!snap.exists()) return [];
+    const pago = snap.val() || {};
+    if (pago.beneficioAplicado) return Array.isArray(pago.mesesBeneficio) ? pago.mesesBeneficio : [];
+    const n = Math.max(1, Math.min(36, Math.floor(Number(beneficio?.mesesCubiertos) || 0)));
+    const usuario = String(pago.usuario || '');
+    const payable = await this.getPayableMonths(usuario);
+    const inicio = payable.primeroPagable ? this.idxDe(payable.primeroPagable.anio, this.mesIndex(payable.primeroPagable.mes)) : null;
+    const libres = payable.meses.filter((m) => inicio !== null && m.idx >= inicio && (m.estado === 'pendiente' || m.estado === 'disponible'));
+    // Si el rango del selector se queda corto, se continúa mes a mes.
+    const elegidos: Array<{ mes: string; anio: number }> = libres.slice(0, n).map((m) => ({ mes: m.mes, anio: m.anio }));
+    let sig = elegidos.length ? this.idxDe(elegidos[elegidos.length - 1].anio, this.mesIndex(elegidos[elegidos.length - 1].mes)) + 1 : (inicio ?? this.idxDe(new Date().getFullYear(), new Date().getMonth()));
+    while (elegidos.length < n) {
+      elegidos.push({ mes: PaymentsService.MESES_ES[sig % 12], anio: Math.floor(sig / 12) });
+      sig++;
+    }
+    const total = Number(String(pago.valor ?? 0).replace(/[^\d.]/g, '')) || 0;
+    const parte = Math.floor(total / n);
+    const updates: Record<string, any> = {};
+    const nombres = elegidos.map((m) => `${m.mes} ${m.anio}`);
+    elegidos.forEach((m, i) => {
+      const valor = i === n - 1 ? total - parte * (n - 1) : parte;
+      const concepto = `Administración ${m.mes} ${m.anio}`;
+      if (i === 0) {
+        updates[`mirror/pagos/${this.safeKey(pagoId)}/concepto`] = concepto;
+        updates[`mirror/pagos/${this.safeKey(pagoId)}/valor`] = String(valor);
+        updates[`mirror/pagos/${this.safeKey(pagoId)}/beneficioAplicado`] = true;
+        updates[`mirror/pagos/${this.safeKey(pagoId)}/mesesBeneficio`] = nombres;
+        updates[`mirror/pagos/${this.safeKey(pagoId)}/_fbWrite`] = true;
+      } else {
+        const id = `${pagoId}-b${i}`;
+        updates[`mirror/pagos/${this.safeKey(id)}`] = {
+          ...pago,
+          id,
+          concepto,
+          valor: String(valor),
+          estado: 'Confirmado',
+          beneficioAplicado: true,
+          beneficioDe: pagoId,
+          createdAt: new Date().toISOString(),
+          _fbWrite: true,
+        };
+      }
+    });
+    await db.ref().update(updates);
+    return nombres;
+  }
+
   /** Actualiza un pago existente (merge de campos) en mirror/pagos. */
   async updatePayment(id: string, changes: Partial<Pago>): Promise<{ success: boolean; message?: string }> {
     if (!id) return { success: false, message: 'ID de pago requerido' };
@@ -1514,10 +1769,14 @@ export class PaymentsService {
         if (aSnap.exists()) {
           if (input.estado === 'Confirmado') {
             await aRef.update({ abonoInicialEstado: 'aceptado', estado: 'activo', _fbWrite: true });
+            // Acuerdos anteriores a la cobertura: se aplica ahora (idempotente).
+            await this.cubrirMesesAcuerdo(acuerdoId).catch(() => undefined);
             reservaMsg += ' Acuerdo activado.';
           } else {
             await aRef.update({ abonoInicialEstado: 'pendiente', _fbWrite: true });
-            reservaMsg += ' Acuerdo pendiente (abono rechazado).';
+            // Sin abono no hay acuerdo: los meses cubiertos vuelven a su estado real.
+            const rev = await this.revertirCoberturaAcuerdo(acuerdoId, 0).catch(() => null);
+            reservaMsg += ' Acuerdo pendiente (abono rechazado).' + (rev?.revertidos?.length ? ` ${rev.revertidos.length} mes(es) vuelven a mora.` : '');
           }
         }
       } catch {
@@ -1537,12 +1796,26 @@ export class PaymentsService {
           const usuario = String(pago.usuario ?? '');
           const solicitantes: string[] = Array.isArray(beneficio.solicitantes) ? beneficio.solicitantes : [];
           const aprobados: string[] = Array.isArray(beneficio.aprobados) ? beneficio.aprobados : [];
-          if (input.estado === 'Confirmado' && !aprobados.includes(usuario)) {
-            await bRef.update({ aprobados: [...aprobados, usuario], _fbWrite: true });
-            reservaMsg += ' Adhesión al beneficio aprobada.';
+          const solicitudes: any[] = Array.isArray(beneficio.solicitudes) ? beneficio.solicitudes : [];
+          const marcar = (estado: string, extra: Record<string, any> = {}) =>
+            solicitudes.map((s) => (String(s?.pagoId) === String(input.id) ? { ...s, estado, ...extra } : s));
+          if (input.estado === 'Confirmado') {
+            let meses: string[] = [];
+            if (beneficio.tipo === 'plan_meses' && Number(beneficio.mesesCubiertos) > 0) {
+              meses = await this.aplicarBeneficioMeses(input.id, beneficio);
+            }
+            await bRef.update({
+              aprobados: aprobados.includes(usuario) ? aprobados : [...aprobados, usuario],
+              solicitudes: marcar('aprobada', { meses, fechaAprobacion: new Date().toISOString() }),
+              _fbWrite: true,
+            });
+            reservaMsg += meses.length
+              ? ` Beneficio aprobado: quedan pagados ${meses[0]}${meses.length > 1 ? ` a ${meses[meses.length - 1]}` : ''}.`
+              : ' Adhesión al beneficio aprobada.';
           } else if (input.estado === 'Rechazado') {
             await bRef.update({
               solicitantes: solicitantes.filter((u) => u !== usuario),
+              solicitudes: marcar('rechazada'),
               _fbWrite: true,
             });
             reservaMsg += ' Solicitud de beneficio rechazada.';
