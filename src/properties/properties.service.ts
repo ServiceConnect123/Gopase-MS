@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
 import { SheetsService } from '../sheets/sheets.service';
 import { DIAS_GRACIA, cobroDeConjunto } from '../billing/subscription-dates';
+import { contarUnidades } from '../plans/pricing';
 
 /**
  * CRUD de propiedades (conjuntos) contra Firebase (RTDB mirror/conjuntos).
@@ -25,8 +26,10 @@ export interface PropertyPublic {
   nombre: string;
   direccion?: string;
   tipo?: string;
-  /** Número de unidades (apartamentos/casas). 0 si no se ha registrado. Define el precio del plan. */
+  /** Número de unidades (apartamentos/casas) declaradas. 0 si no se ha registrado. */
   unidades: number;
+  /** Unidades distintas que ocupan sus propietarios. Se cobra con el mayor de los dos. */
+  unidadesReales: number;
   descripcion?: string;
   cuotaMonto?: string;
   moneda?: string;
@@ -99,6 +102,20 @@ export class PropertiesService {
   async listPublic(): Promise<PropertyPublic[]> {
     if (!this.firebase.isEnabled()) throw new Error('Servicio no disponible.');
     const mirror = (await this.firebase.liveVal<Record<string, any>>(MIRROR_CONJUNTOS)) || {};
+    // Propietarios agrupados por conjunto (una pasada) para contar sus unidades reales.
+    const porConjunto = new Map<string, any[]>();
+    try {
+      const usuarios = await this.firebase.liveValues<any>('mirror/usuarios');
+      for (const u of usuarios) {
+        const k = String(u?.conjunto ?? '').trim().toLowerCase();
+        if (!k) continue;
+        const lista = porConjunto.get(k);
+        if (lista) lista.push(u);
+        else porConjunto.set(k, [u]);
+      }
+    } catch (e: any) {
+      this.logger.warn(`[properties] no se pudieron contar unidades reales: ${e?.message}`);
+    }
 
     return Object.values(mirror).map((c: any) => {
       const secrets = c._secrets || {};
@@ -108,6 +125,7 @@ export class PropertiesService {
         direccion: c.direccion ?? '',
         tipo: c.tipo ?? '',
         unidades: Number(c.unidades) || 0,
+        unidadesReales: contarUnidades(porConjunto.get(String(c.nombre ?? '').trim().toLowerCase()) || []),
         descripcion: c.descripcion ?? '',
         cuotaMonto: c.cuotaMonto ?? '',
         moneda: c.moneda ?? 'COP',

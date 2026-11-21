@@ -264,7 +264,11 @@ export class PaymentsService {
     });
   }
 
-  /** Estado global de un usuario (isAlDia + conteo), como getUserOverallStatus. */
+  /**
+   * Conteo de meses pagados / exigibles de un usuario en un año. Su `isAlDia`
+   * es solo por año y NO es la regla oficial: el estado "al día" sale de
+   * estadoAlDiaHoy (la misma regla de Home y del reporte).
+   */
   private overallStatus(pagos: Pago[], u: Usuario, year: number) {
     const todayMonthIndex = new Date().getMonth();
     const isCurrentYear = year === new Date().getFullYear();
@@ -361,8 +365,13 @@ export class PaymentsService {
     }
 
     const alertas = await this.alertasComprobantes();
+    // "Al día" HOY con la MISMA regla del reporte y de Home (M-2 y M-1 pagados +
+    // gracia del mes actual). No depende del año elegido en la pantalla: el año
+    // solo cambia la grilla de meses y los conteos.
+    const alDiaHoy = await this.estadoAlDiaHoy(pagosAll, users, isSuperAdmin ? '' : conjunto);
     const list: AdminListItem[] = users.map((u) => {
-      const { paidCount, totalApplicable, isAlDia } = this.overallStatus(pagos, u, year);
+      const { paidCount, totalApplicable } = this.overallStatus(pagos, u, year);
+      const isAlDia = alDiaHoy.get(u.usuario)?.alDia ?? false;
       const { months, pendingCount, paidTotal } = this.monthCodes(pagos, u, year);
       return {
         alertaComprobantes: alertas.get(String(u.usuario).toLowerCase()) || 0,
@@ -507,6 +516,90 @@ export class PaymentsService {
     };
   }
 
+  /** M-2, M-1 y mes actual (del más antiguo al actual), con su año propio. */
+  private mesesRelevantes(now: Date): { idx: number; anio: number; label: string }[] {
+    const relMonth = (offset: number) => {
+      const d = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+      return { idx: d.getMonth(), anio: d.getFullYear(), label: `${MONTHS[d.getMonth()]} ${d.getFullYear()}` };
+    };
+    return [relMonth(2), relMonth(1), relMonth(0)];
+  }
+
+  /** ¿Sigue vigente la gracia del mes actual? (hoy <= 1° del mes + N días corridos). */
+  private graciaVigente(now: Date, diasGracia: number): boolean {
+    const hoyMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const finGracia = new Date(now.getFullYear(), now.getMonth(), 1 + diasGracia);
+    return hoyMs <= finGracia.getTime();
+  }
+
+  /**
+   * Estado "al día" HOY de cada usuario: la regla ÚNICA que usan el reporte al
+   * día, Home (vigilante/admin) y la lista de Pagos. Ver getAlDiaReport.
+   * Los días de gracia son los del conjunto de cada usuario (cacheados), así la
+   * vista global del superAdmin también respeta la configuración de cada conjunto.
+   */
+  private async estadoAlDiaHoy(
+    pagosAll: Pago[],
+    users: Usuario[],
+    conjunto: string,
+  ): Promise<Map<string, { m2: string; m1: string; actual: string; alDia: boolean }>> {
+    const now = new Date();
+    const [mesM2, mesM1, mesM] = this.mesesRelevantes(now);
+
+    // Gracia por conjunto (una lectura por conjunto distinto).
+    const graciaPorConjunto = new Map<string, boolean>();
+    const graciaDe = async (c: string): Promise<boolean> => {
+      const key = c.trim().toLowerCase();
+      if (!graciaPorConjunto.has(key)) {
+        let dias = 10;
+        try {
+          if (c.trim()) dias = await this.properties.getDiasGraciaPropietario(c, 10);
+        } catch {
+          // Sin configuración legible: gracia por defecto (10 días).
+        }
+        graciaPorConjunto.set(key, this.graciaVigente(now, dias));
+      }
+      return graciaPorConjunto.get(key)!;
+    };
+
+    // Pagos cacheados por año (isPaidMonth filtra sobre pagos ya de ese año).
+    const pagosPorAnio = new Map<number, Pago[]>();
+    const getPagosAnio = (anio: number) => {
+      if (!pagosPorAnio.has(anio)) pagosPorAnio.set(anio, this.filterPagosByYear(pagosAll, anio));
+      return pagosPorAnio.get(anio)!;
+    };
+
+    // Estado de un mes para un usuario: 'Pagado' | 'Pendiente' | 'N/A'.
+    const estadoMes = (u: Usuario, mes: { idx: number; anio: number }): string => {
+      const ingreso = this.parseFechaIngreso(u.fechaIngreso);
+      if (ingreso) {
+        const antesDeIngreso =
+          mes.anio < ingreso.year || (mes.anio === ingreso.year && mes.idx < ingreso.monthIndex);
+        if (antesDeIngreso) return 'N/A';
+      }
+      return this.isPaidMonth(getPagosAnio(mes.anio), u.usuario, mes.idx, mes.anio)
+        ? 'Pagado'
+        : 'Pendiente';
+    };
+
+    const out = new Map<string, { m2: string; m1: string; actual: string; alDia: boolean }>();
+    for (const u of users) {
+      const m2 = estadoMes(u, mesM2);
+      const m1 = estadoMes(u, mesM1);
+      const actual = estadoMes(u, mesM);
+      const graciaActiva = await graciaDe(conjunto || u.conjunto || '');
+      // Al día:
+      //  - M-2 y M-1 cubiertos (Pagado o N/A). Si falta alguno => mora inmediata.
+      //  - El mes actual solo se exige pasada la gracia: si no pagó el actual y
+      //    ya venció la gracia del mes en curso => mora.
+      const m2Ok = m2 === 'Pagado' || m2 === 'N/A';
+      const m1Ok = m1 === 'Pagado' || m1 === 'N/A';
+      const actualOk = actual === 'Pagado' || actual === 'N/A' || graciaActiva;
+      out.set(u.usuario, { m2, m1, actual, alDia: m2Ok && m1Ok && actualOk });
+    }
+    return out;
+  }
+
   /**
    * Reporte "al día" de TODOS los propietarios. Muestra 3 columnas de contexto
    * (M-2, M-1, mes actual) y calcula "al día / en mora" así:
@@ -548,75 +641,28 @@ export class PaymentsService {
 
     const now = new Date();
     const diaDelMes = now.getDate();
-    // Días de gracia CORRIDOS configurables por conjunto (default 10). En vista
-    // global de superAdmin (sin conjunto) se usa el default.
-    const diasGracia = conjunto
-      ? await this.properties.getDiasGraciaPropietario(conjunto, 10)
-      : 10;
-
-    // Gracia del MES ACTUAL: vigente mientras hoy <= (1° del mes actual + N días).
-    const hoyMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    const inicioMesActual = new Date(now.getFullYear(), now.getMonth(), 1);
-    const finGracia = new Date(inicioMesActual.getFullYear(), inicioMesActual.getMonth(), 1 + diasGracia);
-    const graciaActiva = hoyMs <= finGracia.getTime();
-
-    // Los 3 meses relevantes (del más antiguo al actual), con su año propio.
-    const relMonth = (offset: number) => {
-      const d = new Date(now.getFullYear(), now.getMonth() - offset, 1);
-      return { idx: d.getMonth(), anio: d.getFullYear(), label: `${MONTHS[d.getMonth()]} ${d.getFullYear()}` };
-    };
-    const mesM2 = relMonth(2);
-    const mesM1 = relMonth(1);
-    const mesM = relMonth(0);
-    const meses = [mesM2, mesM1, mesM];
-
-    // Pagos cacheados por año (isPaidMonth filtra sobre pagos ya de ese año).
-    const pagosPorAnio = new Map<number, Pago[]>();
-    const getPagosAnio = (anio: number) => {
-      if (!pagosPorAnio.has(anio)) pagosPorAnio.set(anio, this.filterPagosByYear(pagosAll, anio));
-      return pagosPorAnio.get(anio)!;
-    };
 
     let users = usuarios.filter((u) => u.rol !== 'superAdmin' && u.rol !== 'vigilante');
     if (!isSuperAdmin && conjunto) {
       users = users.filter((u) => (u.conjunto || '') === conjunto);
     }
 
-    // Estado de un mes para un usuario: 'Pagado' | 'Pendiente' | 'N/A'.
-    const estadoMes = (u: Usuario, mes: { idx: number; anio: number }): string => {
-      const ingreso = this.parseFechaIngreso(u.fechaIngreso);
-      if (ingreso) {
-        const antesDeIngreso =
-          mes.anio < ingreso.year || (mes.anio === ingreso.year && mes.idx < ingreso.monthIndex);
-        if (antesDeIngreso) return 'N/A';
-      }
-      return this.isPaidMonth(getPagosAnio(mes.anio), u.usuario, mes.idx, mes.anio)
-        ? 'Pagado'
-        : 'Pendiente';
-    };
+    const estados = await this.estadoAlDiaHoy(pagosAll, users, isSuperAdmin ? '' : conjunto);
+    // Datos de cabecera del reporte: gracia del conjunto pedido (default en vista global).
+    const diasGracia = conjunto ? await this.properties.getDiasGraciaPropietario(conjunto, 10) : 10;
+    const graciaActiva = this.graciaVigente(now, diasGracia);
+    const meses = this.mesesRelevantes(now);
 
     const propietarios = users.map((u) => {
-      const m2 = estadoMes(u, mesM2);
-      const m1 = estadoMes(u, mesM1);
-      const actual = estadoMes(u, mesM);
-
-      // Al día:
-      //  - M-2 y M-1 cubiertos (Pagado o N/A). Si falta alguno => mora inmediata.
-      //  - El mes actual solo se exige pasada la gracia: si no pagó el actual y
-      //    ya venció la gracia del mes en curso => mora.
-      const m2Ok = m2 === 'Pagado' || m2 === 'N/A';
-      const m1Ok = m1 === 'Pagado' || m1 === 'N/A';
-      const actualOk = actual === 'Pagado' || actual === 'N/A' || graciaActiva;
-      const alDia = m2Ok && m1Ok && actualOk;
-
+      const e = estados.get(u.usuario)!;
       return {
         nombre: u.nombre || u.usuario,
         parcela: u.parcela || '',
         usuario: u.usuario,
-        m2,
-        m1,
-        actual,
-        alDia,
+        m2: e.m2,
+        m1: e.m1,
+        actual: e.actual,
+        alDia: e.alDia,
       };
     });
 
