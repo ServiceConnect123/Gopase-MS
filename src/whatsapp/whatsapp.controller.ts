@@ -4,6 +4,7 @@ import { WhatsappService } from './whatsapp.service';
 import { Public } from '../auth/public.decorator';
 import { FirebaseService } from '../firebase/firebase.service';
 import { assertConjuntoPermitido, WspAccessGuard } from '../auth/wsp-access.guard';
+import { fechaBucket } from './sent-message.store';
 
 @ApiTags('whatsapp')
 @Controller('whatsapp')
@@ -31,6 +32,37 @@ export class WhatsappController {
       ready: this.whatsapp.isReady(conjunto),
       conjunto: conjunto || null,
       timestamp: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Estado de entrega de los mensajes enviados un día: enviado, entregado,
+   * leído, error o sin_entregar (no confirmó entrega en 6 h).
+   * `fecha` = yyyymmdd (hora de Colombia); por defecto, hoy.
+   */
+  @ApiOperation({ summary: 'Estado de entrega de los mensajes de WhatsApp (por conjunto y día)' })
+  @ApiQuery({ name: 'conjunto', required: false })
+  @ApiQuery({ name: 'fecha', required: false, description: 'yyyymmdd (hora de Colombia). Por defecto, hoy.' })
+  @Get('entregas')
+  async entregas(
+    @Req() req: any,
+    @Query('conjunto') conjunto?: string,
+    @Query('fecha') fecha?: string,
+  ) {
+    await assertConjuntoPermitido(req, this.firebase, conjunto);
+    const dia = fecha && /^\d{8}$/.test(fecha) ? fecha : fechaBucket(Date.now());
+    const data = await this.whatsapp.listarEntregas(dia, conjunto);
+    const resumen = data.reduce<Record<string, number>>((acc, e) => {
+      acc[e.estado] = (acc[e.estado] || 0) + 1;
+      return acc;
+    }, {});
+    // El destinatario se devuelve sin el sufijo técnico del JID.
+    return {
+      success: true,
+      fecha: dia,
+      conjunto: conjunto || null,
+      resumen,
+      data: data.map((e) => ({ ...e, to: String(e.to || '').split('@')[0] })),
     };
   }
 
