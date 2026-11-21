@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { tieneCartera } from '../tenants/tenant-rules';
 import * as ExcelJS from 'exceljs';
 import { FirebaseService } from '../firebase/firebase.service';
 import { PaymentsService, Pago } from './payments.service';
@@ -98,7 +99,7 @@ export class PaymentsImportService {
     if (!snap.exists()) return [];
     const all = Object.values(snap.val() || {}) as any[];
     return all
-      .filter((u) => this.norm(u.rol) !== 'superadmin' && this.norm(u.rol) !== 'vigilante')
+      .filter((u) => tieneCartera(u.rol))
       .filter((u) => isSuperAdmin || !conjunto || this.norm(u.conjunto) === this.norm(conjunto))
       .map((u) => ({
         usuario: String(u.usuario ?? ''),

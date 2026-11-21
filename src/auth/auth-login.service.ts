@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { esInquilino, mensajeAccesoInquilino, resumenParaSesion, segundosHastaFin } from '../tenants/tenant-rules';
 import { FirebaseService } from '../firebase/firebase.service';
 import { recoverPassword } from './password.util';
 import { validatePasswordPolicy } from './password-policy.util';
@@ -41,6 +42,8 @@ export interface LoginResult {
      * usuario). Cualquier rol: puede ser propietario en uno y admin en otro.
      */
     accesos?: Array<{ conjunto: string; usuario: string; rol: string }>;
+    /** Solo arrendatarios: su arriendo (propietario, unidad, vigencia y permisos). */
+    inquilino?: ReturnType<typeof resumenParaSesion>;
     mustChangePassword?: boolean;
     /** JWT de sesión que el frontend adjunta como Bearer en las demás llamadas. */
     token?: string;
@@ -261,6 +264,26 @@ export class AuthLoginService {
       // cuenta, para el selector de "cambiar de conjunto". Cualquier rol (puede
       // ser propietario en uno y admin en otro). El correo real se lee del perfil
       // (en Auth el email es sintético).
+      // ----- Arrendatario (rol inquilino): solo entra con el arriendo vigente -----
+      let inquilino: ReturnType<typeof resumenParaSesion> | undefined;
+      let segundosSesion: number | null = null;
+      if (esInquilino(rol)) {
+        const perfil = (await this.firebase.db().ref(`mirror/usuarios/${uid}`).get()).val() || {};
+        const bloqueo = mensajeAccesoInquilino(perfil.inquilino);
+        if (bloqueo) {
+          this.logger.warn(`[login] arrendatario sin acceso vigente: usuario=${uid}`);
+          return { success: false, message: bloqueo };
+        }
+        const dueno = String(perfil.inquilino?.propietario || '').replace(/[.#$/\[\]]/g, '_');
+        const propietario = dueno ? (await this.firebase.db().ref(`mirror/usuarios/${dueno}`).get()).val() : null;
+        if (!propietario) {
+          return { success: false, message: 'El propietario que te registró ya no está en GoPase. Habla con la administración.' };
+        }
+        inquilino = resumenParaSesion(perfil);
+        // La sesión no dura más que el arriendo.
+        segundosSesion = segundosHastaFin(perfil.inquilino?.fin);
+      }
+
       const emailPerfil = await this.emailDePerfil(uid);
       const accesos = await this.accesosPorCorreo(emailPerfil);
 
@@ -320,7 +343,12 @@ export class AuthLoginService {
       // en SOLO LECTURA (el ReadOnlyGuard bloquea sus escrituras). Se calcula
       // aquí para no consultar la suscripción en cada request.
       const suspendido = suscripcion?.bloqueado === true;
-      const token = this.jwt.sign({ sub: uid, rol: claims.rol || '', conjuntoId, suspendido });
+      const payloadToken = { sub: uid, rol: claims.rol || '', conjuntoId, suspendido };
+      const TREINTA_DIAS = 30 * 24 * 3600;
+      const token =
+        segundosSesion !== null
+          ? this.jwt.sign(payloadToken, { expiresIn: Math.min(segundosSesion, TREINTA_DIAS) })
+          : this.jwt.sign(payloadToken);
       return {
         success: true,
         user: {
@@ -332,6 +360,7 @@ export class AuthLoginService {
           conjuntoId,
           conjunto: conjuntoNombre,
           accesos,
+          inquilino,
           mustChangePassword: !!claims.mustChangePassword,
           token,
           suscripcion,

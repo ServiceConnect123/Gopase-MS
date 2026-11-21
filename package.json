@@ -14,7 +14,7 @@
     "start:prod": "node dist/main",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
     "test": "jest",
-    "test:wsp": "nest build && node --test test/sent-message.store.test.js test/session-lock.test.js test/acuerdo-cuotas.test.js test/acuerdos-beneficios.test.js test/planes-precios.test.js test/al-dia-pagos-home.test.js"
+    "test:wsp": "nest build && node --test test/sent-message.store.test.js test/session-lock.test.js test/acuerdo-cuotas.test.js test/acuerdos-beneficios.test.js test/planes-precios.test.js test/al-dia-pagos-home.test.js test/arrendatarios.test.js"
   },
   "dependencies": {
     "@genkit-ai/google-genai": "^1.44.0",
