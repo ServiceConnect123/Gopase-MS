@@ -25,6 +25,8 @@ export interface PropertyPublic {
   nombre: string;
   direccion?: string;
   tipo?: string;
+  /** Número de unidades (apartamentos/casas). 0 si no se ha registrado. Define el precio del plan. */
+  unidades: number;
   descripcion?: string;
   cuotaMonto?: string;
   moneda?: string;
@@ -105,6 +107,7 @@ export class PropertiesService {
         nombre: c.nombre ?? '',
         direccion: c.direccion ?? '',
         tipo: c.tipo ?? '',
+        unidades: Number(c.unidades) || 0,
         descripcion: c.descripcion ?? '',
         cuotaMonto: c.cuotaMonto ?? '',
         moneda: c.moneda ?? 'COP',
