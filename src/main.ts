@@ -110,6 +110,11 @@ async function bootstrap() {
     swaggerOptions: { persistAuthorization: true },
   });
 
+  // Apagado limpio en cada deploy (SIGTERM de Render): sin esto no corre
+  // onModuleDestroy y WhatsApp no guardaba sus llaves de cifrado ni liberaba
+  // su candado antes de que la instancia nueva se conectara.
+  app.enableShutdownHooks();
+
   const port = process.env.PORT || 3001;
   await app.listen(port);
   const m = process.memoryUsage();
