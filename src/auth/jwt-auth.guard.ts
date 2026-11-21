@@ -3,12 +3,15 @@ import {
   ExecutionContext,
   Injectable,
   Logger,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { IS_PUBLIC_KEY } from './public.decorator';
+import { FirebaseService } from '../firebase/firebase.service';
+import { esInquilino, mensajeAccesoInquilino } from '../tenants/tenant-rules';
 
 /**
  * Guard global de autenticación por JWT propio.
@@ -28,9 +31,10 @@ export class JwtAuthGuard implements CanActivate {
     private readonly reflector: Reflector,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    @Optional() private readonly firebase?: FirebaseService,
   ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     // Solo aplica a HTTP (deja pasar otros transportes si los hubiera).
     if (context.getType() !== 'http') return true;
 
@@ -58,11 +62,21 @@ export class JwtAuthGuard implements CanActivate {
     try {
       const payload = this.jwt.verify(token);
       req.user = payload; // { sub: uid, rol, conjuntoId, iat, exp }
-      return true;
     } catch (err: any) {
       this.logger.warn(`[auth] token inválido: ${err?.message}`);
       throw new UnauthorizedException('Token inválido o expirado.');
     }
+
+    // Arrendatario: el token vale mientras su arriendo siga vigente (el
+    // propietario puede retirarle el acceso o cambiar las fechas en cualquier
+    // momento). Se lee de la caché en vivo, sin ir a RTDB en cada petición.
+    if (esInquilino(req.user?.rol) && this.firebase?.isEnabled()) {
+      const key = String(req.user?.sub || '').replace(/[.#$/\[\]]/g, '_');
+      const usuarios = (await this.firebase.liveVal<Record<string, any>>('mirror/usuarios')) || {};
+      const bloqueo = mensajeAccesoInquilino(usuarios[key]?.inquilino);
+      if (bloqueo) throw new UnauthorizedException(bloqueo);
+    }
+    return true;
   }
 
   /** Extrae el JWT del header Authorization: Bearer <token>. */

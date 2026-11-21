@@ -1,12 +1,17 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Delete, ForbiddenException, Get, Optional, Param, Post, Put, Query, Req } from '@nestjs/common';
 import { ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { ReservationsService } from './reservations.service';
+import { FirebaseService } from '../firebase/firebase.service';
+import { esInquilino, estadoInquilino } from '../tenants/tenant-rules';
 
 /** CRUD de reservas de zonas comunes contra Firebase (RTDB). Reemplaza Sheets. */
 @ApiTags('reservations')
 @Controller('reservations')
 export class ReservationsController {
-  constructor(private readonly reservations: ReservationsService) {}
+  constructor(
+    private readonly reservations: ReservationsService,
+    @Optional() private readonly firebase?: FirebaseService,
+  ) {}
 
   @ApiOperation({ summary: 'Lista de reservas (por conjunto y/o usuario)' })
   @ApiQuery({ name: 'conjunto', required: false })
@@ -39,7 +44,16 @@ export class ReservationsController {
     },
   })
   @Post()
-  async create(@Body() body: any) {
+  async create(@Body() body: any, @Req() req: any) {
+    // Arrendatario: solo reserva si el propietario se lo permitió y su arriendo está vigente.
+    if (esInquilino(req?.user?.rol) && this.firebase?.isEnabled()) {
+      const usuarios = (await this.firebase.liveVal<Record<string, any>>('mirror/usuarios')) || {};
+      const yo = usuarios[String(req.user.sub || '').replace(/[.#$/\[\]]/g, '_')];
+      const d = yo?.inquilino || {};
+      if (estadoInquilino(d) !== 'activo' || d.puedeReservar !== true) {
+        throw new ForbiddenException('El propietario no te ha habilitado para reservar zonas comunes.');
+      }
+    }
     return this.reservations.create(body);
   }
 
