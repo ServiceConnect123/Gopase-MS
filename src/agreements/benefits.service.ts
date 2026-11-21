@@ -36,6 +36,13 @@ export class BenefitsService {
       activo: dto.activo !== false,
       aplicacionesMes: Number(dto.aplicacionesMes ?? 0),
       solicitantes: Array.isArray(dto.solicitantes) ? dto.solicitantes : [],
+      // Beneficio "plan_meses": paga montoPago y cubre mesesCubiertos meses
+      // desde el último mes pagado (se aplican al aprobar el pago).
+      mesesCubiertos: Number(dto.mesesCubiertos ?? 0),
+      montoPago: Number(dto.montoPago ?? 0),
+      // Solicitudes con su pago: [{ usuario, pagoId, monto, fecha, estado }].
+      solicitudes: Array.isArray(dto.solicitudes) ? dto.solicitudes : [],
+      aprobados: Array.isArray(dto.aprobados) ? dto.aprobados : [],
       createdBy: String(dto.createdBy ?? ''),
       createdAt: dto.createdAt ?? new Date().toISOString(),
       fechaModificacion: dto.fechaModificacion ?? new Date().toISOString(),
@@ -85,7 +92,7 @@ export class BenefitsService {
       [
         'nombre', 'descripcion', 'tipo', 'valor', 'modalidad', 'regla',
         'aplicaA', 'fechaInicio', 'fechaFin', 'activo', 'aplicacionesMes',
-        'conjunto', 'solicitantes', 'aprobados',
+        'conjunto', 'solicitantes', 'aprobados', 'mesesCubiertos', 'montoPago', 'solicitudes',
       ].forEach((f) => {
         if (dto[f] !== undefined) patch[f] = dto[f];
       });

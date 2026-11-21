@@ -412,9 +412,44 @@ export class PaymentsController {
   })
   @Post('review')
   async review(
-    @Body() body: { id: string; estado: 'Confirmado' | 'Rechazado'; valor?: string | number; referencia?: string },
+    @Body() body: {
+      id: string; estado: 'Confirmado' | 'Rechazado'; valor?: string | number; referencia?: string;
+      motivo?: string; tipoRechazo?: string; montoEsperado?: number; completo?: boolean;
+    },
   ) {
     return this.payments.reviewPayment(body);
+  }
+
+  @ApiOperation({ summary: 'El propietario se acoge a un acuerdo: abono (si hay) y meses cubiertos al día' })
+  @Post('agreement-accept')
+  async agreementAccept(@Req() req: any, @Body() body: { acuerdoId: string; usuario?: string; comprobanteUrl?: string }) {
+    // El propietario solo puede acogerse a SUS acuerdos: el usuario sale del
+    // token (uid -> mirror/usuarios/<uid>.usuario), no del cuerpo de la petición.
+    let usuario = String(body.usuario || '');
+    const uid = String(req?.user?.sub || '').replace(/[.#$/\[\]]/g, '_');
+    if (uid) {
+      try {
+        const snap = await this.firebase.db().ref(`mirror/usuarios/${uid}/usuario`).get();
+        if (snap.exists() && snap.val()) usuario = String(snap.val());
+      } catch {
+        /* sin perfil: se usa el del cuerpo y se valida contra el acuerdo */
+      }
+    }
+    return this.payments.acogerseAcuerdo({ acuerdoId: body.acuerdoId, usuario, comprobanteUrl: body.comprobanteUrl });
+  }
+
+  @ApiOperation({ summary: 'Finaliza un acuerdo por incumplimiento (admin)' })
+  @Post('agreement-breach')
+  async agreementBreach(@Req() req: any, @Body() body: { acuerdoId: string; motivo?: string }) {
+    const rol = String(req?.user?.rol || '').toLowerCase();
+    if (req?.user && !rol.includes('admin')) {
+      return { success: false, message: 'Solo la administración puede finalizar un acuerdo.' };
+    }
+    return this.payments.incumplirAcuerdo({
+      acuerdoId: body.acuerdoId,
+      motivo: body.motivo,
+      usuarioAdmin: String(req?.user?.usuario || req?.user?.sub || ''),
+    });
   }
 
   @ApiOperation({ summary: 'Analizar comprobante con IA (Gemini); la clave no sale al cliente' })

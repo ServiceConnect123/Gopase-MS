@@ -64,6 +64,8 @@ export interface AdminListItem {
   pendingCount: number;
   /** Total confirmado en el año. */
   paidTotal: number;
+  /** Comprobantes rechazados por falsos/alterados (alerta para el admin). */
+  alertaComprobantes?: number;
 }
 
 export interface MonthStatus {
@@ -206,6 +208,27 @@ export class PaymentsService {
     return pagos.filter((p) => (p.concepto || '').includes(y));
   }
 
+  /**
+   * ¿El pago es del año? Si el concepto trae el año (cuotas de administración)
+   * manda el concepto; si no lo trae (abono o cuota de un acuerdo, beneficio,
+   * reserva) se usa el año de su fecha. Antes esos pagos no aparecían en Pagos
+   * (no se podían aprobar) ni sumaban al recaudo del año.
+   *
+   * Solo para LISTAS y TOTALES de dinero. El estado de cada mes sigue usando
+   * filterPagosByYear (concepto con mes y año), así no cambia en datos viejos.
+   */
+  private esDelAnio(p: Pago, year: number): boolean {
+    const c = String(p.concepto || '');
+    if (/\b20\d{2}\b/.test(c)) return c.includes(String(year));
+    const f = String(p.fecha || (p as any).createdAt || '');
+    const m = f.match(/\b(20\d{2})\b/);
+    return m ? Number(m[1]) === year : false;
+  }
+
+  private pagosDelAnio(pagos: Pago[], year: number): Pago[] {
+    return pagos.filter((p) => this.esDelAnio(p, year));
+  }
+
   /** Índice usuario -> pagos, memoizado por array (vive lo que vive la petición). */
   private readonly byUserIndex = new WeakMap<Pago[], Map<string, Pago[]>>();
 
@@ -308,6 +331,10 @@ export class PaymentsService {
           paidTotal += parseFloat(String(delUsuario[i].valor)) || 0;
         } else if (estado === 'Pendiente') {
           pending = true;
+        } else if (estado === 'Parcial') {
+          // Pagó una parte: el dinero cuenta, el mes aún no (falta el resto).
+          pending = true;
+          paidTotal += parseFloat(String(delUsuario[i].valor)) || 0;
         }
       }
       if (confirmed) months += 'p';
@@ -333,10 +360,12 @@ export class PaymentsService {
       users = users.filter((u) => (u.conjunto || '') === conjunto);
     }
 
+    const alertas = await this.alertasComprobantes();
     const list: AdminListItem[] = users.map((u) => {
       const { paidCount, totalApplicable, isAlDia } = this.overallStatus(pagos, u, year);
       const { months, pendingCount, paidTotal } = this.monthCodes(pagos, u, year);
       return {
+        alertaComprobantes: alertas.get(String(u.usuario).toLowerCase()) || 0,
         username: u.usuario,
         name: u.nombre || u.usuario,
         paidCount,
@@ -384,7 +413,7 @@ export class PaymentsService {
 
       if (userPayments.length > 0) {
         const hasConfirmed = userPayments.some((p) => p.estado === 'Confirmado');
-        const hasPending = userPayments.some((p) => p.estado === 'Pendiente');
+        const hasPending = userPayments.some((p) => p.estado === 'Pendiente' || p.estado === 'Parcial');
         if (hasConfirmed) { status = 'Pagado'; color = '#4CAF50'; icon = 'checkmark-circle'; }
         else if (hasPending) { status = 'Por confirmar'; color = '#FF9800'; icon = 'time'; }
       } else if ((isCurrentYear && idx >= todayMonthIndex) || year > new Date().getFullYear()) {
@@ -417,8 +446,8 @@ export class PaymentsService {
     total: number;
   }> {
     const pagosAll = await this.readCollection<Pago>('pagos');
-    const pagos = this.filterPagosByYear(pagosAll, year).filter(
-      (p) => p.usuario === username && String(p.estado || '').toLowerCase() === 'confirmado',
+    const pagos = this.pagosDelAnio(pagosAll, year).filter(
+      (p) => p.usuario === username && ['confirmado', 'parcial'].includes(String(p.estado || '').toLowerCase()),
     );
     const porFondo = new Map<string, { total: number; count: number }>();
     let total = 0;
@@ -612,7 +641,7 @@ export class PaymentsService {
   /** Pagos de un propietario en el año (su propia vista). */
   async getOwnerPayments(username: string, year: number): Promise<Pago[]> {
     const pagosAll = await this.readCollection<Pago>('pagos');
-    return this.filterPagosByYear(pagosAll, year).filter((p) => p.usuario === username);
+    return this.pagosDelAnio(pagosAll, year).filter((p) => p.usuario === username);
   }
 
   /**
@@ -627,7 +656,7 @@ export class PaymentsService {
     ]);
     // year <= 0 => TODOS los años (usado por el cuadre de caja global). En otro
     // caso, filtra por el año indicado (vía el texto del concepto).
-    const pagos = year > 0 ? this.filterPagosByYear(pagosAll, year) : pagosAll;
+    const pagos = year > 0 ? this.pagosDelAnio(pagosAll, year) : pagosAll;
     let filtered = pagos;
     if (!isSuperAdmin && conjunto) {
       const usuariosDelConjunto = new Set(
@@ -781,8 +810,9 @@ export class PaymentsService {
       );
       pagosConjunto = pagosAll.filter((p) => delConjunto.has(p.usuario));
     }
+    // Lo recibido de un pago parcial también es dinero en caja.
     const pagosConfirmados = pagosConjunto.filter(
-      (p) => String(p.estado || '').toLowerCase() === 'confirmado',
+      (p) => ['confirmado', 'parcial'].includes(String(p.estado || '').toLowerCase()),
     );
 
     // Reportes del conjunto (gastos/ingresos extra/ajustes). Monto en dato_8.
@@ -849,7 +879,7 @@ export class PaymentsService {
     const saldoInicial = sumPrevPagos + sumPrev(extraGeneral) + sumPrev(ajustesGeneral) - sumPrev(gastosGeneral);
 
     // --- Pagos/reportes del año seleccionado (caja general) ---
-    const pagosYear = pagosGeneral.filter((p) => (p.concepto || '').includes(String(year)));
+    const pagosYear = pagosGeneral.filter((p) => this.esDelAnio(p, year));
     const inYear = (arr: any[]) =>
       arr.filter((r) => fechaReporte(r).includes(String(year)));
     const gastosYear = inYear(gastosGeneral);
@@ -1016,7 +1046,7 @@ export class PaymentsService {
 
         // Movimiento del año seleccionado.
         const pagosAnio = pagosDe
-          .filter((p) => (p.concepto || '').includes(String(year)))
+          .filter((p) => this.esDelAnio(p, year))
           .reduce((s, p) => s + (parseFloat(String(p.valor)) || 0), 0);
         const inYearSumDe = (arr: any[]) =>
           arr.filter((r) => fechaReporte(r).includes(String(year)))
@@ -1097,7 +1127,7 @@ export class PaymentsService {
     for (const p of this.pagosDeUsuario(pagos, usuario)) {
       if (normF((p as any).tipoRecaudo) !== objetivo) continue;
       const est = String(p.estado || '').toLowerCase();
-      const tipo = est === 'confirmado' ? 'pagado' : est === 'pendiente' || est === 'procesando' ? 'revision' : null;
+      const tipo = est === 'confirmado' ? 'pagado' : est === 'pendiente' || est === 'procesando' || est === 'parcial' ? 'revision' : null;
       if (!tipo) continue;
       const c = String(p.concepto || '').toLowerCase();
       const anios = Array.from(new Set((c.match(/\b20\d{2}\b/g) || []).map(Number)));
@@ -1349,7 +1379,328 @@ export class PaymentsService {
     }
 
     await db.ref().update(updates);
+
+    // Pago de una cuota de acuerdo (referencia "ACUERDO:<id> | CUOTA:<n>"): la
+    // cuota queda "en revisión" (pago pendiente) o pagada (registrado ya
+    // confirmado por el admin). Así Pagos y Acuerdos nunca se contradicen.
+    const vinculo = this.vinculoCuota(input.referencia);
+    if (vinculo && ids.length) {
+      const confirmado = String(input.estado).toLowerCase() === 'confirmado';
+      await this.aplicarPagoACuota(vinculo.acuerdoId, vinculo.cuota, confirmado ? 'pagado' : 'en_revision', ids[0], hoy)
+        .catch((e) => this.logger.warn(`No se pudo vincular el pago ${ids[0]} a la cuota: ${e?.message}`));
+    }
     return { success: true, ids, pagos };
+  }
+
+  /** Extrae "ACUERDO:<id> | CUOTA:<n>" de la referencia de un pago. */
+  private vinculoCuota(referencia: string): { acuerdoId: string; cuota: number } | null {
+    const ref = String(referencia || '');
+    const a = ref.match(/ACUERDO:\s*([^\s|]+)/);
+    const c = ref.match(/CUOTA:\s*(\d+)/);
+    if (!a || !c) return null;
+    const cuota = Number(c[1]);
+    return cuota > 0 ? { acuerdoId: a[1].trim(), cuota } : null;
+  }
+
+  /**
+   * Actualiza la cuota N de un acuerdo según el estado de su pago:
+   *   - 'en_revision': el propietario reportó el pago (pendiente en Pagos).
+   *   - 'pagado': pago confirmado. Recalcula el saldo y liquida el acuerdo si
+   *     era la última cuota.
+   *   - 'pendiente': pago rechazado, la cuota vuelve a estar por pagar.
+   */
+  async aplicarPagoACuota(
+    acuerdoId: string,
+    n: number,
+    estado: 'en_revision' | 'pagado' | 'pendiente' | 'parcial',
+    pagoId: string,
+    fecha: string,
+    abonado = 0,
+  ): Promise<string> {
+    const aRef = this.firebase.db().ref(`mirror/acuerdos/${this.safeKey(acuerdoId)}`);
+    const snap = await aRef.get();
+    if (!snap.exists()) return ` (No se encontró el acuerdo ${acuerdoId}.)`;
+    const acuerdo = snap.val() || {};
+    const cuotas: any[] = Array.isArray(acuerdo.cuotas) ? acuerdo.cuotas.map((c: any) => ({ ...c })) : [];
+    let idx = cuotas.findIndex((c) => Number(c?.n) === n);
+    if (idx < 0 && n - 1 < cuotas.length) idx = n - 1;
+    if (idx < 0) return ` (El acuerdo no tiene la cuota ${n}.)`;
+    const c = cuotas[idx];
+    // Un rechazo no deshace una cuota ya pagada con OTRO pago.
+    if (estado === 'pendiente' && c.estado === 'pagado' && c.pagoId && c.pagoId !== pagoId) return '';
+    if (estado === 'pagado') cuotas[idx] = { ...c, estado: 'pagado', pagoId, fechaPago: fecha };
+    else if (estado === 'en_revision') cuotas[idx] = { ...c, estado: 'en_revision', pagoId, fechaPago: null };
+    else if (estado === 'parcial') cuotas[idx] = { ...c, estado: 'parcial', pagoId, fechaPago: null, abonado };
+    else cuotas[idx] = { ...c, estado: 'pendiente', pagoId: null, fechaPago: null, abonado: 0 };
+    if (estado === 'pagado' || estado === 'pendiente') delete cuotas[idx].abonado;
+    // Saldo: lo que falta de cada cuota no pagada (descontando lo abonado en parciales).
+    const saldoPendiente = cuotas
+      .filter((q) => q.estado !== 'pagado')
+      .reduce((t, q) => t + Math.max(0, (Number(q.monto) || 0) - (q.estado === 'parcial' ? Number(q.abonado) || 0 : 0)), 0);
+    const liquidado = cuotas.length > 0 && cuotas.every((q) => q.estado === 'pagado');
+    const patch: Record<string, any> = { cuotas, saldoPendiente, _fbWrite: true };
+    if (liquidado) patch.estado = 'liquidado';
+    else if (acuerdo.estado === 'liquidado') patch.estado = 'activo';
+    await aRef.update(patch);
+    if (estado === 'pagado') return liquidado ? ` Cuota ${n} pagada: acuerdo liquidado.` : ` Cuota ${n} del acuerdo pagada.`;
+    if (estado === 'pendiente') return ` Cuota ${n} del acuerdo vuelve a pendiente.`;
+    if (estado === 'parcial') return ` Cuota ${n}: pago parcial.`;
+    return '';
+  }
+
+  // ==================== Acuerdos: cobertura de meses ====================
+  //
+  // Un acuerdo puede incluir meses adeudados (mesesCubiertos). Al acogerse el
+  // propietario, esos meses quedan "al día": se crea por cada uno un pago
+  // Confirmado de $0 con concepto "Administración <Mes> <Año>" (el estado de
+  // cada mes se calcula así en toda la app). El dinero real entra con el abono
+  // y las cuotas del acuerdo, así que las finanzas no se cuentan dos veces.
+
+  /** Normaliza mesesCubiertos [{ mes, anio, monto }] ordenados del más antiguo. */
+  private mesesDelAcuerdo(acuerdo: any): Array<{ mes: string; anio: number; monto: number; idx: number }> {
+    const lista: any[] = Array.isArray(acuerdo?.mesesCubiertos) ? acuerdo.mesesCubiertos : [];
+    return lista
+      .map((m) => {
+        const mi = this.mesIndex(m?.mes);
+        const anio = Number(m?.anio);
+        return mi < 0 || !anio ? null : { mes: PaymentsService.MESES_ES[mi], anio, monto: Number(m?.monto) || 0, idx: this.idxDe(anio, mi) };
+      })
+      .filter((m): m is { mes: string; anio: number; monto: number; idx: number } => !!m)
+      .sort((a, b) => a.idx - b.idx);
+  }
+
+  /** Deja "al día" los meses del acuerdo (idempotente: no duplica ni pisa pagos). */
+  async cubrirMesesAcuerdo(acuerdoId: string): Promise<{ meses: string[]; ids: string[] }> {
+    const db = this.firebase.db();
+    const aRef = db.ref(`mirror/acuerdos/${this.safeKey(acuerdoId)}`);
+    const snap = await aRef.get();
+    if (!snap.exists()) return { meses: [], ids: [] };
+    const acuerdo = snap.val() || {};
+    const usuario = String(acuerdo.usuario || '');
+    const meses = this.mesesDelAcuerdo(acuerdo);
+    if (!usuario || !meses.length) return { meses: [], ids: [] };
+    const ya: string[] = Array.isArray(acuerdo.coberturaPagoIds) ? acuerdo.coberturaPagoIds : [];
+    const cob = await this.coberturaDe(usuario);
+    const hoy = new Date().toISOString().split('T')[0];
+    const updates: Record<string, any> = {};
+    const ids: string[] = [];
+    const cubiertos: string[] = [];
+    for (const m of meses) {
+      cubiertos.push(`${m.mes} ${m.anio}`);
+      if (cob.get(m.idx) === 'pagado') continue; // ya pagado (o cubierto antes)
+      const id = Date.now().toString() + Math.random().toString().slice(2, 7);
+      updates[`mirror/pagos/${this.safeKey(id)}`] = {
+        id,
+        usuario,
+        usuarioId: usuario,
+        concepto: `Administración ${m.mes} ${m.anio}`,
+        valor: '0',
+        fecha: hoy,
+        estado: 'Confirmado',
+        referencia: `Cubierto por acuerdo de pago | ACUERDO:${acuerdoId} | CUBIERTO`,
+        conjunto: String(acuerdo.conjunto || ''),
+        conjuntoId: '',
+        tipoRecaudo: 'Administración',
+        cubiertoPorAcuerdo: acuerdoId,
+        createdAt: new Date().toISOString(),
+        _fbWrite: true,
+      };
+      ids.push(id);
+    }
+    updates[`mirror/acuerdos/${this.safeKey(acuerdoId)}/coberturaPagoIds`] = [...ya, ...ids];
+    updates[`mirror/acuerdos/${this.safeKey(acuerdoId)}/coberturaAplicada`] = true;
+    updates[`mirror/acuerdos/${this.safeKey(acuerdoId)}/_fbWrite`] = true;
+    await db.ref().update(updates);
+    return { meses: cubiertos, ids };
+  }
+
+  /**
+   * Quita la cobertura de meses de un acuerdo. Conserva los meses más antiguos
+   * que alcanza a cubrir `montoPagado` (lo que el propietario sí pagó); los
+   * demás vuelven a quedar en mora. Devuelve los meses que se revirtieron.
+   */
+  async revertirCoberturaAcuerdo(acuerdoId: string, montoPagado = 0): Promise<{ revertidos: string[]; conservados: string[] }> {
+    const db = this.firebase.db();
+    const aRef = db.ref(`mirror/acuerdos/${this.safeKey(acuerdoId)}`);
+    const snap = await aRef.get();
+    if (!snap.exists()) return { revertidos: [], conservados: [] };
+    const acuerdo = snap.val() || {};
+    const meses = this.mesesDelAcuerdo(acuerdo);
+    const ids: string[] = Array.isArray(acuerdo.coberturaPagoIds) ? acuerdo.coberturaPagoIds : [];
+    const pagos = await this.readCollection<Pago>('pagos');
+    const porId = new Map(pagos.map((p) => [String(p.id), p]));
+    // Meses que se conservan: los más antiguos cuyo valor acumulado cabe en lo pagado.
+    let disponible = Math.max(0, Number(montoPagado) || 0);
+    const conservar = new Set<string>();
+    for (const m of meses) {
+      const valor = m.monto || 0;
+      if (valor > 0 && disponible >= valor) {
+        disponible -= valor;
+        conservar.add(`${m.mes} ${m.anio}`.toLowerCase());
+      } else {
+        break;
+      }
+    }
+    const updates: Record<string, any> = {};
+    const quedan: string[] = [];
+    const revertidos: string[] = [];
+    const conservados: string[] = [];
+    for (const id of ids) {
+      const p = porId.get(String(id));
+      if (!p) continue;
+      const mes = String(p.concepto || '').replace(/^Administración\s+/i, '');
+      if (conservar.has(mes.toLowerCase())) {
+        quedan.push(id);
+        conservados.push(mes);
+      } else {
+        updates[`mirror/pagos/${this.safeKey(id)}`] = null;
+        revertidos.push(mes);
+      }
+    }
+    updates[`mirror/acuerdos/${this.safeKey(acuerdoId)}/coberturaPagoIds`] = quedan;
+    updates[`mirror/acuerdos/${this.safeKey(acuerdoId)}/coberturaAplicada`] = quedan.length > 0;
+    await db.ref().update(updates);
+    return { revertidos, conservados };
+  }
+
+  /** Lo que el propietario ya pagó de un acuerdo (abono aceptado + cuotas pagadas). */
+  private pagadoDelAcuerdo(acuerdo: any): number {
+    const abono = acuerdo?.abonoInicialEstado === 'aceptado' ? Number(acuerdo.abonoInicialMonto) || 0 : 0;
+    const cuotas: any[] = Array.isArray(acuerdo?.cuotas) ? acuerdo.cuotas : [];
+    return abono + cuotas.filter((c) => c?.estado === 'pagado').reduce((t, c) => t + (Number(c.monto) || 0), 0);
+  }
+
+  /**
+   * El propietario se acoge a un acuerdo: si hay abono crea su pago Pendiente
+   * (comprobante obligatorio), deja el acuerdo activo y cubre sus meses (CA 1).
+   */
+  async acogerseAcuerdo(input: { acuerdoId: string; usuario: string; comprobanteUrl?: string }): Promise<{
+    success: boolean; message?: string; pagoId?: string; mesesCubiertos?: string[];
+  }> {
+    const db = this.firebase.db();
+    const aRef = db.ref(`mirror/acuerdos/${this.safeKey(input.acuerdoId)}`);
+    const snap = await aRef.get();
+    if (!snap.exists()) return { success: false, message: 'El acuerdo no existe.' };
+    const acuerdo = snap.val() || {};
+    if (String(acuerdo.usuario || '').toLowerCase() !== String(input.usuario || '').toLowerCase()) {
+      return { success: false, message: 'Este acuerdo no es tuyo.' };
+    }
+    if (['incumplido', 'anulado', 'liquidado'].includes(String(acuerdo.estado))) {
+      return { success: false, message: 'Este acuerdo ya no está disponible.' };
+    }
+    if (['en_revision', 'aceptado'].includes(String(acuerdo.abonoInicialEstado))) {
+      return { success: false, message: 'Ya te acogiste a este acuerdo.' };
+    }
+    const abono = Number(acuerdo.abonoInicialMonto) || 0;
+    let pagoId: string | undefined;
+    if (abono > 0) {
+      if (!input.comprobanteUrl) return { success: false, message: 'Adjunta el comprobante del abono inicial.' };
+      const r = await this.createPayments({
+        usuario: acuerdo.usuario,
+        montoPerMonth: abono,
+        year: new Date().getFullYear(),
+        estado: 'Pendiente',
+        referencia: `IMG:${input.comprobanteUrl} | Abono inicial | ACUERDO:${input.acuerdoId}`,
+        conjunto: acuerdo.conjunto,
+        concepto: 'Abono inicial acuerdo de pago',
+        tipoRecaudo: 'Administración',
+      });
+      if (!r.success) return { success: false, message: r.message || 'No se pudo registrar el abono.' };
+      pagoId = r.ids[0];
+    }
+    await aRef.update({
+      estado: 'activo',
+      abonoInicialEstado: abono > 0 ? 'en_revision' : 'aceptado',
+      fechaAceptacion: new Date().toISOString(),
+      _fbWrite: true,
+    });
+    const cob = await this.cubrirMesesAcuerdo(input.acuerdoId);
+    return { success: true, pagoId, mesesCubiertos: cob.meses };
+  }
+
+  /**
+   * Finaliza un acuerdo por incumplimiento (CA 2): queda "incumplido", se pierde
+   * la condonación condicionada y los meses no cubiertos por lo pagado vuelven a mora.
+   */
+  async incumplirAcuerdo(input: { acuerdoId: string; motivo?: string; usuarioAdmin?: string }): Promise<{
+    success: boolean; message?: string; revertidos?: string[]; conservados?: string[];
+  }> {
+    const db = this.firebase.db();
+    const aRef = db.ref(`mirror/acuerdos/${this.safeKey(input.acuerdoId)}`);
+    const snap = await aRef.get();
+    if (!snap.exists()) return { success: false, message: 'El acuerdo no existe.' };
+    const acuerdo = snap.val() || {};
+    if (['incumplido', 'anulado', 'liquidado'].includes(String(acuerdo.estado))) {
+      return { success: false, message: 'El acuerdo ya está finalizado.' };
+    }
+    const rev = await this.revertirCoberturaAcuerdo(input.acuerdoId, this.pagadoDelAcuerdo(acuerdo));
+    await aRef.update({
+      estado: 'incumplido',
+      motivoIncumplimiento: String(input.motivo || '').slice(0, 300),
+      fechaIncumplimiento: new Date().toISOString(),
+      condonacionRevocada: !!acuerdo.condonacionMora && acuerdo.condonacionCondicionada !== false,
+      ultimoUsuario: String(input.usuarioAdmin || ''),
+      _fbWrite: true,
+    });
+    return { success: true, ...rev };
+  }
+
+  // ==================== Beneficios: meses cubiertos (CA 5) ====================
+
+  /**
+   * Al aprobar el pago de un beneficio "plan_meses", el monto se reparte en N
+   * pagos mensuales Confirmados desde el primer mes sin pagar (el siguiente al
+   * último pagado). El pago original pasa a ser el primero de esos meses.
+   */
+  async aplicarBeneficioMeses(pagoId: string, beneficio: any): Promise<string[]> {
+    const db = this.firebase.db();
+    const pRef = db.ref(`mirror/pagos/${this.safeKey(pagoId)}`);
+    const snap = await pRef.get();
+    if (!snap.exists()) return [];
+    const pago = snap.val() || {};
+    if (pago.beneficioAplicado) return Array.isArray(pago.mesesBeneficio) ? pago.mesesBeneficio : [];
+    const n = Math.max(1, Math.min(36, Math.floor(Number(beneficio?.mesesCubiertos) || 0)));
+    const usuario = String(pago.usuario || '');
+    const payable = await this.getPayableMonths(usuario);
+    const inicio = payable.primeroPagable ? this.idxDe(payable.primeroPagable.anio, this.mesIndex(payable.primeroPagable.mes)) : null;
+    const libres = payable.meses.filter((m) => inicio !== null && m.idx >= inicio && (m.estado === 'pendiente' || m.estado === 'disponible'));
+    // Si el rango del selector se queda corto, se continúa mes a mes.
+    const elegidos: Array<{ mes: string; anio: number }> = libres.slice(0, n).map((m) => ({ mes: m.mes, anio: m.anio }));
+    let sig = elegidos.length ? this.idxDe(elegidos[elegidos.length - 1].anio, this.mesIndex(elegidos[elegidos.length - 1].mes)) + 1 : (inicio ?? this.idxDe(new Date().getFullYear(), new Date().getMonth()));
+    while (elegidos.length < n) {
+      elegidos.push({ mes: PaymentsService.MESES_ES[sig % 12], anio: Math.floor(sig / 12) });
+      sig++;
+    }
+    const total = Number(String(pago.valor ?? 0).replace(/[^\d.]/g, '')) || 0;
+    const parte = Math.floor(total / n);
+    const updates: Record<string, any> = {};
+    const nombres = elegidos.map((m) => `${m.mes} ${m.anio}`);
+    elegidos.forEach((m, i) => {
+      const valor = i === n - 1 ? total - parte * (n - 1) : parte;
+      const concepto = `Administración ${m.mes} ${m.anio}`;
+      if (i === 0) {
+        updates[`mirror/pagos/${this.safeKey(pagoId)}/concepto`] = concepto;
+        updates[`mirror/pagos/${this.safeKey(pagoId)}/valor`] = String(valor);
+        updates[`mirror/pagos/${this.safeKey(pagoId)}/beneficioAplicado`] = true;
+        updates[`mirror/pagos/${this.safeKey(pagoId)}/mesesBeneficio`] = nombres;
+        updates[`mirror/pagos/${this.safeKey(pagoId)}/_fbWrite`] = true;
+      } else {
+        const id = `${pagoId}-b${i}`;
+        updates[`mirror/pagos/${this.safeKey(id)}`] = {
+          ...pago,
+          id,
+          concepto,
+          valor: String(valor),
+          estado: 'Confirmado',
+          beneficioAplicado: true,
+          beneficioDe: pagoId,
+          createdAt: new Date().toISOString(),
+          _fbWrite: true,
+        };
+      }
+    });
+    await db.ref().update(updates);
+    return nombres;
   }
 
   /** Actualiza un pago existente (merge de campos) en mirror/pagos. */
@@ -1388,6 +1739,150 @@ export class PaymentsService {
     return { success: true };
   }
 
+  // ==================== Rechazos, pagos parciales y alertas ====================
+
+  /** Propietarios con comprobantes rechazados por falsos: usuario -> cantidad. */
+  private async alertasComprobantes(): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    try {
+      const snap = await this.firebase.db().ref('mirror/alertas_pagos').get();
+      for (const a of Object.values<any>(snap.exists() ? snap.val() || {} : {})) {
+        if (a?.usuario) out.set(String(a.usuario).toLowerCase(), Number(a.rechazosFalsos) || 0);
+      }
+    } catch {
+      /* sin alertas */
+    }
+    return out;
+  }
+
+  /** Suma un comprobante falso/alterado al historial del propietario. */
+  private async registrarComprobanteFalso(pago: any, pagoId: string): Promise<number> {
+    const usuario = String(pago?.usuario || '');
+    if (!usuario) return 0;
+    const ref = this.firebase.db().ref(`mirror/alertas_pagos/${this.safeKey(usuario.toLowerCase())}`);
+    const snap = await ref.get();
+    const prev = snap.exists() ? snap.val() || {} : {};
+    const n = (Number(prev.rechazosFalsos) || 0) + 1;
+    const pagos: string[] = Array.isArray(prev.pagos) ? prev.pagos : [];
+    await ref.update({
+      usuario,
+      conjunto: String(pago?.conjunto || prev.conjunto || ''),
+      rechazosFalsos: n,
+      ultimo: new Date().toISOString(),
+      pagos: [...pagos, pagoId].slice(-20),
+      _fbWrite: true,
+    });
+    return n;
+  }
+
+  /**
+   * Monto que se esperaba recibir con un pago: la cuota del acuerdo, el abono,
+   * el monto del beneficio o, en una mensualidad, lo que declaró el propietario.
+   */
+  private async montoEsperadoDe(pago: any, referencia: string, sugerido?: number): Promise<number> {
+    if (Number(pago?.montoEsperado) > 0) return Number(pago.montoEsperado);
+    const db = this.firebase.db();
+    const cuota = this.vinculoCuota(referencia);
+    try {
+      if (cuota) {
+        const a = (await db.ref(`mirror/acuerdos/${this.safeKey(cuota.acuerdoId)}`).get()).val() || {};
+        const c = (Array.isArray(a.cuotas) ? a.cuotas : []).find((q: any) => Number(q?.n) === cuota.cuota);
+        if (c) return Number(c.monto) || 0;
+      }
+      const ac = referencia.match(/ACUERDO:\s*([^\s|]+)/);
+      if (ac && !cuota) {
+        const a = (await db.ref(`mirror/acuerdos/${this.safeKey(ac[1].trim())}`).get()).val() || {};
+        if (Number(a.abonoInicialMonto) > 0) return Number(a.abonoInicialMonto);
+      }
+      const bn = referencia.match(/BENEFICIO:\s*([^\s|]+)/);
+      if (bn) {
+        const b = (await db.ref(`mirror/beneficios/${this.safeKey(bn[1].trim())}`).get()).val() || {};
+        if (b.tipo === 'plan_meses' && Number(b.montoPago) > 0) return Number(b.montoPago);
+      }
+    } catch {
+      /* sin vínculo legible: se usa el monto declarado */
+    }
+    if (Number(sugerido) > 0) return Number(sugerido);
+    return Number(String(pago?.valor ?? 0).replace(/[^\d.]/g, '')) || 0;
+  }
+
+  /**
+   * El propietario pagó menos de lo esperado: el pago queda "Parcial" con lo
+   * recibido y lo que falta. No se aplica nada (mes, cuota, beneficio) hasta
+   * completarlo; el dinero recibido sí cuenta en caja.
+   */
+  private async marcarParcial(id: string, pago: any, referencia: string, recibido: number, esperado: number) {
+    const db = this.firebase.db();
+    const faltante = Math.max(0, Math.round((esperado - recibido) * 100) / 100);
+    await db.ref(`mirror/pagos/${this.safeKey(id)}`).update({
+      estado: 'Parcial',
+      valor: String(recibido),
+      montoEsperado: esperado,
+      faltante,
+      fechaRevision: new Date().toISOString(),
+      _fbWrite: true,
+    });
+    const cuota = this.vinculoCuota(referencia);
+    if (cuota) {
+      await this.aplicarPagoACuota(cuota.acuerdoId, cuota.cuota, 'parcial', id, String(pago.fecha || ''), recibido).catch(() => '');
+    } else {
+      const ac = referencia.match(/ACUERDO:\s*([^\s|]+)/);
+      if (ac) await db.ref(`mirror/acuerdos/${this.safeKey(ac[1].trim())}`).update({ abonoInicialEstado: 'parcial', _fbWrite: true }).catch(() => undefined);
+    }
+    const bn = referencia.match(/BENEFICIO:\s*([^\s|]+)/);
+    if (bn) {
+      const bRef = db.ref(`mirror/beneficios/${this.safeKey(bn[1].trim())}`);
+      const b = (await bRef.get()).val() || {};
+      const sol: any[] = Array.isArray(b.solicitudes) ? b.solicitudes : [];
+      await bRef.update({ solicitudes: sol.map((x) => (String(x?.pagoId) === String(id) ? { ...x, estado: 'parcial', faltante } : x)), _fbWrite: true }).catch(() => undefined);
+    }
+    return faltante;
+  }
+
+  /**
+   * Revisión del COMPLEMENTO de un pago parcial (lo que faltaba). Al aprobarlo
+   * se suma al pago original; si ya completa el monto, el original queda
+   * Confirmado y se aplica normalmente (mes, cuota o beneficio).
+   */
+  private async revisarComplemento(input: any, comp: any, origId: string): Promise<{ success: boolean; message?: string; reservaMsg?: string; parcial?: boolean; faltante?: number }> {
+    const db = this.firebase.db();
+    const oRef = db.ref(`mirror/pagos/${this.safeKey(origId)}`);
+    const oSnap = await oRef.get();
+    if (!oSnap.exists()) return { success: false, message: 'No se encontró el pago original de este complemento.' };
+    const orig = oSnap.val() || {};
+    const cRef = db.ref(`mirror/pagos/${this.safeKey(input.id)}`);
+    if (input.estado === 'Rechazado') {
+      await cRef.update({
+        estado: 'Rechazado',
+        motivoRechazo: String(input.motivo || '').slice(0, 300),
+        tipoRechazo: String(input.tipoRechazo || ''),
+        fechaRevision: new Date().toISOString(),
+        _fbWrite: true,
+      });
+      if (input.tipoRechazo === 'falso') await this.registrarComprobanteFalso(comp, input.id);
+      return { success: true, reservaMsg: ' Complemento rechazado; el pago sigue parcial.' };
+    }
+    const recibido = Number(String(input.valor ?? comp.valor ?? 0).replace(/[^\d.]/g, '')) || 0;
+    const total = (Number(String(orig.valor ?? 0).replace(/[^\d.]/g, '')) || 0) + recibido;
+    const esperado = Number(orig.montoEsperado) || total;
+    const complementos: any[] = Array.isArray(orig.complementos) ? orig.complementos : [];
+    // El complemento se integra al original (un solo registro del dinero).
+    await db.ref().update({
+      [`mirror/pagos/${this.safeKey(origId)}/valor`]: String(total),
+      [`mirror/pagos/${this.safeKey(origId)}/complementos`]: [...complementos, { id: input.id, valor: recibido, referencia: String(comp.referencia || ''), fecha: String(comp.fecha || '') }],
+      [`mirror/pagos/${this.safeKey(origId)}/_fbWrite`]: true,
+      [`mirror/pagos/${this.safeKey(input.id)}`]: null,
+    });
+    const refOrig = String(orig.referencia || '');
+    if (total + 0.5 >= esperado) {
+      await oRef.update({ faltante: 0, _fbWrite: true });
+      const r = await this.reviewPayment({ id: origId, estado: 'Confirmado', valor: total, completo: true });
+      return { ...r, reservaMsg: ` Pago completado.${r.reservaMsg || ''}` };
+    }
+    const faltante = await this.marcarParcial(origId, orig, refOrig, total, esperado);
+    return { success: true, parcial: true, faltante, reservaMsg: ` Sigue parcial: faltan ${faltante}.` };
+  }
+
   /**
    * Aprueba/rechaza un pago. Actualiza su estado y, si su referencia contiene
    * "RESERVA:<id>", pone la reserva vinculada en Activa (Confirmado) o Cancelada
@@ -1398,15 +1893,44 @@ export class PaymentsService {
     estado: 'Confirmado' | 'Rechazado';
     valor?: string | number;
     referencia?: string;
-  }): Promise<{ success: boolean; message?: string; reservaMsg?: string }> {
+    /** Rechazo: motivo y tipo ('falso' | 'no_llego' | 'monto' | 'otro'). */
+    motivo?: string;
+    tipoRechazo?: string;
+    /** Confirmación: monto esperado (si el cliente lo sabe) y "aceptar como completo". */
+    montoEsperado?: number;
+    completo?: boolean;
+  }): Promise<{ success: boolean; message?: string; reservaMsg?: string; parcial?: boolean; faltante?: number; alertaComprobantes?: number }> {
     const db = this.firebase.db();
     const ref = db.ref(`mirror/pagos/${this.safeKey(input.id)}`);
     const snap = await ref.get();
     if (!snap.exists()) return { success: false, message: 'El pago no existe.' };
     const pago = snap.val();
 
-    const patch: Record<string, any> = { estado: input.estado, _fbWrite: true };
+    const refPago = String(input.referencia ?? pago.referencia ?? '');
+    // Complemento de un pago parcial: se suma al pago original.
+    const comp = refPago.match(/COMPLEMENTO:\s*([^\s|]+)/);
+    if (comp) return this.revisarComplemento(input, pago, comp[1].trim());
+
+    // Pagó menos de lo esperado: queda Parcial (salvo que el admin lo acepte como completo).
+    if (input.estado === 'Confirmado' && !input.completo) {
+      const recibido = Number(String(input.valor ?? pago.valor ?? 0).replace(/[^\d.]/g, '')) || 0;
+      const esperado = await this.montoEsperadoDe(pago, refPago, Number(input.montoEsperado) || undefined);
+      if (esperado > 0 && recibido + 0.5 < esperado) {
+        const faltante = await this.marcarParcial(input.id, pago, refPago, recibido, esperado);
+        return { success: true, parcial: true, faltante, reservaMsg: ` Pago parcial: faltan ${faltante}.` };
+      }
+    }
+
+    const patch: Record<string, any> = { estado: input.estado, fechaRevision: new Date().toISOString(), _fbWrite: true };
     if (input.valor !== undefined) patch.valor = String(input.valor);
+    let alertaComprobantes: number | undefined;
+    if (input.estado === 'Rechazado') {
+      patch.motivoRechazo = String(input.motivo || '').slice(0, 300);
+      patch.tipoRechazo = String(input.tipoRechazo || '');
+      if (input.tipoRechazo === 'falso') alertaComprobantes = await this.registrarComprobanteFalso(pago, input.id);
+    } else {
+      patch.faltante = 0;
+    }
     await ref.update(patch);
 
     // Vínculo con reserva.
@@ -1431,7 +1955,21 @@ export class PaymentsService {
 
     // Vínculo con acuerdo de pago: ACUERDO:<id> en la referencia.
     const matchAcuerdo = referencia.match(/ACUERDO:\s*([^\s|]+)/);
-    if (matchAcuerdo) {
+    const vinculoCuota = this.vinculoCuota(referencia);
+    if (vinculoCuota) {
+      // Pago de una cuota: marca la cuota (no toca el abono inicial).
+      try {
+        reservaMsg += await this.aplicarPagoACuota(
+          vinculoCuota.acuerdoId,
+          vinculoCuota.cuota,
+          input.estado === 'Confirmado' ? 'pagado' : 'pendiente',
+          input.id,
+          String(pago.fecha || new Date().toISOString().split('T')[0]),
+        );
+      } catch {
+        reservaMsg += ' (Error actualizando la cuota del acuerdo.)';
+      }
+    } else if (matchAcuerdo) {
       const acuerdoId = matchAcuerdo[1].trim();
       try {
         const aRef = db.ref(`mirror/acuerdos/${this.safeKey(acuerdoId)}`);
@@ -1439,10 +1977,14 @@ export class PaymentsService {
         if (aSnap.exists()) {
           if (input.estado === 'Confirmado') {
             await aRef.update({ abonoInicialEstado: 'aceptado', estado: 'activo', _fbWrite: true });
+            // Acuerdos anteriores a la cobertura: se aplica ahora (idempotente).
+            await this.cubrirMesesAcuerdo(acuerdoId).catch(() => undefined);
             reservaMsg += ' Acuerdo activado.';
           } else {
             await aRef.update({ abonoInicialEstado: 'pendiente', _fbWrite: true });
-            reservaMsg += ' Acuerdo pendiente (abono rechazado).';
+            // Sin abono no hay acuerdo: los meses cubiertos vuelven a su estado real.
+            const rev = await this.revertirCoberturaAcuerdo(acuerdoId, 0).catch(() => null);
+            reservaMsg += ' Acuerdo pendiente (abono rechazado).' + (rev?.revertidos?.length ? ` ${rev.revertidos.length} mes(es) vuelven a mora.` : '');
           }
         }
       } catch {
@@ -1462,12 +2004,26 @@ export class PaymentsService {
           const usuario = String(pago.usuario ?? '');
           const solicitantes: string[] = Array.isArray(beneficio.solicitantes) ? beneficio.solicitantes : [];
           const aprobados: string[] = Array.isArray(beneficio.aprobados) ? beneficio.aprobados : [];
-          if (input.estado === 'Confirmado' && !aprobados.includes(usuario)) {
-            await bRef.update({ aprobados: [...aprobados, usuario], _fbWrite: true });
-            reservaMsg += ' Adhesión al beneficio aprobada.';
+          const solicitudes: any[] = Array.isArray(beneficio.solicitudes) ? beneficio.solicitudes : [];
+          const marcar = (estado: string, extra: Record<string, any> = {}) =>
+            solicitudes.map((s) => (String(s?.pagoId) === String(input.id) ? { ...s, estado, ...extra } : s));
+          if (input.estado === 'Confirmado') {
+            let meses: string[] = [];
+            if (beneficio.tipo === 'plan_meses' && Number(beneficio.mesesCubiertos) > 0) {
+              meses = await this.aplicarBeneficioMeses(input.id, beneficio);
+            }
+            await bRef.update({
+              aprobados: aprobados.includes(usuario) ? aprobados : [...aprobados, usuario],
+              solicitudes: marcar('aprobada', { meses, fechaAprobacion: new Date().toISOString() }),
+              _fbWrite: true,
+            });
+            reservaMsg += meses.length
+              ? ` Beneficio aprobado: quedan pagados ${meses[0]}${meses.length > 1 ? ` a ${meses[meses.length - 1]}` : ''}.`
+              : ' Adhesión al beneficio aprobada.';
           } else if (input.estado === 'Rechazado') {
             await bRef.update({
               solicitantes: solicitantes.filter((u) => u !== usuario),
+              solicitudes: marcar('rechazada'),
               _fbWrite: true,
             });
             reservaMsg += ' Solicitud de beneficio rechazada.';
@@ -1478,7 +2034,7 @@ export class PaymentsService {
       }
     }
 
-    return { success: true, reservaMsg };
+    return { success: true, reservaMsg, alertaComprobantes };
   }
 
   // ==================== OCR / Mercado Pago (claves en el backend) ====================
