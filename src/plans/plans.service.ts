@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
+import { RANGOS_DEFAULT, normRangos, normUnidades, precioPara, validarRangos } from './pricing';
 
 /**
  * Planes SaaS de goPase y su catálogo de módulos habilitados. Cada conjunto
@@ -13,7 +14,14 @@ import { FirebaseService } from '../firebase/firebase.service';
  * Campos de un plan:
  *   id, nombre, descripcion, precioMensual (COP), moneda,
  *   descuentoAnual (0..1), modulos (string[] rutas /app/*),
- *   esBase (bool), esEspecial (bool), baseId (plan del que se clonó)
+ *   esBase (bool), esEspecial (bool), baseId (plan del que se clonó),
+ *   rangos ([{ hasta, precioMensual }], solo planes base): precio según el
+ *   número de unidades del conjunto (ver ./pricing). En los planes base,
+ *   precioMensual es solo el precio de referencia (rango 51–150 unidades).
+ *
+ * Cuando se consulta con un conjunto (catálogo del conjunto o su plan), cada
+ * plan sale con el precio YA calculado para ese conjunto en precioMensual, más
+ * precioReferencia, aLaMedida, rango y unidades.
  */
 const MIRROR_PLANES = 'mirror/planes';
 const MIRROR_CONJUNTOS = 'mirror/conjuntos';
@@ -58,6 +66,7 @@ const PLANES_BASE = [
     moneda: 'COP',
     descuentoAnual: 0.1,
     modulos: MODULOS_BASICO,
+    rangos: RANGOS_DEFAULT.basico,
     esBase: true,
     esEspecial: false,
     baseId: '',
@@ -71,6 +80,7 @@ const PLANES_BASE = [
     moneda: 'COP',
     descuentoAnual: 0.1,
     modulos: MODULOS_MEDIO,
+    rangos: RANGOS_DEFAULT.medio,
     esBase: true,
     esEspecial: false,
     baseId: '',
@@ -84,6 +94,7 @@ const PLANES_BASE = [
     moneda: 'COP',
     descuentoAnual: 0.1,
     modulos: MODULOS_PREMIUM,
+    rangos: RANGOS_DEFAULT.premium,
     esBase: true,
     esEspecial: false,
     baseId: '',
@@ -114,6 +125,8 @@ export class PlansService {
       moneda: String(dto.moneda ?? 'COP'),
       descuentoAnual: Number(dto.descuentoAnual) >= 0 ? Number(dto.descuentoAnual) : 0.1,
       modulos: this.normList(dto.modulos),
+      // Precio por número de unidades (solo planes base; los especiales tienen precio fijo).
+      rangos: dto.esEspecial === true ? [] : normRangos(dto.rangos),
       esBase: dto.esBase === true,
       esEspecial: dto.esEspecial === true,
       baseId: String(dto.baseId ?? ''),
@@ -131,9 +144,27 @@ export class PlansService {
       precioMensual: Number(rest.precioMensual) || 0,
       descuentoAnual: Number(rest.descuentoAnual) || 0,
       modulos: this.normList(rest.modulos),
+      rangos: rest.esEspecial === true ? [] : normRangos(rest.rangos),
       esBase: rest.esBase === true,
       esEspecial: rest.esEspecial === true,
       conjunto: String(rest.conjunto ?? ''),
+    };
+  }
+
+  /**
+   * Devuelve el plan con el precio calculado para un conjunto de `unidades`:
+   * precioMensual pasa a ser lo que paga ESE conjunto (0 si es a la medida) y
+   * se conserva el original en precioReferencia.
+   */
+  private conPrecio(plan: any, unidades: number): any {
+    const calc = precioPara(plan, unidades);
+    return {
+      ...plan,
+      precioReferencia: Number(plan.precioMensual) || 0,
+      precioMensual: calc.precioMensual,
+      aLaMedida: calc.aLaMedida,
+      rango: calc.rango,
+      unidades,
     };
   }
 
@@ -149,6 +180,14 @@ export class PlansService {
           await ref.child(key).set(this.buildRecord(base));
         } catch (e: any) {
           this.logger.warn(`[plans] no se pudo sembrar '${base.id}': ${e?.message}`);
+        }
+      } else if (normRangos(existentes[key].rangos).length === 0) {
+        // Plan base creado antes de los precios por unidades: se le agrega la
+        // tabla por defecto sin tocar el resto de sus datos.
+        try {
+          await ref.child(key).update({ rangos: base.rangos, _fbWrite: true });
+        } catch (e: any) {
+          this.logger.warn(`[plans] no se pudieron agregar rangos a '${base.id}': ${e?.message}`);
         }
       }
     }
@@ -170,11 +209,84 @@ export class PlansService {
     if (target) {
       all = all.filter((p) => p.esBase === true || norm(p.conjunto) === target);
     }
-    return all.map((p) => this.strip(p)).sort((a, b) => {
+    let planes = all.map((p) => this.strip(p));
+    if (target) {
+      // Catálogo de un conjunto: cada plan con el precio para su tamaño.
+      const unidades = await this.unidadesDe(String(conjunto));
+      planes = planes.map((p) => this.conPrecio(p, unidades));
+    }
+    const orden = (p: any) => Number(p.precioReferencia ?? p.precioMensual) || 0;
+    return planes.sort((a, b) => {
       // Base primero (por precio), luego los especiales.
       if (a.esBase !== b.esBase) return a.esBase ? -1 : 1;
-      return (a.precioMensual || 0) - (b.precioMensual || 0);
+      return orden(a) - orden(b);
     });
+  }
+
+  /**
+   * Catálogo PÚBLICO para la landing (sin sesión): solo planes base, con su
+   * tabla de precios por unidades. No incluye especiales ni datos de conjuntos.
+   */
+  async catalogoPublico(): Promise<any[]> {
+    if (!this.firebase.isEnabled()) throw new Error('Servicio no disponible.');
+    await this.ensureBase();
+    const snap = await this.firebase.db().ref(MIRROR_PLANES).get();
+    const all = snap.exists() ? (Object.values(snap.val() || {}) as any[]) : [];
+    return all
+      .map((p) => this.strip(p))
+      .filter((p) => p.esBase === true)
+      .sort((a, b) => (a.precioMensual || 0) - (b.precioMensual || 0))
+      .map((p) => ({
+        id: p.id,
+        nombre: p.nombre,
+        descripcion: p.descripcion,
+        precioMensual: p.precioMensual,
+        moneda: p.moneda,
+        descuentoAnual: p.descuentoAnual,
+        rangos: p.rangos,
+        modulos: p.modulos,
+      }));
+  }
+
+  /** Unidades registradas del conjunto (0 si no tiene o no existe). */
+  async unidadesDe(conjunto: string): Promise<number> {
+    if (!String(conjunto ?? '').trim()) return 0;
+    const found = await this.findConjunto(conjunto);
+    return normUnidades(found?.value?.unidades);
+  }
+
+  /**
+   * Precio que debe pagar un conjunto por un plan (lo usa el cobro con ePayco).
+   * Solo acepta planes base o especiales del mismo conjunto.
+   */
+  async precioDeConjunto(conjunto: string, planId: string): Promise<{
+    plan: any | null;
+    precioMensual: number;
+    aLaMedida: boolean;
+  }> {
+    const planes = await this.list(conjunto);
+    const plan = planes.find((p: any) => p.id === planId) || null;
+    return {
+      plan,
+      precioMensual: plan ? Number(plan.precioMensual) || 0 : 0,
+      aLaMedida: plan?.aLaMedida === true,
+    };
+  }
+
+  /** Guarda el número de unidades de un conjunto (superAdmin). */
+  async setUnidades(conjunto: string, unidadesRaw: unknown): Promise<{ success: boolean; message?: string; unidades?: number }> {
+    if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
+    const unidades = normUnidades(unidadesRaw);
+    if (!unidades) return { success: false, message: 'El número de unidades debe ser un entero entre 1 y 10.000.' };
+    const found = await this.findConjunto(conjunto);
+    if (!found) return { success: false, message: 'El conjunto no existe.' };
+    try {
+      await this.firebase.db().ref(`${MIRROR_CONJUNTOS}/${found.key}`).update({ unidades, _fbWrite: true });
+      return { success: true, unidades, message: 'Unidades actualizadas.' };
+    } catch (err: any) {
+      this.logger.error(`[plans] setUnidades ${conjunto} falló: ${err?.message}`);
+      return { success: false, message: err?.message || 'No se pudieron guardar las unidades.' };
+    }
   }
 
   /** Crea un plan ESPECIAL a partir de un plan base (clona módulos + precio custom). */
@@ -219,7 +331,10 @@ export class PlansService {
     return snap.exists() ? this.strip(snap.val()) : null;
   }
 
-  /** Edita un plan. Los planes base no permiten cambiar sus módulos (solo precio/descr.). */
+  /**
+   * Edita un plan. Los planes base no permiten cambiar sus módulos (solo
+   * precio, descripción y su tabla de precios por unidades).
+   */
   async update(id: string, dto: any): Promise<{ success: boolean; message?: string }> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
     const key = this.safeKey(id);
@@ -227,8 +342,16 @@ export class PlansService {
     const snap = await ref.get();
     if (!snap.exists()) return { success: false, message: 'El plan no existe.' };
     const prev = snap.val() || {};
+    if (dto.rangos !== undefined) {
+      if (prev.esEspecial === true) {
+        return { success: false, message: 'Los planes especiales tienen precio fijo; no usan rangos.' };
+      }
+      const err = validarRangos(dto.rangos);
+      if (err) return { success: false, message: err };
+    }
     try {
       const patch: Record<string, any> = { _fbWrite: true };
+      if (dto.rangos !== undefined) patch.rangos = normRangos(dto.rangos);
       if (dto.nombre !== undefined) patch.nombre = String(dto.nombre);
       if (dto.descripcion !== undefined) patch.descripcion = String(dto.descripcion);
       if (dto.precioMensual !== undefined) patch.precioMensual = Number(dto.precioMensual) || 0;
@@ -313,9 +436,9 @@ export class PlansService {
     await this.ensureBase();
     const basico = (await this.getById('basico')) || this.strip(this.buildRecord(PLANES_BASE[0]));
     const found = await this.findConjunto(conjunto);
+    const unidades = normUnidades(found?.value?.unidades);
     const planId = found?.value?.planId ? String(found.value.planId) : '';
-    if (!planId) return basico;
-    const plan = await this.getById(planId);
-    return plan || basico;
+    const plan = (planId && (await this.getById(planId))) || basico;
+    return this.conPrecio(plan, unidades);
   }
 }

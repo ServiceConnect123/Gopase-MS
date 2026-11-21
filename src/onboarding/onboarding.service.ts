@@ -4,6 +4,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { FirebaseService } from '../firebase/firebase.service';
 import { UsersService } from '../users/users.service';
 import { PlansService } from '../plans/plans.service';
+import { UNIDADES_MAX, normUnidades, precioPara } from '../plans/pricing';
 import { recoverPassword } from '../auth/password.util';
 import { ActivityLogger } from '../activity-audit/core/activity-logger';
 import { ACTIVITY_LOGGER } from '../activity-audit/integrations/nest/activity-audit.tokens';
@@ -28,7 +29,8 @@ import { ACTIVITY_LOGGER } from '../activity-audit/integrations/nest/activity-au
  *
  * Datos en mirror/conjuntos/{id}:
  *   estado, trial, trialInicio, trialHasta, pagadoHasta, bloqueado, planId,
- *   ciclo, creadoEn, origen, _secrets/onboardingTokenHash (sha-256 del token).
+ *   ciclo, unidades (apartamentos/casas: define el precio del plan), creadoEn,
+ *   origen, _secrets/onboardingTokenHash (sha-256 del token).
  */
 
 export type Ciclo = 'mensual' | 'anual';
@@ -37,6 +39,8 @@ export interface RegisterInput {
   nombreConjunto?: string;
   ciudad?: string;
   tipo?: string;
+  /** Número de unidades (apartamentos o casas) del conjunto. Define el precio del plan. */
+  unidades?: number | string;
   nombreAdmin?: string;
   email?: string;
   telefono?: string;
@@ -226,6 +230,7 @@ export class OnboardingService {
     conjuntoId?: string;
     usuario?: string;
     registroToken?: string;
+    unidades?: number;
     trial?: { diasMensual: number; diasAnual: number; hasta: string };
   }> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
@@ -244,8 +249,15 @@ export class OnboardingService {
     const ciudad = this.clean(input?.ciudad, 150);
     const mensaje = this.clean(input?.mensaje, 500);
     const tipo = TIPOS.includes(String(input?.tipo)) ? String(input?.tipo) : 'Campestre';
+    const unidades = normUnidades(input?.unidades);
 
     if (nombreConjunto.length < 3) return { success: false, message: 'Escribe el nombre del conjunto (mínimo 3 letras).' };
+    if (!unidades) {
+      return {
+        success: false,
+        message: `Escribe cuántas unidades (apartamentos o casas) tiene el conjunto, entre 1 y ${UNIDADES_MAX.toLocaleString('es-CO')}.`,
+      };
+    }
     if (nombreAdmin.length < 3) return { success: false, message: 'Escribe el nombre completo del administrador.' };
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return { success: false, message: 'El correo electrónico no es válido.' };
     if (telefono.length < 7 || telefono.length > 15) {
@@ -289,6 +301,7 @@ export class OnboardingService {
       nombre: nombreConjunto,
       direccion: ciudad,
       tipo,
+      unidades,
       descripcion: `Conjunto ${tipo}${mensaje ? ' - ' + mensaje : ''}`,
       cuotaMonto: '',
       moneda: 'COP',
@@ -348,7 +361,7 @@ export class OnboardingService {
       vista: 'Registró conjunto',
       usuario,
       conjunto: nombreConjunto,
-      detalle: { accion: 'Creó', recurso: 'Conjunto', origen: 'autoregistro', conjuntoId, tipo },
+      detalle: { accion: 'Creó', recurso: 'Conjunto', origen: 'autoregistro', conjuntoId, tipo, unidades },
     });
 
     return {
@@ -356,6 +369,7 @@ export class OnboardingService {
       conjuntoId,
       usuario,
       registroToken: token,
+      unidades,
       trial: { diasMensual: this.trialMensual, diasAnual: this.trialAnual, hasta },
     };
   }
@@ -367,6 +381,10 @@ export class OnboardingService {
     message?: string;
     plan?: { id: string; nombre: string };
     ciclo?: Ciclo;
+    /** Precio mensual que le corresponde al conjunto (0 si es a la medida). */
+    precioMensual?: number;
+    /** true si el conjunto supera el último rango: el superAdmin le define el precio. */
+    aLaMedida?: boolean;
     trialHasta?: string;
     diasPrueba?: number;
     diasRestantes?: number;
@@ -424,11 +442,17 @@ export class OnboardingService {
       detalle: { accion: 'Editó', recurso: 'Conjunto', planId: plan.id, ciclo, trialHasta: hasta },
     });
 
+    // Conjuntos más grandes que el último rango: pueden empezar la prueba, pero
+    // el precio lo define el superAdmin con un plan especial.
+    const precio = precioPara(plan, v.unidades);
+
     return {
       success: true,
       message: vencida ? 'Tu periodo de prueba ya terminó. Ingresa y realiza tu pago desde Facturación.' : undefined,
       plan: { id: plan.id, nombre: plan.nombre },
       ciclo,
+      precioMensual: precio.precioMensual,
+      aLaMedida: precio.aLaMedida,
       trialHasta: hasta,
       diasPrueba: dias,
       diasRestantes: vencida ? 0 : Math.round((hastaDate.getTime() - hoyDia.getTime()) / 86_400_000),

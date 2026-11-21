@@ -24,6 +24,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { BillingService } from './billing.service';
 import { PlansService } from '../plans/plans.service';
+import { montoPorCiclo } from '../plans/pricing';
 import { AppConfigService } from './app-config.service';
 
 const APIFY_BASE = 'https://apify.epayco.co';
@@ -96,20 +97,26 @@ export class EpaycoService {
     }
     const cfg = await this.appConfig.getEpaycoConfig();
 
-    // Obtener el precio del plan en RTDB.
-    const planes = await this.plans.list().catch(() => [] as any[]);
-    const plan = Array.isArray(planes) ? planes.find((p: any) => p.id === opts.planId) : null;
+    // Precio del plan PARA ESTE CONJUNTO (según su número de unidades). Solo se
+    // aceptan planes base o especiales del mismo conjunto.
+    const precio = await this.plans
+      .precioDeConjunto(opts.conjunto, opts.planId)
+      .catch(() => ({ plan: null as any, precioMensual: 0, aLaMedida: false }));
+    const plan = precio.plan;
     if (!plan) {
       return { success: false, message: `Plan '${opts.planId}' no encontrado.` };
     }
-    const precioMensual = Number(plan.precioMensual) || 0;
+    if (precio.aLaMedida) {
+      return {
+        success: false,
+        message: 'Tu conjunto supera las unidades de los planes publicados: su precio es a la medida. Escríbenos para activar tu plan.',
+      };
+    }
+    const precioMensual = precio.precioMensual;
     if (!precioMensual) {
       return { success: false, message: 'El plan no tiene precio configurado.' };
     }
-    const descuentoAnual = Number(plan.descuentoAnual ?? 0.1);
-    const monto = opts.ciclo === 'anual'
-      ? Math.round(precioMensual * 12 * (1 - descuentoAnual))
-      : precioMensual;
+    const monto = montoPorCiclo(precioMensual, opts.ciclo, plan.descuentoAnual ?? 0.1);
 
     // Concepto legible para la pantalla de pago del usuario.
     const descripcion = `GoPase ${plan.nombre} — ${opts.ciclo === 'anual' ? 'pago anual' : 'pago mensual'} — ${opts.conjunto}`;
