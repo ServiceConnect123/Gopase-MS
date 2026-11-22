@@ -147,18 +147,6 @@ export interface SendResult {
   messageId?: string;
 }
 
-/**
- * Maneja la conexión con WhatsApp usando Baileys, con MULTI-SESIÓN por conjunto.
- *
- * - Cada conjunto puede vincular su propio número; las notificaciones de ese
- *   conjunto salen desde su sesión. Existe además una sesión por defecto
- *   (clave DEFAULT_KEY) retrocompatible con el comportamiento global anterior.
- * - Cada sesión persiste en la hoja wsp_session en su propia fila:
- *   `session` (por defecto) o `session:<conjunto>`.
- * - Muestra el QR por consola y lo expone vía getQr(conjunto) para HTTP.
- * - Reconecta automáticamente salvo logout; permite relogin(conjunto).
- */
-@Injectable()
 /** Mensaje entrante permitido (grupo configurado o chat directo) para quien lo escucha. */
 export interface MensajeEntrante {
   /** Nombre del conjunto dueño de la sesión. */
@@ -179,6 +167,18 @@ export interface MensajeEntrante {
   imagen: Buffer | null;
 }
 
+/**
+ * Maneja la conexión con WhatsApp usando Baileys, con MULTI-SESIÓN por conjunto.
+ *
+ * - Cada conjunto puede vincular su propio número; las notificaciones de ese
+ *   conjunto salen desde su sesión. Existe además una sesión por defecto
+ *   (clave DEFAULT_KEY) retrocompatible con el comportamiento global anterior.
+ * - Cada sesión persiste en la hoja wsp_session en su propia fila:
+ *   `session` (por defecto) o `session:<conjunto>`.
+ * - Muestra el QR por consola y lo expone vía getQr(conjunto) para HTTP.
+ * - Reconecta automáticamente salvo logout; permite relogin(conjunto).
+ */
+@Injectable()
 export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WhatsappService.name);
 
@@ -951,7 +951,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     const cfg = this.lectura.get(session.key);
     const chatJid = String(msg.key?.remoteJid || '');
     if (!cfg || !chatJid) return;
-    const esGrupo = isJidGroup(chatJid);
+    const esGrupo = !!isJidGroup(chatJid);
     if (esGrupo ? !cfg.grupos.has(chatJid) : !cfg.chats) return;
 
     // Quita envolturas (mensajes temporales / ver una vez).
