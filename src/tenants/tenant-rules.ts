@@ -85,6 +85,26 @@ export function conPropietario<T extends Record<string, any>>(usuarios: T[]): T[
   });
 }
 
+/** Quién hizo un pago por la cuenta de otro (hoy: un inquilino por su propietario). */
+export interface PagadoPor {
+  usuario: string;
+  nombre: string;
+  rol: string;
+}
+
+/**
+ * "Pagado por" para un pago de la cuenta `cuenta` hecho por `usuario`: solo si
+ * es un inquilino de ese propietario (null en cualquier otro caso). No mira la
+ * vigencia ni el permiso de pagar: eso lo valida quien llama según el caso.
+ */
+export function pagadoPorInquilino(usuario: any, cuenta: unknown): PagadoPor | null {
+  if (!usuario || !esInquilino(usuario.rol)) return null;
+  const d: DatosInquilino = usuario.inquilino || {};
+  if (!norm(d.propietario) || norm(d.propietario) !== norm(cuenta)) return null;
+  const u = String(usuario.usuario || usuario.id || '');
+  return { usuario: u, nombre: String(usuario.nombre || u), rol: ROL_INQUILINO };
+}
+
 /** 'YYYY-MM-DD' válido o ''. */
 export function normFecha(raw: unknown): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(raw ?? '').trim());

@@ -19,6 +19,8 @@ export interface ReceiptData {
   items?: ReceiptItem[];
   /** Nombre del propietario. */
   propietario?: string;
+  /** Quién hizo el pago cuando no es el propietario. Ej: "Ana Gómez (inquilino)". */
+  pagadoPor?: string;
   /** Unidad / casa / apartamento. Ej: "Casa 14". */
   unidad?: string;
   /** Nombre del conjunto. */
@@ -174,6 +176,7 @@ export function buildReceiptSvg(data: ReceiptData): string {
     ["Propietario", data.propietario || "-"],
   ];
   if (data.unidad) datos.push(["Unidad", data.unidad]);
+  if (data.pagadoPor) datos.push(["Pagado por", data.pagadoPor]);
   datos.push(["Fecha de pago", formatFechaLarga(data.fecha)]);
   if (data.tipoRecaudo) datos.push(["Fondo", data.tipoRecaudo]);
   if (refTxt) datos.push(["Referencia", refTxt]);

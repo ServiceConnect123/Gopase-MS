@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import { esInquilino, mensajeAccesoInquilino, resumenParaSesion, segundosHastaFin } from '../tenants/tenant-rules';
+import { conPropietario, esInquilino, mensajeAccesoInquilino, resumenParaSesion, segundosHastaFin } from '../tenants/tenant-rules';
 import { FirebaseService } from '../firebase/firebase.service';
 import { recoverPassword } from './password.util';
 import { validatePasswordPolicy } from './password-policy.util';
@@ -279,7 +279,8 @@ export class AuthLoginService {
         if (!propietario) {
           return { success: false, message: 'El propietario que te registró ya no está en GoPase. Habla con la administración.' };
         }
-        inquilino = resumenParaSesion(perfil);
+        // Unidad y nombre del propietario en vivo (el inquilino los hereda).
+        inquilino = resumenParaSesion(conPropietario([perfil, propietario])[0]);
         // La sesión no dura más que el arriendo.
         segundosSesion = segundosHastaFin(perfil.inquilino?.fin);
       }

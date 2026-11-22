@@ -277,7 +277,9 @@ export class TenantsService {
   async miArriendo(usuario: string): Promise<ReturnType<typeof resumenParaSesion> | null> {
     const u = await this.leerUsuario(usuario);
     if (!u || !esInquilino(u.rol)) return null;
-    return resumenParaSesion(u);
+    // Unidad y nombre del propietario en vivo (el inquilino los hereda).
+    const dueno = u.inquilino?.propietario ? await this.leerUsuario(String(u.inquilino.propietario)) : null;
+    return resumenParaSesion(dueno ? conPropietario([u, dueno])[0] : u);
   }
 
   /** Para chequeos rápidos (guards, pagos): datos del inquilino desde la caché. */

@@ -267,3 +267,47 @@ test('conPropietario: el inquilino hereda unidad, conjunto y contacto del propie
   assert.strictEqual(r.find((u) => u.usuario === 'vigi'), usuarios[3]);
   assert.strictEqual(usuarios[1].parcela, 'Casa 5', 'no modifica el original');
 });
+
+// ---- "Pagado por": el pago de un inquilino queda a nombre del propietario y registra quién pagó ----
+test('pagadoPorInquilino: solo un inquilino de esa cuenta', () => {
+  const { pagadoPorInquilino } = require(path.join(__dirname, '../dist/tenants/tenant-rules.js'));
+  const ana = { usuario: 'ana', nombre: 'Ana Gómez', rol: 'inquilino', inquilino: { propietario: 'carlos' } };
+  assert.deepStrictEqual(pagadoPorInquilino(ana, 'Carlos'), { usuario: 'ana', nombre: 'Ana Gómez', rol: 'inquilino' });
+  assert.strictEqual(pagadoPorInquilino(ana, 'pedro'), null);
+  assert.strictEqual(pagadoPorInquilino({ usuario: 'carlos', rol: 'propietario' }, 'carlos'), null);
+});
+
+test('createPayments guarda pagadoPor y el recibo muestra "Pagado por"', async () => {
+  const data = {
+    mirror: {
+      pagos: {},
+      usuarios: { carlos: { usuario: 'carlos', nombre: 'Carlos Pérez', rol: 'propietario', parcela: 'Casa 7', conjunto: 'Villa' } },
+      conjuntos: {},
+    },
+  };
+  const parts = (p) => String(p || '').split('/').filter(Boolean);
+  const getAt = (p) => parts(p).reduce((o, k) => (o == null ? undefined : o[k]), data);
+  const setAt = (p, v) => { const ks = parts(p); let o = data; for (const k of ks.slice(0, -1)) o = o[k] ??= {}; o[ks.at(-1)] = JSON.parse(JSON.stringify(v)); };
+  const fb = {
+    isEnabled: () => true,
+    liveVal: async (p) => getAt(p),
+    liveValues: async (p) => Object.values(getAt(p) || {}),
+    db: () => ({ ref: (p = '') => ({
+      get: async () => { const v = getAt(p); return { exists: () => v !== undefined, val: () => v }; },
+      update: async (vals) => { for (const [k, v] of Object.entries(vals)) setAt(p ? `${p}/${k}` : k, v); },
+    }) }),
+  };
+  const s = new PaymentsService(fb, {}, {}, {});
+  const pagadoPor = { usuario: 'ana', nombre: 'Ana Gómez', rol: 'inquilino' };
+  const r = await s.createPayments({ usuario: 'carlos', montoPerMonth: 100000, year: 2026, estado: 'Pendiente', referencia: '', concepto: 'Pago X', pagadoPor });
+  assert.ok(r.success);
+  assert.deepStrictEqual(data.mirror.pagos[r.ids[0]].pagadoPor, pagadoPor);
+  assert.strictEqual(data.mirror.pagos[r.ids[0]].usuario, 'carlos', 'el pago es de la cuenta del propietario');
+  const rec = await s.buildReceiptData(r.ids);
+  assert.ok(rec.ok);
+  assert.strictEqual(rec.data.propietario, 'Carlos Pérez');
+  assert.strictEqual(rec.data.pagadoPor, 'Ana Gómez (inquilino)');
+  // Sin pagadoPor no se agrega el campo.
+  const r2 = await s.createPayments({ usuario: 'carlos', montoPerMonth: 1, year: 2026, estado: 'Pendiente', referencia: '', concepto: 'Pago Y' });
+  assert.strictEqual(data.mirror.pagos[r2.ids[0]].pagadoPor, undefined);
+});

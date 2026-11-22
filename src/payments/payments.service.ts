@@ -1346,7 +1346,10 @@ export class PaymentsService {
     }
 
     const parcela = String(u.parcela || '').trim();
+    // Pagado por un inquilino: se muestra en el recibo (todos los pagos del recibo).
+    const pagadores = Array.from(new Set(pagos.map((p) => String(p?.pagadoPor?.nombre || '')).filter(Boolean)));
     const data: ReceiptData = {
+      pagadoPor: pagadores.length ? `${pagadores.join(', ')} (inquilino)` : undefined,
       conjunto,
       propietario: String(u.nombre || usuario),
       unidad: parcela ? (/^\d+$/.test(parcela) ? `Unidad ${parcela}` : parcela) : undefined,
@@ -1380,6 +1383,8 @@ export class PaymentsService {
     // Meses de uno o varios años: [{ mes: 'Noviembre', anio: 2026 }, { mes: 'Enero', anio: 2027 }].
     // Si no viene, se usan `meses` + `year` (clientes anteriores).
     periodos?: Array<{ mes: string; anio: number }>;
+    // Quién pagó cuando no es el titular de la cuenta (un inquilino).
+    pagadoPor?: { usuario: string; nombre: string; rol: string } | null;
   }): Promise<{ success: boolean; ids: string[]; pagos: Pago[]; message?: string }> {
     const db = this.firebase.db();
     const hoy = new Date().toISOString().split('T')[0];
@@ -1420,6 +1425,7 @@ export class PaymentsService {
         // Marca de escritura por Firebase: la sync Sheets->RTDB no debe pisarlo.
         _fbWrite: true,
       };
+      if (input.pagadoPor?.usuario) pago.pagadoPor = input.pagadoPor;
       updates[`mirror/pagos/${this.safeKey(id)}`] = pago;
       ids.push(id);
       pagos.push(pago);
@@ -2272,6 +2278,7 @@ Sé conservador: si NO hay evidencia real de manipulación, marca esAutentico=tr
     successUrl?: string;
     failureUrl?: string;
     pendingUrl?: string;
+    pagadoPor?: { usuario: string; nombre: string; rol: string } | null;
   }): Promise<{ success: boolean; message?: string; init_point?: string; preference_id?: string; external_reference?: string }> {
     const secrets = await this.properties.getSecretsByConjunto(input.conjunto);
     const accessToken = secrets?.mercadoPagoKey || '';
@@ -2351,6 +2358,7 @@ Sé conservador: si NO hay evidencia real de manipulación, marca esAutentico=tr
           valor: String(monto), fecha: hoy, estado: 'Procesando',
           referencia: externalReference, conjunto: input.conjunto || '',
           createdAt: new Date().toISOString(), _fbWrite: true,
+          ...(input.pagadoPor?.usuario ? { pagadoPor: input.pagadoPor } : {}),
         };
       };
       if (periodos.length > 0) {
