@@ -176,6 +176,16 @@ export class PagosWspService implements OnModuleInit {
       .map((r: any) => ({ fecha: r.fecha, origen: r.origen, estado: r.estado, usuario: r.usuario || '', meses: r.meses || '', valor: r.valor || 0, motivo: r.motivo || '' }));
   }
 
+  /** Aviso de mensajes sin leer (cola de lectura llena), si lo hay. */
+  async alerta(conjunto: string): Promise<{ descartados: number; desde: string; ultimo: string } | null> {
+    const v = await this.firebase.liveVal<any>(`wsp_pagos/alertas/${this.claveConj(conjunto)}`).catch(() => null);
+    return v && Number(v.descartados) > 0 ? { descartados: Number(v.descartados), desde: String(v.desde || ''), ultimo: String(v.ultimo || '') } : null;
+  }
+
+  async borrarAlerta(conjunto: string): Promise<void> {
+    await this.firebase.db().ref(`wsp_pagos/alertas/${this.claveConj(conjunto)}`).remove();
+  }
+
   // ------------------------------------------------------------ mensajes
   /** Llamado por WhatsappService por cada mensaje entrante permitido. */
   private async atender(m: MensajeEntrante): Promise<void> {
@@ -219,6 +229,17 @@ export class PagosWspService implements OnModuleInit {
       return { estado: 'rechazado', respuesta };
     }
 
+    // Palabras que no se entendieron (p. ej. un mes mal escrito): mejor preguntar que adivinar.
+    if (parseado.desconocidos.length) {
+      const palabras = parseado.desconocidos.slice(0, 3).map((w) => `«${w}»`).join(', ');
+      await registrar('rechazado', { motivo: `no_entendido: ${parseado.desconocidos.join(' ')}` });
+      return {
+        estado: 'rechazado',
+        respuesta: `No entendí ${palabras}. Escribe el mes completo o abreviado (noviembre o nov) y vuelve a enviar la foto, por ejemplo:\n#pago Usuario: tu_usuario nov`,
+        reaccion: m.esGrupo ? '❓' : undefined,
+      };
+    }
+
     // ¿Quién paga?
     const usuarios = conPropietario(((await this.firebase.liveValues<any>('mirror/usuarios')) || []) as any[]);
     const match = identificarPagador({ usuarios, conjunto: m.conjunto, parseado, telefonoRemitente: m.telefono });
@@ -231,7 +252,7 @@ export class PagosWspService implements OnModuleInit {
     // Mismo comprobante enviado antes (mismo archivo).
     const hash = createHash('sha256').update(m.imagen).digest('hex').slice(0, 32);
     const previos = (await this.firebase.liveVal<Record<string, any>>(`wsp_pagos/registros/${conj}`).catch(() => null)) || {};
-    if (Object.values(previos).some((r: any) => r?.hash === hash && r?.estado === 'registrado')) {
+    if (await this.comprobanteVigente(previos, hash)) {
       await registrar('duplicado', { motivo: 'imagen_repetida', usuario: cuenta, hash });
       return { estado: 'duplicado', respuesta: 'Este comprobante ya se había registrado. No lo volví a registrar.', reaccion: m.esGrupo ? '🔁' : undefined };
     }
@@ -310,6 +331,23 @@ export class PagosWspService implements OnModuleInit {
         ? { telefono: telTitular, texto: `ℹ️ Se registró un pago de ${listaMeses(per.periodos)} por ${pesos(total)} a tu nombre, enviado desde otro número. Queda en revisión. Si no lo reconoces, avisa a la administración.` }
         : undefined;
     return { estado: 'registrado', respuesta, reaccion: m.esGrupo ? '✅' : undefined, aviso, ids: res.ids };
+  }
+
+  /**
+   * ¿Este comprobante ya está en un pago vigente? Si el admin rechazó (o eliminó)
+   * todos los pagos que creó, se permite reenviarlo.
+   */
+  private async comprobanteVigente(previos: Record<string, any>, hash: string): Promise<boolean> {
+    for (const r of Object.values(previos)) {
+      if (r?.hash !== hash || r?.estado !== 'registrado') continue;
+      const ids: string[] = Array.isArray(r.ids) ? r.ids : [];
+      if (!ids.length) return true;
+      for (const id of ids) {
+        const pago = await this.firebase.liveVal<any>(`mirror/pagos/${this.safe(id)}`).catch(() => null);
+        if (pago && String(pago.estado || '').toLowerCase() !== 'rechazado') return true;
+      }
+    }
+    return false;
   }
 
   private safe(s: string) {

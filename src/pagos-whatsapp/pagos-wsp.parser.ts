@@ -26,6 +26,8 @@ export interface PagoWspParseado {
   meses: Array<{ mes: string; idx: number; anio?: number }>;
   valor?: number;
   fondo?: string;
+  /** Palabras que no se entendieron (p. ej. un mes mal escrito): se pide corregir. */
+  desconocidos: string[];
 }
 
 const sinTildes = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '');
@@ -37,7 +39,48 @@ const ABREV: Record<string, number> = {
   nov: 10, noviembre: 10, dic: 11, diciembre: 11,
 };
 
-const mesDe = (t: string): number | undefined => ABREV[norm(t).replace(/\.$/, '')];
+const NOMBRES = MESES.map((m) => norm(m)).concat(['setiembre']);
+const IDX_NOMBRE = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 8];
+
+/** Distancia de edición (Levenshtein) entre dos palabras cortas. */
+export function distancia(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[n];
+}
+
+/**
+ * Mes de una palabra: exacta o abreviada; o mal escrita ("novimbre", "dicienbre").
+ * Para no confundir nombres de usuario (julia, marta) solo se corrigen palabras
+ * de 6+ letras; en la línea "Mes:" (contexto claro) también de 4-5 letras.
+ */
+const mesDe = (t: string, laxo = false): number | undefined => {
+  const w = norm(t).replace(/\.$/, '');
+  if (ABREV[w] !== undefined) return ABREV[w];
+  if (!/^[a-zñ]+$/.test(w) || w.length < (laxo ? 4 : 6)) return undefined;
+  const max = w.length >= 8 ? 2 : 1;
+  let mejor: number | undefined;
+  let dMin = Infinity;
+  let empate = false;
+  NOMBRES.forEach((nombre, i) => {
+    const d = distancia(w, nombre);
+    if (d < dMin) {
+      dMin = d;
+      mejor = IDX_NOMBRE[i];
+      empate = false;
+    } else if (d === dMin && IDX_NOMBRE[i] !== mejor) empate = true;
+  });
+  return dMin <= max && !empate ? mejor : undefined;
+};
+
+/** Palabras comunes que no son datos ("#pago de noviembre, gracias"). */
+const RELLENO = new Set(['de', 'del', 'la', 'el', 'los', 'las', 'mes', 'meses', 'pago', 'pagos', 'pague', 'pagué', 'mi', 'por', 'para', 'con', 'gracias', 'hola', 'buen', 'buenos', 'buenas', 'dia', 'dias', 'tardes', 'noches', 'favor', 'porfa', 'ok', 'listo', 'administracion', 'admin', 'cuota', 'adjunto', 'comprobante', 'año', 'ano', 'a', 'y', 'e', 'hasta', 'al', 'que', 'es', 'el', 'en']);
+const esRelleno = (t: string) => RELLENO.has(norm(t).replace(/[.,;:!?¡¿]/g, ''));
 const esAnio = (t: string) => /^20\d{2}$/.test(t) && Number(t) >= 2020 && Number(t) <= 2099;
 
 /** "120.000", "$120,000", "120000" → 120000. Con decimales ",00" o ".00" los ignora. */
@@ -51,7 +94,7 @@ export function parsearValor(t: string): number | undefined {
 }
 
 /** Meses de un texto: "oct-nov", "octubre y noviembre 2026", "nov". */
-export function parsearMeses(texto: string): Array<{ mes: string; idx: number; anio?: number }> {
+export function parsearMeses(texto: string, laxo = false, desconocidos: string[] = []): Array<{ mes: string; idx: number; anio?: number }> {
   const toks = norm(texto).replace(/[,;/]/g, ' ').replace(/\s*-\s*/g, ' - ').split(/\s+/).filter(Boolean);
   const out: Array<{ mes: string; idx: number; anio?: number }> = [];
   let anio: number | undefined;
@@ -61,11 +104,14 @@ export function parsearMeses(texto: string): Array<{ mes: string; idx: number; a
       anio = Number(t);
       continue;
     }
-    const m = mesDe(t);
-    if (m === undefined) continue;
+    const m = mesDe(t, laxo);
+    if (m === undefined) {
+      if (/[a-zñ]/.test(t) && !esRelleno(t) && t !== '-') desconocidos.push(t);
+      continue;
+    }
     // Rango "oct - dic" o "oct a dic"
-    if ((toks[i + 1] === '-' || toks[i + 1] === 'a' || toks[i + 1] === 'hasta') && mesDe(toks[i + 2] || '') !== undefined) {
-      const fin = mesDe(toks[i + 2])!;
+    if ((toks[i + 1] === '-' || toks[i + 1] === 'a' || toks[i + 1] === 'hasta') && mesDe(toks[i + 2] || '', laxo) !== undefined) {
+      const fin = mesDe(toks[i + 2], laxo)!;
       let k = m;
       for (let guard = 0; guard < 12; guard++) {
         out.push({ mes: MESES[k], idx: k });
@@ -94,7 +140,7 @@ const ETIQUETAS: Array<[RegExp, 'usuario' | 'documento' | 'telefono' | 'mes' | '
 
 export function parsearMensajePago(texto: string): PagoWspParseado {
   const raw = String(texto || '');
-  const res: PagoWspParseado = { esPago: /(^|\s)#\s?pago\b/i.test(sinTildes(raw)), meses: [] };
+  const res: PagoWspParseado = { esPago: /(^|\s)#\s?pago\b/i.test(sinTildes(raw)), meses: [], desconocidos: [] };
   if (!res.esPago) return res;
 
   // Datos con etiqueta: en cualquier parte. Sin etiqueta: solo después de #pago
@@ -124,7 +170,7 @@ export function parsearMensajePago(texto: string): PagoWspParseado {
         if (resto) sueltos.push(...resto.split(/\s+/));
         continue;
       }
-      else if (tipo === 'mes') res.meses = parsearMeses(v);
+      else if (tipo === 'mes') res.meses = parsearMeses(v, true, res.desconocidos);
       else if (tipo === 'valor') res.valor = parsearValor(v);
       else if (tipo === 'fondo') res.fondo = v;
       continue;
@@ -152,11 +198,14 @@ export function parsearMensajePago(texto: string): PagoWspParseado {
       else if (res.valor === undefined) res.valor = parsearValor(d);
       continue;
     }
+    if (esRelleno(t)) continue;
     if (/[a-z]/i.test(t) && !res.identificador && /^@?[\w.-]{3,}$/.test(t)) {
       res.identificador = { tipo: 'usuario', valor: t.replace(/^@/, '') };
+      continue;
     }
+    if (/[a-zñ]/i.test(t)) res.desconocidos.push(t.replace(/[.,;:!?]+$/, ''));
   }
-  if (!res.meses.length && restoMeses.length) res.meses = parsearMeses(restoMeses.join(' '));
+  if (!res.meses.length && restoMeses.length) res.meses = parsearMeses(restoMeses.join(' '), false, res.desconocidos);
   return res;
 }
 
