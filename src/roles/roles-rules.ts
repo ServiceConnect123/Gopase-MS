@@ -3,8 +3,8 @@
  *
  *  - Roles del sistema: admin, vigilante, propietario, inquilino y superAdmin.
  *    Solo el superAdmin los edita; no se eliminan.
- *  - Roles personalizados: los crea el superAdmin (globales o de un conjunto) o
- *    el admin de un conjunto (solo para su conjunto).
+ *  - Roles personalizados: siempre de un conjunto. Los crea el superAdmin (eligiendo
+ *    el conjunto) o el admin (solo para su conjunto).
  *  - Permisos: solo las vistas asignables. Las vistas exclusivas del superAdmin
  *    (Roles, Conjuntos, Monitoreo, Facturación) y las que todos ven (Inicio,
  *    Perfil, Configuración) no se guardan en un rol.
