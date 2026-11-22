@@ -15,7 +15,7 @@ import {
 import { FirebaseService } from '../firebase/firebase.service';
 import { assertConjuntoPermitido, esSuperAdmin, WspAccessGuard, WspRoles } from '../auth/wsp-access.guard';
 import { generateReceiptPng } from '../notifications/receipt-image.generator';
-import { puedePagarPorCuenta } from '../tenants/tenant-rules';
+import { PagadoPor, pagadoPorInquilino, puedePagarPorCuenta } from '../tenants/tenant-rules';
 import { ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { PaymentsService } from './payments.service';
 import { PaymentsImportService } from './payments-import.service';
@@ -34,15 +34,32 @@ export class PaymentsController {
   ) {}
 
   /**
-   * Arrendatario: solo puede actuar sobre la cuenta de SU propietario y solo si
+   * Inquilino: solo puede actuar sobre la cuenta de SU propietario y solo si
    * este le delegó el pago de la administración y el arriendo está vigente.
    */
-  private async assertInquilinoPagaPor(req: any, cuenta: string): Promise<void> {
+  private async assertInquilinoPagaPor(req: any, cuenta: string): Promise<PagadoPor> {
     const usuarios = (await this.firebase.liveVal<Record<string, any>>('mirror/usuarios')) || {};
     const yo = usuarios[String(req.user?.sub || '').replace(/[.#$/\[\]]/g, '_')];
     if (!puedePagarPorCuenta(yo, cuenta)) {
       throw new ForbiddenException('El propietario no te ha delegado el pago de la administración.');
     }
+    return pagadoPorInquilino(yo, cuenta) as PagadoPor;
+  }
+
+  /**
+   * "Pagado por" de un pago: el inquilino en sesión, o el inquilino que indica
+   * el admin al registrar un pago que hizo ese inquilino (debe ser inquilino de
+   * la cuenta). Cualquier otro caso: sin "pagado por".
+   */
+  private async pagadoPorDe(req: any, cuenta: string, indicado?: unknown): Promise<PagadoPor | null> {
+    const rol = String(req?.user?.rol || '').toLowerCase();
+    if (rol === 'inquilino') return this.assertInquilinoPagaPor(req, cuenta);
+    const quien = String((indicado as any)?.usuario ?? indicado ?? '').trim();
+    if (!quien || (rol !== 'admin' && rol !== 'superadmin')) return null;
+    const usuarios = (await this.firebase.liveVal<Record<string, any>>('mirror/usuarios')) || {};
+    const p = pagadoPorInquilino(usuarios[quien.replace(/[.#$/\[\]]/g, '_')], cuenta);
+    if (!p) throw new BadRequestException('Ese inquilino no pertenece a la unidad del pago.');
+    return p;
   }
 
   /**
@@ -375,13 +392,14 @@ export class PaymentsController {
       periodos?: Array<{ mes: string; anio: number }>;
     },
   ) {
-    // Arrendatario: solo registra pagos de la unidad de su propietario si este
+    // Inquilino: solo registra pagos de la unidad de su propietario si este
     // se lo delegó. Siempre quedan Pendientes (el admin los confirma).
+    const pagadoPor = await this.pagadoPorDe(req, body?.usuario, (body as any)?.pagadoPor);
     if (String(req?.user?.rol || '').toLowerCase() === 'inquilino') {
-      await this.assertInquilinoPagaPor(req, body?.usuario);
       body = { ...body, estado: 'Pendiente' };
     }
     return this.payments.createPayments({
+      pagadoPor,
       periodos: Array.isArray(body.periodos) ? body.periodos : undefined,
       usuario: body.usuario,
       montoPerMonth: body.montoPerMonth,
@@ -559,9 +577,9 @@ export class PaymentsController {
     },
     @Req() req: any,
   ) {
-    if (String(req?.user?.rol || '').toLowerCase() === 'inquilino') {
-      await this.assertInquilinoPagaPor(req, body?.usuario);
-    }
-    return this.payments.createPreference(body);
+    const pagadoPor = String(req?.user?.rol || '').toLowerCase() === 'inquilino'
+      ? await this.assertInquilinoPagaPor(req, body?.usuario)
+      : null;
+    return this.payments.createPreference({ ...body, pagadoPor });
   }
 }

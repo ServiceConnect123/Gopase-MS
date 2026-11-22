@@ -67,7 +67,7 @@ export class JwtAuthGuard implements CanActivate {
       throw new UnauthorizedException('Token inválido o expirado.');
     }
 
-    // Arrendatario: el token vale mientras su arriendo siga vigente (el
+    // Inquilino: el token vale mientras su arriendo siga vigente (el
     // propietario puede retirarle el acceso o cambiar las fechas en cualquier
     // momento). Se lee de la caché en vivo, sin ir a RTDB en cada petición.
     if (esInquilino(req.user?.rol) && this.firebase?.isEnabled()) {

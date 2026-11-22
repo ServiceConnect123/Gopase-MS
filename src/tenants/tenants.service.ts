@@ -4,6 +4,7 @@ import { UsersService } from '../users/users.service';
 import { UsersInviteService } from '../users/users-invite.service';
 import {
   DatosInquilino,
+  conPropietario,
   ROL_INQUILINO,
   esInquilino,
   estadoInquilino,
@@ -33,7 +34,7 @@ export interface TenantInput {
 type Resultado = { success: boolean; message?: string; [k: string]: any };
 
 /**
- * Arrendatarios creados por el propietario de una unidad (rol "inquilino").
+ * Inquilinos creados por el propietario de una unidad (rol "inquilino").
  * Ver reglas en ./tenant-rules. Se guardan como usuarios normales
  * (mirror/usuarios + Firebase Auth) para reutilizar login, perfil, invitados,
  * PQRS, etc.; el bloque `inquilino` guarda el arriendo.
@@ -59,7 +60,7 @@ export class TenantsService {
     return snap.exists() ? snap.val() : null;
   }
 
-  /** Lo que ve el propietario de cada arrendatario. */
+  /** Lo que ve el propietario de cada inquilino. */
   private toDto(u: any) {
     const d: DatosInquilino = u?.inquilino || {};
     return {
@@ -90,7 +91,7 @@ export class TenantsService {
     const owner = await this.leerUsuario(propietario);
     if (!owner) return { error: 'El propietario no existe.' };
     if (String(owner.rol || '').toLowerCase() !== 'propietario') {
-      return { error: 'Solo un propietario puede registrar arrendatarios de su unidad.' };
+      return { error: 'Solo un propietario puede registrar inquilinos de su unidad.' };
     }
     if (!String(owner.parcela || '').trim()) {
       return { error: 'Primero registra tu unidad (casa o apartamento) en tu perfil, o pídeselo al administrador.' };
@@ -98,7 +99,7 @@ export class TenantsService {
     return owner;
   }
 
-  /** Arrendatario que pertenece al propietario (o null). */
+  /** Inquilino que pertenece al propietario (o null). */
   private async inquilinoDe(propietario: string, usuario: string): Promise<any | null> {
     const u = await this.leerUsuario(usuario);
     if (!u || !esInquilino(u.rol)) return null;
@@ -123,12 +124,12 @@ export class TenantsService {
     return `${base}${Date.now()}`;
   }
 
-  /** Arrendatarios del propietario, los vigentes primero. */
+  /** Inquilinos del propietario, los vigentes primero. */
   async listar(propietario: string): Promise<any[]> {
     if (!this.firebase.isEnabled()) throw new Error('Servicio no disponible.');
     const p = String(propietario || '').toLowerCase();
     const orden: Record<string, number> = { activo: 0, programado: 1, vencido: 2, revocado: 3 };
-    return (await this.firebase.liveValues<any>(MIRROR_USERS))
+    return conPropietario(await this.firebase.liveValues<any>(MIRROR_USERS))
       .filter((u) => esInquilino(u?.rol) && String(u?.inquilino?.propietario || '').toLowerCase() === p)
       .map((u) => this.toDto(u))
       .sort((a, b) => orden[a.estado] - orden[b.estado] || a.nombre.localeCompare(b.nombre));
@@ -140,10 +141,10 @@ export class TenantsService {
     if ('error' in owner) return { success: false, message: owner.error };
 
     const nombre = String(input.nombre || '').trim();
-    if (nombre.length < 3) return { success: false, message: 'Escribe el nombre completo del arrendatario.' };
+    if (nombre.length < 3) return { success: false, message: 'Escribe el nombre completo del inquilino.' };
     const phone = String(input.phone || '').trim();
     if (phone.replace(/\D/g, '').length < 7) {
-      return { success: false, message: 'Escribe el celular del arrendatario: por ahí le llega su acceso.' };
+      return { success: false, message: 'Escribe el celular del inquilino: por ahí le llega su acceso.' };
     }
     const v = validarArriendo(input);
     if ('error' in v) return { success: false, message: v.error };
@@ -166,7 +167,7 @@ export class TenantsService {
       // Correo real solo en el perfil: puede repetirse con otras cuentas.
       authEmailSintetico: true,
     });
-    if (!creado.success) return { success: false, message: creado.message || 'No se pudo crear el arrendatario.' };
+    if (!creado.success) return { success: false, message: creado.message || 'No se pudo crear el inquilino.' };
 
     const datos: DatosInquilino = {
       propietario: String(owner.usuario || propietario),
@@ -187,9 +188,9 @@ export class TenantsService {
       usuario,
       message: envio
         ? envio.success
-          ? 'Arrendatario creado. Le enviamos su acceso por WhatsApp.'
-          : `Arrendatario creado, pero no se pudo enviar el acceso: ${envio.message || 'WhatsApp no disponible'}. Inténtalo de nuevo con "Enviar acceso".`
-        : 'Arrendatario creado.',
+          ? 'Inquilino creado. Le enviamos su acceso por WhatsApp.'
+          : `Inquilino creado, pero no se pudo enviar el acceso: ${envio.message || 'WhatsApp no disponible'}. Inténtalo de nuevo con "Enviar acceso".`
+        : 'Inquilino creado.',
       envioOk: envio ? envio.success : undefined,
     };
   }
@@ -197,7 +198,7 @@ export class TenantsService {
   async actualizar(propietario: string, usuario: string, input: TenantInput): Promise<Resultado> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
     const u = await this.inquilinoDe(propietario, usuario);
-    if (!u) return { success: false, message: 'Ese arrendatario no es de tu unidad.' };
+    if (!u) return { success: false, message: 'Ese inquilino no es de tu unidad.' };
 
     const prev: DatosInquilino = u.inquilino || {};
     const v = validarArriendo({
@@ -208,7 +209,7 @@ export class TenantsService {
     });
     if ('error' in v) return { success: false, message: v.error };
     if (input.nombre !== undefined && String(input.nombre).trim().length < 3) {
-      return { success: false, message: 'Escribe el nombre completo del arrendatario.' };
+      return { success: false, message: 'Escribe el nombre completo del inquilino.' };
     }
     if (input.phone !== undefined && String(input.phone).replace(/\D/g, '').length < 7) {
       return { success: false, message: 'El celular no es válido.' };
@@ -230,14 +231,14 @@ export class TenantsService {
       .db()
       .ref(`${MIRROR_USERS}/${this.safeKey(usuario)}`)
       .update({ inquilino: { ...prev, ...v.datos }, _fbWrite: true });
-    return { success: true, message: 'Arrendatario actualizado.' };
+    return { success: true, message: 'Inquilino actualizado.' };
   }
 
-  /** Retira (revocar=true) o devuelve (false) el acceso del arrendatario. */
+  /** Retira (revocar=true) o devuelve (false) el acceso del inquilino. */
   async setRevocado(propietario: string, usuario: string, revocar: boolean): Promise<Resultado> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
     const u = await this.inquilinoDe(propietario, usuario);
-    if (!u) return { success: false, message: 'Ese arrendatario no es de tu unidad.' };
+    if (!u) return { success: false, message: 'Ese inquilino no es de tu unidad.' };
     const key = this.safeKey(usuario);
     await this.firebase
       .db()
@@ -258,35 +259,37 @@ export class TenantsService {
   async eliminar(propietario: string, usuario: string): Promise<Resultado> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
     const u = await this.inquilinoDe(propietario, usuario);
-    if (!u) return { success: false, message: 'Ese arrendatario no es de tu unidad.' };
+    if (!u) return { success: false, message: 'Ese inquilino no es de tu unidad.' };
     return this.users.remove(usuario);
   }
 
   /** Reenvía usuario y una contraseña temporal nueva por WhatsApp. */
   async enviarAcceso(propietario: string, usuario: string): Promise<Resultado> {
     const u = await this.inquilinoDe(propietario, usuario);
-    if (!u) return { success: false, message: 'Ese arrendatario no es de tu unidad.' };
+    if (!u) return { success: false, message: 'Ese inquilino no es de tu unidad.' };
     if (estadoInquilino(u.inquilino) === 'revocado') {
-      return { success: false, message: 'Primero devuélvele el acceso al arrendatario.' };
+      return { success: false, message: 'Primero devuélvele el acceso al inquilino.' };
     }
     return this.invite.sendCredentials(usuario, String(u.conjunto || ''));
   }
 
-  /** Resumen del arriendo de un arrendatario (para su sesión). null si no lo es. */
+  /** Resumen del arriendo de un inquilino (para su sesión). null si no lo es. */
   async miArriendo(usuario: string): Promise<ReturnType<typeof resumenParaSesion> | null> {
     const u = await this.leerUsuario(usuario);
     if (!u || !esInquilino(u.rol)) return null;
-    return resumenParaSesion(u);
+    // Unidad y nombre del propietario en vivo (el inquilino los hereda).
+    const dueno = u.inquilino?.propietario ? await this.leerUsuario(String(u.inquilino.propietario)) : null;
+    return resumenParaSesion(dueno ? conPropietario([u, dueno])[0] : u);
   }
 
-  /** Para chequeos rápidos (guards, pagos): datos del arrendatario desde la caché. */
+  /** Para chequeos rápidos (guards, pagos): datos del inquilino desde la caché. */
   async datosDesdeCache(usuario: string): Promise<any | null> {
     const todos = (await this.firebase.liveVal<Record<string, any>>(MIRROR_USERS)) || {};
     const u = todos[this.safeKey(usuario)];
     return u && esInquilino(u.rol) ? u : null;
   }
 
-  /** ¿El arrendatario puede pagar la administración de la cuenta `cuenta` hoy? */
+  /** ¿El inquilino puede pagar la administración de la cuenta `cuenta` hoy? */
   async puedePagarPor(inquilino: string, cuenta: string): Promise<boolean> {
     return puedePagarPorCuenta(await this.datosDesdeCache(inquilino), cuenta);
   }
