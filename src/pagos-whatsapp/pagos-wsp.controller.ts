@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, ForbiddenException, Get, Put, Query, Req } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Put, Query, Req } from '@nestjs/common';
 import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { FirebaseService } from '../firebase/firebase.service';
 import { conjuntoPropioDelRequest } from '../auth/conjunto-scope';
@@ -74,7 +74,16 @@ export class PagosWspController {
   @Get('historial')
   async historial(@Req() req: any, @Query('conjunto') conjunto?: string) {
     const c = await this.conjuntoAdmin(req, conjunto);
-    return { success: true, data: await this.pagosWsp.historial(c) };
+    const [data, alerta] = await Promise.all([this.pagosWsp.historial(c), this.pagosWsp.alerta(c)]);
+    return { success: true, data, alerta };
+  }
+
+  @ApiOperation({ summary: 'Marcar como visto el aviso de mensajes sin leer' })
+  @Delete('alerta')
+  async borrarAlerta(@Req() req: any, @Query('conjunto') conjunto?: string) {
+    const c = await this.conjuntoAdmin(req, conjunto);
+    await this.pagosWsp.borrarAlerta(c);
+    return { success: true };
   }
 
   @ApiOperation({ summary: '¿El conjunto recibe pagos por WhatsApp? (para la tarjeta del residente)' })

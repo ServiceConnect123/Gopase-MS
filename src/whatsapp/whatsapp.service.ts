@@ -189,9 +189,14 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
    */
   private readonly lectura = new Map<string, { conjunto: string; grupos: Set<string>; chats: boolean }>();
   private manejadorEntrantes: ((m: MensajeEntrante) => Promise<void>) | null = null;
-  private readonly contadorLectura = new Map<string, { inicio: number; n: number; pausaHasta: number }>();
+  private readonly contadorLectura = new Map<string, { inicio: number; n: number }>();
+  /** Exceso de mensajes: se encolan y se leen a ritmo limitado (no se descartan). */
+  private readonly colasLectura = new Map<string, { nodos: any[]; timer: NodeJS.Timeout | null }>();
+  /** Descartados por cola llena, pendientes de anotar como aviso para el admin. */
+  private readonly descartesPendientes = new Map<string, { conjunto: string; n: number }>();
+  private descartesTimer: NodeJS.Timeout | null = null;
   private static readonly LECTURA_MAX_MIN = Math.max(5, Number(process.env.WSP_LECTURA_MAX_MIN) || 40);
-  private static readonly LECTURA_PAUSA_MS = 10 * 60_000;
+  private static readonly LECTURA_MAX_COLA = Math.max(50, Number(process.env.WSP_LECTURA_MAX_COLA) || 300);
 
   /** Clave de la sesión por defecto (número global histórico). */
   static readonly DEFAULT_KEY = '__default__';
@@ -865,14 +870,13 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     ws.on('CB:message', (node: any) => {
       // Excepción opt-in: grupo de pagos / chats directos de conjuntos que
       // activaron "Pagos por WhatsApp" (con cortacircuitos por minuto).
-      if (this.debeDescifrar(session, node)) {
-        for (const h of original) {
-          try {
-            h(node);
-          } catch (e: any) {
-            this.logger.warn(`[${session.key}] Error descifrando mensaje: ${e?.message}`);
-          }
-        }
+      const decision = this.decisionLectura(session, node);
+      if (decision === 'leer') {
+        this.pasarAHandlers(session, original, node);
+        return;
+      }
+      if (decision === 'encolar') {
+        this.encolarLectura(session, original, node);
         return;
       }
       // Ningún mensaje entrante se descifra, ni siquiera los de control del
@@ -915,35 +919,98 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`[${key}] Lectura de pagos por WhatsApp: ${grupos.size} grupo(s), chats ${op.chats ? 'sí' : 'no'}.`);
   }
 
-  /** ¿Este nodo entrante se descifra? Solo lo permitido y sin pasar el límite por minuto. */
-  private debeDescifrar(session: WhatsappSession, node: any): boolean {
+  /**
+   * ¿Qué hacer con este nodo entrante?
+   *   - 'leer': permitido y dentro del límite por minuto.
+   *   - 'encolar': permitido pero se pasó el límite (o ya hay cola): se lee después, en orden.
+   *   - 'ignorar': no permitido (se confirma sin descifrar, como siempre).
+   */
+  private decisionLectura(session: WhatsappSession, node: any): 'leer' | 'encolar' | 'ignorar' {
     const cfg = this.lectura.get(session.key);
-    if (!cfg) return false;
+    if (!cfg) return 'ignorar';
     const a = node?.attrs || {};
     const from = String(a.from || '');
-    if (!from || a.category === 'peer' || a.recipient) return false;
+    if (!from || a.category === 'peer' || a.recipient) return 'ignorar';
     let permitido = false;
     if (isJidGroup(from)) permitido = cfg.grupos.has(from);
     else if (/@(s\.whatsapp\.net|lid)$/.test(from)) permitido = cfg.chats;
-    if (!permitido) return false;
+    if (!permitido) return 'ignorar';
+    if (this.colasLectura.get(session.key)?.nodos.length) return 'encolar'; // respeta el orden
     const ahora = Date.now();
-    const c = this.contadorLectura.get(session.key) || { inicio: ahora, n: 0, pausaHasta: 0 };
-    if (c.pausaHasta > ahora) return false;
+    const c = this.contadorLectura.get(session.key) || { inicio: ahora, n: 0 };
     if (ahora - c.inicio > 60_000) {
       c.inicio = ahora;
       c.n = 0;
     }
     c.n++;
-    if (c.n > WhatsappService.LECTURA_MAX_MIN) {
-      c.pausaHasta = ahora + WhatsappService.LECTURA_PAUSA_MS;
-      this.logger.warn(
-        `[${session.key}] Más de ${WhatsappService.LECTURA_MAX_MIN} mensajes/min para leer: lectura en pausa 10 min (se confirman sin descifrar).`,
-      );
-      this.contadorLectura.set(session.key, c);
-      return false;
-    }
     this.contadorLectura.set(session.key, c);
-    return true;
+    return c.n > WhatsappService.LECTURA_MAX_MIN ? 'encolar' : 'leer';
+  }
+
+  private pasarAHandlers(session: WhatsappSession, handlers: ((node: any) => void)[], node: any) {
+    for (const h of handlers) {
+      try {
+        h(node);
+      } catch (e: any) {
+        this.logger.warn(`[${session.key}] Error descifrando mensaje: ${e?.message}`);
+      }
+    }
+  }
+
+  /** Encola el nodo y lo lee a ritmo limitado. Si la cola está llena se confirma sin leer y se anota el descarte. */
+  private encolarLectura(session: WhatsappSession, handlers: ((node: any) => void)[], node: any) {
+    let q = this.colasLectura.get(session.key);
+    if (!q) this.colasLectura.set(session.key, (q = { nodos: [], timer: null }));
+    if (q.nodos.length >= WhatsappService.LECTURA_MAX_COLA) {
+      (session.sock as any)?.sendMessageAck?.(node)?.catch?.(() => undefined);
+      this.anotarDescarte(session);
+      return;
+    }
+    if (!q.nodos.length) this.logger.warn(`[${session.key}] Muchos mensajes por leer: se ponen en cola (${WhatsappService.LECTURA_MAX_MIN}/min).`);
+    q.nodos.push(node);
+    if (q.timer) return;
+    const cola = q;
+    cola.timer = setInterval(() => {
+      const siguiente = cola.nodos.shift();
+      if (siguiente) this.pasarAHandlers(session, handlers, siguiente);
+      if (!cola.nodos.length && cola.timer) {
+        clearInterval(cola.timer);
+        cola.timer = null;
+        this.logger.log(`[${session.key}] Cola de lectura vacía.`);
+      }
+    }, Math.ceil(60_000 / WhatsappService.LECTURA_MAX_MIN));
+    cola.timer.unref?.();
+  }
+
+  /** Acumula descartes y los anota cada 15 s en wsp_pagos/alertas/{conjunto} (aviso para el admin). */
+  private anotarDescarte(session: WhatsappSession) {
+    const cfg = this.lectura.get(session.key);
+    const d = this.descartesPendientes.get(session.key) || { conjunto: cfg?.conjunto || session.key, n: 0 };
+    d.n++;
+    this.descartesPendientes.set(session.key, d);
+    if (this.descartesTimer) return;
+    this.descartesTimer = setTimeout(() => {
+      this.descartesTimer = null;
+      const pendientes = Array.from(this.descartesPendientes.values());
+      this.descartesPendientes.clear();
+      for (const p of pendientes) {
+        const clave = String(p.conjunto || '').trim().toLowerCase().replace(/[.#$/\[\]]/g, '_') || 'sin_conjunto';
+        const ruta = `wsp_pagos/alertas/${clave}`;
+        this.logger.warn(`[${p.conjunto}] ${p.n} mensajes sin leer por cola llena.`);
+        this.firebase
+          .liveVal<any>(ruta)
+          .then((prev) =>
+            this.firebase.db().ref(ruta).set({
+              conjunto: p.conjunto,
+              descartados: (Number(prev?.descartados) || 0) + p.n,
+              desde: prev?.desde || new Date().toISOString(),
+              ultimo: new Date().toISOString(),
+            }),
+          )
+          .catch(() => undefined);
+      }
+    }, 15_000);
+    this.descartesTimer.unref?.();
   }
 
   /** Arma el MensajeEntrante (texto, remitente e imagen) y lo entrega al manejador. */
