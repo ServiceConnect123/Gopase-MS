@@ -1,6 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
-import { VERSION_PERMISOS, esRolSistema, limpiarPermisos, rolEsDelSistema } from './roles-rules';
+import { PlansService } from '../plans/plans.service';
+import { VERSION_PERMISOS, esRolSistema, limpiarPermisos, recortarAlPlan, rolEsDelSistema, vistasDelPlan } from './roles-rules';
 
 /**
  * Roles (RTDB mirror/roles). El espejo guarda { id, nombre, permisos } y aquí se
@@ -27,7 +28,32 @@ const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
 export class RolesService {
   private readonly logger = new Logger(RolesService.name);
 
-  constructor(private readonly firebase: FirebaseService) {}
+  constructor(
+    private readonly firebase: FirebaseService,
+    @Optional() private readonly plans?: PlansService,
+  ) {}
+
+  /** Vistas que el plan del conjunto permite asignar (null = no se pudo leer el plan: no se recorta). */
+  async vistasPermitidas(conjunto: string): Promise<string[] | null> {
+    if (!conjunto || !this.plans) return null;
+    try {
+      const plan = await this.plans.getPlanDeConjunto(conjunto);
+      return vistasDelPlan(plan?.modulos);
+    } catch (err: any) {
+      this.logger.warn(`[roles] no se pudo leer el plan de ${conjunto}: ${err?.message}`);
+      return null;
+    }
+  }
+
+  /** Registro listo para guardar; en roles de un conjunto apaga lo que su plan no incluye. */
+  private async registro(dto: any): Promise<Record<string, any>> {
+    const rec = this.buildRecord(dto);
+    if (rec.conjunto) {
+      const permitidas = await this.vistasPermitidas(rec.conjunto);
+      if (permitidas) rec.permisos = recortarAlPlan(rec.permisos, permitidas);
+    }
+    return rec;
+  }
 
   private safeKey(raw: unknown): string {
     return String(raw ?? '').trim().replace(/[.#$/\[\]]/g, '_');
@@ -114,7 +140,7 @@ export class RolesService {
       return { success: false, message: `Ya existe un rol llamado «${nombre}».` };
     }
     try {
-      await this.firebase.db().ref(`${MIRROR_ROLES}/${this.safeKey(id)}`).set(this.buildRecord({ ...dto, id }));
+      await this.firebase.db().ref(`${MIRROR_ROLES}/${this.safeKey(id)}`).set(await this.registro({ ...dto, id }));
       return { success: true, id, message: 'Rol creado.' };
     } catch (err: any) {
       this.logger.error(`[roles] create falló: ${err?.message}`);
@@ -135,7 +161,7 @@ export class RolesService {
     }
     try {
       await this.firebase.db().ref(`${MIRROR_ROLES}/${this.safeKey(id)}`).set(
-        this.buildRecord({ id: prev.id, name: nombre, permissions: dto?.permissions, conjunto }),
+        await this.registro({ id: prev.id, name: nombre, permissions: dto?.permissions, conjunto }),
       );
       return { success: true, message: 'Rol actualizado.' };
     } catch (err: any) {

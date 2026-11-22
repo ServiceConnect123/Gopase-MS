@@ -18,6 +18,22 @@ export const VISTAS_ASIGNABLES = [
   '/app/surveillance',
 ];
 
+/**
+ * Vistas asignables que incluye el plan de un conjunto. Mis inquilinos no depende
+ * del plan; Avisos va con Noticias (mismo alias que en el frontend).
+ */
+export function vistasDelPlan(modulosPlan: unknown): string[] {
+  const mods = Array.isArray(modulosPlan) ? modulosPlan.map((m) => String(m)) : [];
+  return VISTAS_ASIGNABLES.filter(
+    (v) => v === '/app/inquilinos' || mods.includes(v) || (v === '/app/avisos' && mods.includes('/app/noticias')),
+  );
+}
+
+/** Apaga los permisos que el plan no incluye. */
+export function recortarAlPlan<T extends { path: string; status: boolean }>(permisos: T[], permitidas: string[]): T[] {
+  return permisos.map((p) => (p.status && !permitidas.includes(p.path) ? { ...p, status: false } : p));
+}
+
 /** Versión del formato de permisos: con v2 los permisos del rol mandan en el menú. */
 export const VERSION_PERMISOS = 2;
 
