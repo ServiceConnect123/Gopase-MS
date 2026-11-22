@@ -137,3 +137,28 @@ test('roles personalizados: siempre con conjunto', async () => {
   fb.data.mirror.roles.viejo2 = { id: 'viejo2', nombre: 'Sin conjunto', permisos: [] };
   await assert.rejects(() => ctl.update(req('admin1', 'admin'), 'viejo2', { name: 'X' }));
 });
+
+test('roles de un conjunto: no se activan vistas que su plan no incluye', async () => {
+  const fb = fakeFirebase(BASE);
+  const planes = {
+    'Los Pinos': { modulos: ['/app/noticias', '/app/pqrs', '/app/reports'] },
+  };
+  const plans = { getPlanDeConjunto: async (c) => planes[c] || { modulos: [] } };
+  const svc = new RolesService(fb, plans);
+  const ctl = new RolesController(svc, fb);
+  const perms = ['/app/payments', '/app/noticias', '/app/avisos', '/app/inquilinos', '/app/kpi'].map((path) => ({ path, status: true }));
+  const r = await ctl.create(req('admin1', 'admin'), { name: 'Tesorero', permissions: perms });
+  assert.strictEqual(r.success, true);
+  const activos = fb.data.mirror.roles[r.id].permisos.filter((p) => p.status).map((p) => p.path).sort();
+  assert.deepStrictEqual(activos, ['/app/avisos', '/app/inquilinos', '/app/noticias']);
+  // Al editar también se recorta.
+  await ctl.update(req('admin1', 'admin'), r.id, { name: 'Tesorero', permissions: perms });
+  assert.ok(!fb.data.mirror.roles[r.id].permisos.some((p) => p.path === '/app/payments' && p.status));
+  // Los roles del sistema no se recortan (aplican a todos los conjuntos).
+  await ctl.update(req('root', 'superAdmin'), 'admin', { permissions: perms });
+  assert.ok(fb.data.mirror.roles.admin.permisos.some((p) => p.path === '/app/payments' && p.status));
+  // Vistas permitidas para el admin: las de su plan.
+  const v = await ctl.vistasPermitidas(req('admin1', 'admin'), 'Otro');
+  assert.strictEqual(v.conjunto, 'Los Pinos');
+  assert.deepStrictEqual(v.vistas.sort(), ['/app/avisos', '/app/inquilinos', '/app/noticias', '/app/pqrs', '/app/reports']);
+});
