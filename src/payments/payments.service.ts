@@ -1,4 +1,5 @@
 import { runFinanceChat, type ChatTurn, type OwnerRow } from './finance-chat.ai';
+import { claveCache, generarConIA, guardarCache, hoyColombia, leerCache, parsearJsonIA, reducirImagen } from '../ai/gemini';
 import { tieneCartera } from '../tenants/tenant-rules';
 import { Injectable, Logger } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
@@ -2108,7 +2109,7 @@ export class PaymentsService {
     // true => valida que el destino del comprobante coincida con la cuenta
     // esperada (corre análisis forense aunque no se pida el forense completo).
     validarDestino?: boolean;
-  }): Promise<{ success: boolean; message?: string; monto?: number; analysis?: any }> {
+  }): Promise<{ success: boolean; message?: string; monto?: number; analysis?: any; iaNoDisponible?: boolean; motivo?: string }> {
     if (!input.imageBase64) return { success: false, message: 'Imagen vacía.' };
     const secrets = await this.properties.getSecretsByConjunto(input.conjunto);
     const geminiKey = secrets?.geminiKey || '';
@@ -2128,36 +2129,46 @@ export class PaymentsService {
       } catch { /* si falla, se usa la llave del conjunto */ }
     }
 
-    const image = input.imageBase64.includes(',') ? input.imageBase64.split(',').pop()! : input.imageBase64;
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${geminiKey}`;
+    // Imagen reducida (menos cuota y más rápido) y caché por imagen: el mismo
+    // comprobante no se le vuelve a preguntar a la IA durante unas horas.
+    const img = await reducirImagen(input.imageBase64);
+    const soloMonto = !!input.soloExtraerMonto && !input.validarDestino;
+    const kCache = claveCache('comprobante', soloMonto ? 'monto' : 'forense', cuentaEsperada, img.data);
+    const enCache = leerCache<{ success: boolean; monto?: number; analysis?: any }>(kCache);
+    if (enCache) return enCache;
+
+    const hoy = hoyColombia();
+    const noDisponible = (motivo?: string, message?: string) => ({
+      success: false,
+      iaNoDisponible: motivo !== 'clave',
+      motivo,
+      message: message || 'La lectura automática del comprobante no está disponible en este momento.',
+    });
 
     // Modo admin: solo extraer el monto (salvo que se pida validar destino).
-    if (input.soloExtraerMonto && !input.validarDestino) {
-      try {
-        const resp = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{
-              parts: [
-                { text: `Extrae SOLO el monto total pagado de este comprobante colombiano y responde únicamente con el número entero en pesos, sin puntos ni comas ni símbolos. En Colombia el punto separa miles y la coma decimales (ej: "60.000,00"=60000, "$120.000"=120000). Si no lo identificas, responde 0.` },
-                { inlineData: { mimeType: 'image/jpeg', data: image } },
-              ],
-            }],
-          }),
-        });
-        const r: any = await resp.json();
-        const t = (r?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
-        const monto = parseInt(String(t).replace(/\D/g, ''), 10) || 0;
-        return { success: true, monto };
-      } catch (e: any) {
-        return { success: false, message: e?.message || 'Error en OCR' };
-      }
+    if (soloMonto) {
+      const r = await generarConIA({
+        apiKey: geminiKey,
+        json: true,
+        timeoutMs: 15000,
+        deadlineMs: 25000,
+        parts: [
+          { text: 'Extrae SOLO el monto total pagado de este comprobante colombiano. Responde únicamente JSON {"monto": numero_entero_en_pesos}. En Colombia el punto separa miles y la coma decimales (ej: "60.000,00"=60000, "$120.000"=120000). Si no lo identificas, {"monto": 0}.' },
+          { inlineData: { mimeType: img.mimeType, data: img.data } },
+        ],
+      });
+      if (!r.ok) return noDisponible(r.motivo, r.message);
+      const j = parsearJsonIA<{ monto?: number }>(r.text || '');
+      const monto = Math.max(0, Math.round(Number(j?.monto ?? String(r.text).replace(/\D/g, '')) || 0));
+      const out = { success: true, monto };
+      guardarCache(kCache, out);
+      return out;
     }
 
     // Modo propietario: análisis forense completo.
-    try {
-      const prompt = `Eres un perito forense digital especializado en detectar fraude en comprobantes de pago bancarios (Nequi, Daviplata, Bancolombia, transferencias Bre-B en Colombia). Analiza esta imagen con rigor y responde SOLO en JSON exacto (sin markdown, sin backticks):
+    const prompt = `Fecha de hoy: ${hoy} (Colombia). Un comprobante con fecha igual o anterior a hoy es normal; no lo marques como sospechoso por el año.
+
+Eres un perito forense digital especializado en detectar fraude en comprobantes de pago bancarios (Nequi, Daviplata, Bancolombia, transferencias Bre-B en Colombia). Analiza esta imagen con rigor y responde SOLO en JSON exacto (sin markdown, sin backticks):
 {"esComprobante": true/false, "esAutentico": true/false, "tipoAlteracion": "ninguna|edicion|generada_ia|sospechosa", "nivelRiesgo": "bajo|medio|alto", "destinatarioCorrecto": true/false, "monto": numero, "motivo": "texto"}
 
 Definiciones:
@@ -2180,42 +2191,36 @@ Definiciones:
 7. motivo: explica en 1-2 frases concretas QUÉ señales viste (dónde y por qué). Si es auténtico, di "Sin señales de alteración".
 
 Sé conservador: si NO hay evidencia real de manipulación, marca esAutentico=true y tipoAlteracion="ninguna". No inventes fraude donde no lo hay. Responde SOLO el JSON.`;
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: image } }] }],
-        }),
-      });
-      const result: any = await response.json();
-      const text = (result?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
-      let analysis: any = null;
-      try {
-        const cleanJson = String(text).replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        analysis = JSON.parse(cleanJson);
-      } catch {
-        // Fallback: al menos intentar el monto.
-        const monto = parseInt(String(text).replace(/\D/g, ''), 10) || 0;
-        return { success: true, monto, analysis: null };
-      }
-      return {
-        success: true,
-        monto: analysis?.monto || 0,
-        analysis: {
-          esComprobante: !!analysis.esComprobante,
-          esAutentico: !!analysis.esAutentico,
-          tipoAlteracion: analysis.tipoAlteracion || (analysis.esAutentico ? 'ninguna' : 'sospechosa'),
-          nivelRiesgo: analysis.nivelRiesgo || (analysis.esAutentico ? 'bajo' : 'medio'),
-          destinatarioCorrecto: !!analysis.destinatarioCorrecto,
-          motivo: analysis.motivo || '',
-          checkedDestinatario: !!cuentaEsperada,
-          cuentaEsperada,
-        },
-      };
-    } catch (e: any) {
-      return { success: false, message: e?.message || 'Error analizando el comprobante' };
+    const r = await generarConIA({
+      apiKey: geminiKey,
+      json: true,
+      timeoutMs: 20000,
+      deadlineMs: 35000,
+      parts: [{ text: prompt }, { inlineData: { mimeType: img.mimeType, data: img.data } }],
+    });
+    if (!r.ok) return noDisponible(r.motivo, r.message);
+    const analysis = parsearJsonIA<any>(r.text || '');
+    if (!analysis) {
+      // La IA respondió pero no en JSON: al menos intentar el monto.
+      const monto = parseInt(String(r.text).replace(/\D/g, ''), 10) || 0;
+      return { success: true, monto, analysis: null };
     }
+    const out = {
+      success: true,
+      monto: Math.max(0, Math.round(Number(analysis?.monto) || 0)),
+      analysis: {
+        esComprobante: !!analysis.esComprobante,
+        esAutentico: !!analysis.esAutentico,
+        tipoAlteracion: analysis.tipoAlteracion || (analysis.esAutentico ? 'ninguna' : 'sospechosa'),
+        nivelRiesgo: analysis.nivelRiesgo || (analysis.esAutentico ? 'bajo' : 'medio'),
+        destinatarioCorrecto: !!analysis.destinatarioCorrecto,
+        motivo: analysis.motivo || '',
+        checkedDestinatario: !!cuentaEsperada,
+        cuentaEsperada,
+      },
+    };
+    guardarCache(kCache, out);
+    return out;
   }
 
   /**
