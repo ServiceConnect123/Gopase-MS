@@ -188,8 +188,9 @@ test('registra el pago En revisión y responde en privado', async () => {
 });
 
 test('el mismo mensaje o el mismo comprobante no se registran dos veces', async () => {
-  const { svc, creados } = armar();
+  const { svc, creados, fb } = armar();
   await svc.procesar(msg());
+  fb.data.mirror.pagos = { p1: { id: 'p1', estado: 'Pendiente' } };
   assert.strictEqual((await svc.procesar(msg())).estado, 'duplicado');
   const otro = await svc.procesar(msg({ id: 'M2' }));
   assert.deepStrictEqual([otro.estado, creados.length], ['duplicado', 1]);
@@ -247,4 +248,70 @@ test('si createPayments rechaza (meses no seguidos) se informa', async () => {
   const { svc } = armar({ crear: () => ({ success: false, ids: [], message: 'Primero paga marzo.' }) });
   const s = await svc.procesar(msg());
   assert.deepStrictEqual([s.estado, s.respuesta], ['rechazado', 'No pude registrar el pago: Primero paga marzo.']);
+});
+
+// ---------------------------------------------------------------- ajustes
+test('meses mal escritos se corrigen; nombres cortos de usuario no', () => {
+  const r = P.parsearMensajePago('#pago alex97 novimbre');
+  assert.deepStrictEqual([meses(r), r.desconocidos], [['Noviembre'], []]);
+  assert.deepStrictEqual(meses(P.parsearMensajePago('#pago\nMes: dicienbre')), ['Diciembre']);
+  assert.deepStrictEqual(meses(P.parsearMensajePago('#pago\nMes: setiembre')), ['Septiembre']);
+  assert.deepStrictEqual(meses(P.parsearMensajePago('#pago\nMes: agsto')), ['Agosto']); // en la línea Mes: también 5 letras
+  // "julia" no es julio (5 letras, sin etiqueta): es el usuario.
+  const u = P.parsearMensajePago('#pago julia nov');
+  assert.deepStrictEqual([u.identificador, meses(u)], [{ tipo: 'usuario', valor: 'julia' }, ['Noviembre']]);
+});
+
+test('palabras que no se entienden se reportan (en vez de suponer el mes)', () => {
+  const r = P.parsearMensajePago('#pago alex97 nvbre');
+  assert.deepStrictEqual([meses(r), r.desconocidos], [[], ['nvbre']]);
+  assert.deepStrictEqual(P.parsearMensajePago('#pago\nMes: xyz').desconocidos, ['xyz']);
+  // Relleno común no cuenta como desconocido.
+  assert.deepStrictEqual(P.parsearMensajePago('#pago de noviembre, gracias alex97').desconocidos, []);
+});
+
+test('el servicio pide corregir si no entiende una palabra', async () => {
+  const { svc, creados } = armar();
+  const s = await svc.procesar(msg({ texto: '#pago alex97 nvbre' }));
+  assert.deepStrictEqual([s.estado, s.reaccion, creados.length], ['rechazado', '❓', 0]);
+  assert.match(s.respuesta, /No entendí «nvbre»/);
+});
+
+test('se puede reenviar el comprobante si el pago anterior fue rechazado', async () => {
+  const { svc, creados, fb } = armar();
+  await svc.procesar(msg());
+  fb.data.mirror.pagos = { p1: { id: 'p1', estado: 'Pendiente' } };
+  assert.strictEqual((await svc.procesar(msg({ id: 'M2' }))).estado, 'duplicado');
+  fb.data.mirror.pagos.p1.estado = 'Rechazado';
+  assert.strictEqual((await svc.procesar(msg({ id: 'M3' }))).estado, 'registrado');
+  assert.strictEqual(creados.length, 2);
+});
+
+test('lectura de WhatsApp: solo lo permitido; exceso a la cola; cola llena se anota', async () => {
+  process.env.WSP_LECTURA_MAX_MIN = '5';
+  process.env.WSP_LECTURA_MAX_COLA = '50';
+  delete require.cache[require.resolve(path.join(__dirname, '../dist/whatsapp/whatsapp.service.js'))];
+  const { WhatsappService } = require(path.join(__dirname, '../dist/whatsapp/whatsapp.service.js'));
+  const escritos = [];
+  const fb = { isEnabled: () => false, liveVal: async () => null, db: () => ({ ref: (p) => ({ set: async (v) => escritos.push([p, v]) }) }) };
+  const w = new WhatsappService(fb);
+  const acks = [];
+  const session = { key: 'villa mayra', sock: { sendMessageAck: async (n) => acks.push(n) } };
+  w.configurarLectura('Villa Mayra', { grupos: ['123@g.us'], chats: false });
+  const nodo = (from, extra = {}) => ({ attrs: { from, ...extra } });
+  assert.strictEqual(w.decisionLectura(session, nodo('999@g.us')), 'ignorar');
+  assert.strictEqual(w.decisionLectura(session, nodo('573001234567@s.whatsapp.net')), 'ignorar'); // chats apagado
+  assert.strictEqual(w.decisionLectura(session, nodo('123@g.us', { category: 'peer' })), 'ignorar');
+  for (let i = 0; i < 5; i++) assert.strictEqual(w.decisionLectura(session, nodo('123@g.us')), 'leer');
+  assert.strictEqual(w.decisionLectura(session, nodo('123@g.us')), 'encolar');
+  const leidos = [];
+  for (let i = 0; i < 52; i++) w.encolarLectura(session, [(n) => leidos.push(n)], nodo('123@g.us'));
+  assert.strictEqual(acks.length, 2); // 50 en cola, 2 confirmados sin leer
+  assert.strictEqual(w.decisionLectura(session, nodo('123@g.us')), 'encolar'); // con cola, respeta el orden
+  const q = w.colasLectura.get('villa mayra');
+  clearInterval(q.timer);
+  clearTimeout(w.descartesTimer);
+  assert.strictEqual(w.descartesPendientes.get('villa mayra').n, 2);
+  w.configurarLectura('Villa Mayra', { grupos: [], chats: false });
+  assert.strictEqual(w.decisionLectura(session, nodo('123@g.us')), 'ignorar');
 });
