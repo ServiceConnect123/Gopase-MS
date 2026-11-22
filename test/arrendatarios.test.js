@@ -57,7 +57,8 @@ test('pago delegado: solo vigente, delegado y por la cuenta de su propietario', 
 });
 
 test('la sesión del arrendatario no dura más que su arriendo', () => {
-  const now = new Date(2026, 0, 1, 12, 0, 0);
+  // Mediodía en Colombia (el fin del día también es hora Colombia, no del servidor).
+  const now = new Date('2026-01-01T12:00:00-05:00');
   assert.strictEqual(rules.segundosHastaFin('', now), null);
   assert.strictEqual(rules.segundosHastaFin('2026-01-01', now), 11 * 3600 + 59 * 60 + 59);
   assert.strictEqual(rules.segundosHastaFin('2025-12-01', now), 60, 'mínimo 60 s');
@@ -235,4 +236,12 @@ test('el guard corta la sesión del arrendatario retirado o vencido', async () =
   const conMensaje = (re) => (e) => (typeof e?.message === 'string' ? re.test(e.message) : true);
   await assert.rejects(guard.canActivate(ctx('beto')), conMensaje(/retirado/));
   await assert.rejects(guard.canActivate(ctx('caro')), conMensaje(/venció/));
+});
+
+test('hoy y la hora se calculan en Colombia aunque el servidor esté en UTC', () => {
+  // 21 nov 2026, 8:30 p. m. en Colombia = 22 nov 01:30 UTC.
+  const noche = new Date('2026-11-22T01:30:00Z');
+  assert.strictEqual(rules.hoyISO(noche), '2026-11-21');
+  assert.strictEqual(rules.horaColombia(noche), '8:30 p. m.');
+  assert.strictEqual(rules.horaColombia(new Date('2026-11-21T14:05:00Z')), '9:05 a. m.');
 });

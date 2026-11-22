@@ -58,10 +58,27 @@ export function normFecha(raw: unknown): string {
   return `${m[1]}-${m[2]}-${m[3]}`;
 }
 
-/** Fecha local de hoy en 'YYYY-MM-DD'. */
+/**
+ * Zona horaria de los conjuntos (Colombia, UTC-5 todo el año, sin horario de
+ * verano). El servidor corre en UTC: sin esto, desde las 7 p. m. hora Colombia
+ * "hoy" ya sería mañana (arriendos, estadías e invitados se cerraban antes).
+ */
+export const ZONA_COLOMBIA = 'America/Bogota';
+const OFFSET_COLOMBIA = '-05:00';
+
+/** Fecha de hoy en Colombia, 'YYYY-MM-DD'. */
 export function hoyISO(now: Date = new Date()): string {
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
+  // en-CA da el formato AAAA-MM-DD.
+  return new Intl.DateTimeFormat('en-CA', { timeZone: ZONA_COLOMBIA, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+}
+
+/** Hora de Colombia para mostrar: "3:16 p. m.". */
+export function horaColombia(now: Date = new Date()): string {
+  const partes = new Intl.DateTimeFormat('en-US', { timeZone: ZONA_COLOMBIA, hour: 'numeric', minute: '2-digit', hour12: true }).formatToParts(now);
+  const h = partes.find((x) => x.type === 'hour')?.value ?? '';
+  const m = partes.find((x) => x.type === 'minute')?.value ?? '';
+  const pm = (partes.find((x) => x.type === 'dayPeriod')?.value ?? '').toUpperCase() === 'PM';
+  return `${h}:${m} ${pm ? 'p. m.' : 'a. m.'}`;
 }
 
 /** Estado del arriendo hoy. Las fechas son inclusivas (el día `fin` aún tiene acceso). */
@@ -100,8 +117,8 @@ export function mensajeAccesoInquilino(datos: DatosInquilino | null | undefined,
 export function segundosHastaFin(fin: unknown, now: Date = new Date()): number | null {
   const f = normFecha(fin);
   if (!f) return null;
-  const [y, m, d] = f.split('-').map(Number);
-  const finDia = new Date(y, m - 1, d, 23, 59, 59).getTime();
+  // Fin del día en hora Colombia (no del servidor).
+  const finDia = Date.parse(`${f}T23:59:59${OFFSET_COLOMBIA}`);
   return Math.max(60, Math.floor((finDia - now.getTime()) / 1000));
 }
 
