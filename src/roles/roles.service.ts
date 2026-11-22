@@ -6,7 +6,8 @@ import { VERSION_PERMISOS, esRolSistema, limpiarPermisos, rolEsDelSistema } from
  * Roles (RTDB mirror/roles). El espejo guarda { id, nombre, permisos } y aquí se
  * expone { id, name, permissions } más:
  *   - sistema: rol del sistema (admin, vigilante, propietario, inquilino, superAdmin).
- *   - conjunto: '' = global; si no, el rol personalizado es de ese conjunto.
+ *   - conjunto: conjunto del rol personalizado ('' solo en los del sistema o en
+ *     roles antiguos que aún no tienen conjunto).
  *   - v: 2 cuando el rol se guardó con el editor nuevo (sus permisos mandan en el menú).
  */
 const MIRROR_ROLES = 'mirror/roles';
@@ -85,12 +86,12 @@ export class RolesService {
     return snap.exists() ? this.toDto(snap.val()) : null;
   }
 
-  /** Ya existe un rol con ese nombre visible para el conjunto (sistema, global o del mismo conjunto). */
+  /** Ya existe un rol con ese nombre en el conjunto (o es un nombre del sistema). */
   async nombreOcupado(nombre: string, conjunto: string, exceptoId = ''): Promise<boolean> {
     const n = norm(nombre);
     if (esRolSistema(n)) return true;
     const todos = await this.list();
-    return todos.some((r) => r.id !== exceptoId && norm(r.name) === n && (!r.conjunto || !conjunto || norm(r.conjunto) === norm(conjunto)));
+    return todos.some((r) => r.id !== exceptoId && !r.sistema && norm(r.name) === n && norm(r.conjunto) === norm(conjunto));
   }
 
   /**
@@ -122,18 +123,19 @@ export class RolesService {
   }
 
   /** Reescribe nombre y permisos. Un rol del sistema conserva su nombre; el conjunto no cambia. */
-  async update(id: string, dto: any): Promise<{ success: boolean; message?: string }> {
+  async update(id: string, dto: any, opts: { conjunto?: string } = {}): Promise<{ success: boolean; message?: string }> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
     const prev = await this.getById(id);
     if (!prev) return { success: false, message: 'El rol no existe.' };
     const nombre = prev.sistema ? prev.name : String(dto?.name ?? prev.name).trim();
+    const conjunto = prev.sistema ? '' : prev.conjunto || String(opts.conjunto ?? '');
     if (!nombre) return { success: false, message: 'El nombre del rol es requerido.' };
-    if (!prev.sistema && (await this.nombreOcupado(nombre, prev.conjunto, prev.id))) {
+    if (!prev.sistema && (await this.nombreOcupado(nombre, conjunto, prev.id))) {
       return { success: false, message: `Ya existe un rol llamado «${nombre}».` };
     }
     try {
       await this.firebase.db().ref(`${MIRROR_ROLES}/${this.safeKey(id)}`).set(
-        this.buildRecord({ id: prev.id, name: nombre, permissions: dto?.permissions, conjunto: prev.conjunto }),
+        this.buildRecord({ id: prev.id, name: nombre, permissions: dto?.permissions, conjunto }),
       );
       return { success: true, message: 'Rol actualizado.' };
     } catch (err: any) {

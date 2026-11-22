@@ -35,6 +35,7 @@ const BASE = {
       superAdmin: { id: 'superAdmin', nombre: 'superAdmin', permisos: [] },
       c1: { id: 'c1', nombre: 'Contador', permisos: [], conjunto: 'Los Pinos' },
       c2: { id: 'c2', nombre: 'Portero nocturno', permisos: [], conjunto: 'Otro' },
+      viejo: { id: 'viejo', nombre: 'Residente antiguo', permisos: [] },
     },
   },
 };
@@ -66,7 +67,7 @@ test('roles del sistema', () => {
   assert.ok(!reglas.esRolSistema('Contador'));
 });
 
-test('list: el admin ve los del sistema, globales y los de su conjunto', async () => {
+test('list: el admin ve los del sistema y los de su conjunto (no los globales antiguos)', async () => {
   const { ctl } = armar();
   const r = await ctl.list(req('admin1', 'admin'));
   const nombres = r.data.map((x) => x.name).sort();
@@ -74,7 +75,7 @@ test('list: el admin ve los del sistema, globales y los de su conjunto', async (
   assert.strictEqual(r.data.find((x) => x.name === 'admin').sistema, true);
   assert.strictEqual(r.data.find((x) => x.name === 'Contador').sistema, false);
   const todos = await ctl.list(req('root', 'superAdmin'));
-  assert.strictEqual(todos.data.length, 5);
+  assert.strictEqual(todos.data.length, 6);
 });
 
 test('roles del sistema: solo el superAdmin los edita y nadie los elimina', async () => {
@@ -119,4 +120,20 @@ test('el superAdmin crea el registro de un rol del sistema que falta (inquilino)
   assert.strictEqual(r.id, 'inquilino');
   assert.strictEqual(fb.data.mirror.roles.inquilino.conjunto, '');
   assert.match((await ctl.create(req('root', 'superAdmin'), { name: 'admin' })).message, /ya existe/);
+});
+
+test('roles personalizados: siempre con conjunto', async () => {
+  const { ctl, fb } = armar();
+  await assert.rejects(() => ctl.create(req('root', 'superAdmin'), { name: 'Revisor', permissions: [] }));
+  const ok = await ctl.create(req('root', 'superAdmin'), { name: 'Revisor', conjunto: 'Otro', permissions: [] });
+  assert.strictEqual(ok.success, true);
+  assert.strictEqual(fb.data.mirror.roles[ok.id].conjunto, 'Otro');
+  // El superAdmin asigna conjunto a un rol antiguo sin conjunto; luego no cambia.
+  await ctl.update(req('root', 'superAdmin'), 'viejo', { name: 'Residente antiguo', conjunto: 'Los Pinos', permissions: [] });
+  assert.strictEqual(fb.data.mirror.roles.viejo.conjunto, 'Los Pinos');
+  await ctl.update(req('root', 'superAdmin'), 'viejo', { name: 'Residente antiguo', conjunto: 'Otro', permissions: [] });
+  assert.strictEqual(fb.data.mirror.roles.viejo.conjunto, 'Los Pinos');
+  // El admin no puede tocar roles sin conjunto.
+  fb.data.mirror.roles.viejo2 = { id: 'viejo2', nombre: 'Sin conjunto', permisos: [] };
+  await assert.rejects(() => ctl.update(req('admin1', 'admin'), 'viejo2', { name: 'X' }));
 });
