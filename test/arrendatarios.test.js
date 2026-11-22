@@ -311,3 +311,36 @@ test('createPayments guarda pagadoPor y el recibo muestra "Pagado por"', async (
   const r2 = await s.createPayments({ usuario: 'carlos', montoPerMonth: 1, year: 2026, estado: 'Pendiente', referencia: '', concepto: 'Pago Y' });
   assert.strictEqual(data.mirror.pagos[r2.ids[0]].pagadoPor, undefined);
 });
+
+// ---- Inicio del vigilante: los inquilinos vigentes con su unidad y su propietario ----
+test('Inicio del vigilante incluye inquilinos vigentes con datos del propietario', async () => {
+  const { HomeService } = require(path.join(__dirname, '../dist/home/home.service.js'));
+  const hoy = new Date().toISOString().slice(0, 10);
+  const users = [
+    { usuario: 'carlos', nombre: 'Carlos Pérez', rol: 'propietario', conjunto: 'Villa', parcela: 'Casa 7', phone: '3001112233' },
+    { usuario: 'ana', nombre: 'Ana Gómez', rol: 'inquilino', conjunto: 'Villa', parcela: 'Casa 5', placa1: 'KLM482',
+      inquilino: { propietario: 'carlos', inicio: '2020-01-01', fin: '2099-12-31' } },
+    { usuario: 'luis', nombre: 'Luis', rol: 'inquilino', conjunto: 'Villa', inquilino: { propietario: 'carlos', inicio: '2020-01-01', revocado: true } },
+    { usuario: 'vigi', nombre: 'Vigi', rol: 'vigilante', conjunto: 'Villa' },
+  ];
+  const payments = {
+    readCollection: async (c) => (c === 'usuarios' ? users : []),
+    getAlDiaReport: async () => ({ propietarios: [{ usuario: 'carlos', alDia: true }], totalAlDia: 1, totalMora: 0 }),
+  };
+  const svc = new HomeService({}, payments);
+  svc.readReportesConTope = async () => [];
+  const r = await svc.getDashboard({ role: 'vigilante', complex: 'Villa', username: 'vigi', year: Number(hoy.slice(0, 4)) });
+  const ana = r.usuarios.find((u) => u.username === 'ana');
+  assert.ok(ana, 'el inquilino vigente aparece');
+  assert.strictEqual(ana.tipo, 'inquilino');
+  assert.strictEqual(ana.unidad, 'Casa 7', 'unidad del propietario');
+  assert.strictEqual(ana.propietarioNombre, 'Carlos Pérez');
+  assert.strictEqual(ana.propietarioTelefono, '3001112233');
+  assert.strictEqual(ana.paymentStatus, 'Al día', 'estado de pago de la unidad');
+  assert.strictEqual(ana.placa1, 'KLM482');
+  assert.ok(!r.usuarios.some((u) => u.username === 'luis'), 'con acceso retirado no aparece');
+  assert.strictEqual(r.counts.total, 1, 'los conteos siguen siendo de propietarios');
+  // El admin no recibe inquilinos en esta lista.
+  const a = await svc.getDashboard({ role: 'admin', complex: 'Villa', username: 'x', year: Number(hoy.slice(0, 4)) });
+  assert.ok(!a.usuarios.some((u) => u.tipo === 'inquilino'));
+});

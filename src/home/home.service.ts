@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { tieneCartera } from '../tenants/tenant-rules';
+import { conPropietario, esInquilino, estadoInquilino, tieneCartera } from '../tenants/tenant-rules';
 import { SheetsService } from '../sheets/sheets.service';
 import { PaymentsService } from '../payments/payments.service';
 
@@ -24,6 +24,15 @@ export interface DashboardUser {
   placa1: string;
   placa2: string;
   fechaIngreso: string;
+  /** Unidad (casa/apto). En el inquilino, la de su propietario. */
+  unidad?: string;
+  /** 'propietario' | 'inquilino' | otro rol (para filtrar en portería). */
+  tipo?: string;
+  /** Solo inquilinos: su propietario y el estado del arriendo. */
+  propietarioUsuario?: string;
+  propietarioNombre?: string;
+  propietarioTelefono?: string;
+  estadoArriendo?: string;
   paymentStatus?: 'Al día' | 'Pendiente';
   paymentAmount?: number;
 }
@@ -83,6 +92,8 @@ export class HomeService {
       placa1: String(u.placa1 ?? ''),
       placa2: String(u.placa2 ?? ''),
       fechaIngreso: String(u.fechaIngreso ?? ''),
+      unidad: String(u.parcela ?? ''),
+      tipo: String(u.rol ?? '').toLowerCase(),
     };
   }
 
@@ -340,6 +351,29 @@ export class HomeService {
       const paymentStatus: 'Al día' | 'Pendiente' = alDia ? 'Al día' : 'Pendiente';
       return { ...u, paymentStatus, paymentAmount: montoDelMes(u.username) };
     });
+
+    // Portería: también los inquilinos vigentes (o por empezar), con la unidad y
+    // los datos de su propietario; el estado de pago es el de la unidad.
+    if (role === 'vigilante') {
+      const porDueno = new Map(usersWithStatus.map((u) => [normU(u.username), u]));
+      for (const raw of conPropietario(userDocs)) {
+        if (!esInquilino(raw?.rol)) continue;
+        const estado = estadoInquilino(raw.inquilino || {});
+        if (estado !== 'activo' && estado !== 'programado') continue;
+        const dueno = porDueno.get(normU(raw.propietarioUsuario));
+        if (!dueno) continue; // de otro conjunto o sin propietario
+        usersWithStatus.push({
+          ...this.mapUsuario(raw),
+          tipo: 'inquilino',
+          propietarioUsuario: String(raw.propietarioUsuario || ''),
+          propietarioNombre: String(raw.propietarioNombre || ''),
+          propietarioTelefono: String(raw.propietarioTelefono || ''),
+          estadoArriendo: estado,
+          paymentStatus: dueno.paymentStatus,
+          paymentAmount: dueno.paymentAmount,
+        });
+      }
+    }
 
     usersWithStatus.sort((a, b) => {
       const order: Record<string, number> = { Pendiente: 0, 'Sin pagos': 1, 'Al día': 2 };
