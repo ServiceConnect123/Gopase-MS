@@ -34,7 +34,7 @@ export class PaymentsController {
   ) {}
 
   /**
-   * Arrendatario: solo puede actuar sobre la cuenta de SU propietario y solo si
+   * Inquilino: solo puede actuar sobre la cuenta de SU propietario y solo si
    * este le delegó el pago de la administración y el arriendo está vigente.
    */
   private async assertInquilinoPagaPor(req: any, cuenta: string): Promise<void> {
@@ -375,7 +375,7 @@ export class PaymentsController {
       periodos?: Array<{ mes: string; anio: number }>;
     },
   ) {
-    // Arrendatario: solo registra pagos de la unidad de su propietario si este
+    // Inquilino: solo registra pagos de la unidad de su propietario si este
     // se lo delegó. Siempre quedan Pendientes (el admin los confirma).
     if (String(req?.user?.rol || '').toLowerCase() === 'inquilino') {
       await this.assertInquilinoPagaPor(req, body?.usuario);

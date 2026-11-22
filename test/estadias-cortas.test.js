@@ -115,7 +115,7 @@ test('sin habilitar en el conjunto no se pueden registrar', async () => {
   assert.match(r.message, /no tiene habilitadas/);
 });
 
-test('solo el propietario registra estadías (no el arrendatario)', async () => {
+test('solo el propietario registra estadías (no el inquilino)', async () => {
   const { svc } = escenario({ permitidas: true });
   assert.match((await svc.crear('ana', huesped())).message, /Solo el propietario/);
 });

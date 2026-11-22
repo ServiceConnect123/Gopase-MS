@@ -1,4 +1,4 @@
-// Arrendatarios (rol "inquilino") que registra el propietario de una unidad.
+// Inquilinos (rol "inquilino") que registra el propietario de una unidad.
 // Ejecutar: npm run test:wsp (compila y corre con el runner nativo de Node).
 const test = require('node:test');
 const assert = require('node:assert');
@@ -56,7 +56,7 @@ test('pago delegado: solo vigente, delegado y por la cuenta de su propietario', 
   assert.strictEqual(rules.puedePagarPorCuenta({ ...base, rol: 'propietario' }, 'carlos', hoy), false);
 });
 
-test('la sesión del arrendatario no dura más que su arriendo', () => {
+test('la sesión del inquilino no dura más que su arriendo', () => {
   // Mediodía en Colombia (el fin del día también es hora Colombia, no del servidor).
   const now = new Date('2026-01-01T12:00:00-05:00');
   assert.strictEqual(rules.segundosHastaFin('', now), null);
@@ -131,7 +131,7 @@ function escenario() {
 
 const nuevo = { nombre: 'Ana Gómez', phone: '3001234567', inicio: '2020-01-01', fin: '', pagaAdministracion: true };
 
-test('el propietario crea un arrendatario en SU unidad y se le envía el acceso', async () => {
+test('el propietario crea un inquilino en SU unidad y se le envía el acceso', async () => {
   const { fb, svc, enviados } = escenario();
   const r = await svc.crear('carlos', nuevo);
   assert.ok(r.success, r.message);
@@ -156,7 +156,7 @@ test('usuario único aunque se repita el nombre', async () => {
   assert.strictEqual(r2.usuario, 'anagomez2');
 });
 
-test('solo un propietario con unidad puede crear arrendatarios', async () => {
+test('solo un propietario con unidad puede crear inquilinos', async () => {
   const { svc } = escenario();
   assert.match((await svc.crear('laura', nuevo)).message, /Solo un propietario/);
   assert.match((await svc.crear('sinunidad', nuevo)).message, /registra tu unidad/);
@@ -164,7 +164,7 @@ test('solo un propietario con unidad puede crear arrendatarios', async () => {
   assert.match((await svc.crear('carlos', { ...nuevo, inicio: '' })).message, /fecha de inicio/);
 });
 
-test('otro propietario no puede tocar el arrendatario', async () => {
+test('otro propietario no puede tocar el inquilino', async () => {
   const { fb, svc } = escenario();
   fb.data.mirror.usuarios.pedro = { usuario: 'pedro', rol: 'propietario', conjunto: 'Villa Test', parcela: 'Casa 9' };
   await svc.crear('carlos', nuevo);
@@ -197,19 +197,19 @@ test('editar fechas y permisos valida el rango', async () => {
   assert.strictEqual(d.pagaAdministracion, true, 'conserva lo que no se envió');
 });
 
-test('los arrendatarios no aparecen en la cartera de Pagos', async () => {
+test('los inquilinos no aparecen en la cartera de Pagos', async () => {
   const { fb, svc } = escenario();
   await svc.crear('carlos', nuevo);
   const payments = new PaymentsService(fb, { getDiasGraciaPropietario: async () => 10 }, {}, {});
   const lista = await payments.getAdminList('Villa Test', new Date().getFullYear(), false);
   const usuarios = lista.map((x) => x.username);
   assert.ok(usuarios.includes('carlos'));
-  assert.ok(!usuarios.includes('anagomez'), 'el arrendatario no tiene cartera propia');
+  assert.ok(!usuarios.includes('anagomez'), 'el inquilino no tiene cartera propia');
   const reporte = await payments.getAlDiaReport('Villa Test', false);
   assert.ok(!reporte.propietarios.some((p) => p.usuario === 'anagomez'));
 });
 
-test('el guard corta la sesión del arrendatario retirado o vencido', async () => {
+test('el guard corta la sesión del inquilino retirado o vencido', async () => {
   const { JwtAuthGuard } = require(path.join(__dirname, '../dist/auth/jwt-auth.guard.js'));
   const usuarios = {
     ana: { rol: 'inquilino', inquilino: { propietario: 'carlos', inicio: '2020-01-01' } },
@@ -244,4 +244,26 @@ test('hoy y la hora se calculan en Colombia aunque el servidor esté en UTC', ()
   assert.strictEqual(rules.hoyISO(noche), '2026-11-21');
   assert.strictEqual(rules.horaColombia(noche), '8:30 p. m.');
   assert.strictEqual(rules.horaColombia(new Date('2026-11-21T14:05:00Z')), '9:05 a. m.');
+});
+
+// ---- El inquilino toma la propiedad y los datos de su propietario ----
+test('conPropietario: el inquilino hereda unidad, conjunto y contacto del propietario en vivo', () => {
+  const { conPropietario } = require(path.join(__dirname, '../dist/tenants/tenant-rules.js'));
+  const usuarios = [
+    { usuario: 'carlos', rol: 'propietario', nombre: 'Carlos Pérez', phone: '3001112233', email: 'c@x.co', parcela: 'Casa 7', conjunto: 'Villa Mayra' },
+    { usuario: 'ana', rol: 'inquilino', nombre: 'Ana', parcela: 'Casa 5', conjunto: 'Villa Mayra', inquilino: { propietario: 'carlos', propietarioNombre: 'Carlos' } },
+    { usuario: 'huerfano', rol: 'inquilino', nombre: 'Luis', parcela: 'Casa 9', inquilino: { propietario: 'nadie', propietarioNombre: 'Nadie' } },
+    { usuario: 'vigi', rol: 'vigilante', nombre: 'Vigi' },
+  ];
+  const r = conPropietario(usuarios);
+  const ana = r.find((u) => u.usuario === 'ana');
+  assert.strictEqual(ana.parcela, 'Casa 7', 'la unidad es la del propietario actual');
+  assert.strictEqual(ana.propietarioNombre, 'Carlos Pérez');
+  assert.strictEqual(ana.propietarioTelefono, '3001112233');
+  assert.strictEqual(ana.inquilino.propietarioNombre, 'Carlos Pérez');
+  const luis = r.find((u) => u.usuario === 'huerfano');
+  assert.strictEqual(luis.parcela, 'Casa 9', 'sin propietario conserva lo suyo');
+  assert.strictEqual(luis.propietarioNombre, 'Nadie');
+  assert.strictEqual(r.find((u) => u.usuario === 'vigi'), usuarios[3]);
+  assert.strictEqual(usuarios[1].parcela, 'Casa 5', 'no modifica el original');
 });

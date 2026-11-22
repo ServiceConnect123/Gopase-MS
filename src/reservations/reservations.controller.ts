@@ -45,7 +45,7 @@ export class ReservationsController {
   })
   @Post()
   async create(@Body() body: any, @Req() req: any) {
-    // Arrendatario: solo reserva si el propietario se lo permitió y su arriendo está vigente.
+    // Inquilino: solo reserva si el propietario se lo permitió y su arriendo está vigente.
     if (esInquilino(req?.user?.rol) && this.firebase?.isEnabled()) {
       const usuarios = (await this.firebase.liveVal<Record<string, any>>('mirror/usuarios')) || {};
       const yo = usuarios[String(req.user.sub || '').replace(/[.#$/\[\]]/g, '_')];

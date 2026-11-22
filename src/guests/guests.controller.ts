@@ -13,7 +13,7 @@ const esPorteria = (req: any) => ['vigilante', 'admin', 'superadmin'].includes(r
 /**
  * Invitados (RTDB mirror/invitados) y su QR de acceso.
  *
- *   - Residente (propietario o arrendatario): ve, crea, comparte y anula SUS invitados.
+ *   - Residente (propietario o inquilino): ve, crea, comparte y anula SUS invitados.
  *   - Portería y administración: ven los de SU conjunto, validan el QR y registran la entrada.
  *   - Invitado: sin sesión, con su enlace firmado (GET /guests/acceso?c=&s=).
  * Si el guard JWT está apagado (sin req.user) no se restringe, como en el resto del rollout.

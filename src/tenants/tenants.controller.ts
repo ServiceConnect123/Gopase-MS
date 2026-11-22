@@ -5,7 +5,7 @@ import { assertConjuntoPermitido } from '../auth/wsp-access.guard';
 import { TenantInput, TenantsService } from './tenants.service';
 
 /**
- * Arrendatarios (rol "inquilino") de una unidad.
+ * Inquilinos (rol "inquilino") de una unidad.
  *
  * Quién los gestiona:
  *   - el PROPIETARIO: solo los suyos (el propietario sale del token).
@@ -39,10 +39,10 @@ export class TenantsController {
       await assertConjuntoPermitido(req, this.firebase, String(owner?.conjunto || ''));
       return pedido;
     }
-    throw new ForbiddenException('Solo el propietario de la unidad puede gestionar sus arrendatarios.');
+    throw new ForbiddenException('Solo el propietario de la unidad puede gestionar sus inquilinos.');
   }
 
-  @ApiOperation({ summary: 'Arriendo de quien inició sesión (solo arrendatarios)' })
+  @ApiOperation({ summary: 'Arriendo de quien inició sesión (solo inquilinos)' })
   @Get('me')
   async me(@Req() req: any, @Query('usuario') usuario?: string) {
     const quien = String(req?.user?.sub || usuario || '');
@@ -50,7 +50,7 @@ export class TenantsController {
     return { success: !!data, data };
   }
 
-  @ApiOperation({ summary: 'Arrendatarios de un propietario' })
+  @ApiOperation({ summary: 'Inquilinos de un propietario' })
   @ApiQuery({ name: 'propietario', required: false, description: 'Solo admin/superAdmin; el propietario usa su token' })
   @Get()
   async listar(@Req() req: any, @Query('propietario') propietario?: string) {
@@ -58,7 +58,7 @@ export class TenantsController {
     return { success: true, data: await this.tenants.listar(p) };
   }
 
-  @ApiOperation({ summary: 'Registrar un arrendatario (crea su cuenta y le envía el acceso por WhatsApp)' })
+  @ApiOperation({ summary: 'Registrar un inquilino (crea su cuenta y le envía el acceso por WhatsApp)' })
   @ApiBody({
     schema: {
       type: 'object',
@@ -86,21 +86,21 @@ export class TenantsController {
     return this.tenants.crear(p, body || {});
   }
 
-  @ApiOperation({ summary: 'Editar datos, fechas o permisos de un arrendatario' })
+  @ApiOperation({ summary: 'Editar datos, fechas o permisos de un inquilino' })
   @Put(':usuario')
   async actualizar(@Req() req: any, @Param('usuario') usuario: string, @Body() body: TenantInput & { propietario?: string }) {
     const p = await this.propietarioDe(req, body?.propietario);
     return this.tenants.actualizar(p, usuario, body || {});
   }
 
-  @ApiOperation({ summary: 'Retirar el acceso de un arrendatario' })
+  @ApiOperation({ summary: 'Retirar el acceso de un inquilino' })
   @Post(':usuario/revocar')
   async revocar(@Req() req: any, @Param('usuario') usuario: string, @Body() body: { propietario?: string }) {
     const p = await this.propietarioDe(req, body?.propietario);
     return this.tenants.setRevocado(p, usuario, true);
   }
 
-  @ApiOperation({ summary: 'Devolver el acceso a un arrendatario' })
+  @ApiOperation({ summary: 'Devolver el acceso a un inquilino' })
   @Post(':usuario/reactivar')
   async reactivar(@Req() req: any, @Param('usuario') usuario: string, @Body() body: { propietario?: string }) {
     const p = await this.propietarioDe(req, body?.propietario);
@@ -114,7 +114,7 @@ export class TenantsController {
     return this.tenants.enviarAcceso(p, usuario);
   }
 
-  @ApiOperation({ summary: 'Eliminar un arrendatario (borra su cuenta)' })
+  @ApiOperation({ summary: 'Eliminar un inquilino (borra su cuenta)' })
   @Delete(':usuario')
   async eliminar(@Req() req: any, @Param('usuario') usuario: string, @Query('propietario') propietario?: string) {
     const p = await this.propietarioDe(req, propietario);

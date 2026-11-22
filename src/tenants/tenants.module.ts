@@ -4,7 +4,7 @@ import { UsersModule } from '../users/users.module';
 import { TenantsController } from './tenants.controller';
 import { TenantsService } from './tenants.service';
 
-/** Arrendatarios (rol "inquilino") que el propietario registra para su unidad. */
+/** Inquilinos (rol "inquilino") que el propietario registra para su unidad. */
 @Module({
   imports: [FirebaseModule, UsersModule],
   controllers: [TenantsController],

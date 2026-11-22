@@ -2,7 +2,7 @@
  * Reglas de los ARRENDATARIOS (rol "inquilino"). Funciones puras, sin Firebase,
  * para poder probarlas y usarlas desde login, guards, pagos y la API.
  *
- * Un arrendatario es un usuario normal (mirror/usuarios) con rol "inquilino" y
+ * Un inquilino es un usuario normal (mirror/usuarios) con rol "inquilino" y
  * un bloque `inquilino` con su arriendo:
  *   propietario        username del propietario que lo creó (dueño de la unidad)
  *   propietarioNombre  nombre del propietario (para mostrar)
@@ -12,7 +12,7 @@
  *   puedeReservar      puede reservar zonas comunes
  *   revocado           el propietario (o el admin) le retiró el acceso
  *
- * El arrendatario usa la MISMA unidad (parcela) y conjunto del propietario. No
+ * El inquilino usa la MISMA unidad (parcela) y conjunto del propietario. No
  * tiene cartera propia: los pagos son de la unidad (cuenta del propietario) y
  * no cuenta como unidad para el precio del plan.
  */
@@ -42,11 +42,47 @@ export function esInquilino(rol: unknown): boolean {
 
 /**
  * ¿El rol tiene cartera propia (cuotas de administración)? No la tienen el
- * superAdmin, el vigilante ni el arrendatario (paga, si acaso, la del propietario).
+ * superAdmin, el vigilante ni el inquilino (paga, si acaso, la del propietario).
  */
 export function tieneCartera(rol: unknown): boolean {
   const r = norm(rol);
   return r !== 'superadmin' && r !== 'vigilante' && r !== ROL_INQUILINO;
+}
+
+/**
+ * Inquilinos con los datos de su propiedad y de su propietario, tomados del
+ * propietario en vivo (si el propietario cambia de unidad o de teléfono, el
+ * inquilino lo refleja sin editarlo):
+ *   - parcela, conjunto y conjuntoId: los del propietario (si los tiene).
+ *   - propietarioUsuario, propietarioNombre, propietarioTelefono, propietarioEmail.
+ * Los demás usuarios pasan igual. No modifica los objetos recibidos.
+ */
+export function conPropietario<T extends Record<string, any>>(usuarios: T[]): T[] {
+  const porUsuario = new Map<string, any>();
+  for (const u of usuarios) {
+    const k = norm(u?.usuario ?? u?.id);
+    if (k) porUsuario.set(k, u);
+  }
+  return usuarios.map((u) => {
+    if (!esInquilino(u?.rol)) return u;
+    const d = (u.inquilino && typeof u.inquilino === 'object' ? u.inquilino : {}) as DatosInquilino;
+    const dueno = porUsuario.get(norm(d.propietario));
+    if (!dueno) {
+      return { ...u, propietarioUsuario: d.propietario || '', propietarioNombre: d.propietarioNombre || d.propietario || '' };
+    }
+    const nombre = String(dueno.nombre || d.propietarioNombre || d.propietario || '');
+    return {
+      ...u,
+      parcela: dueno.parcela || u.parcela || '',
+      conjunto: dueno.conjunto || u.conjunto || '',
+      conjuntoId: dueno.conjuntoId || u.conjuntoId || '',
+      propietarioUsuario: String(dueno.usuario || d.propietario || ''),
+      propietarioNombre: nombre,
+      propietarioTelefono: String(dueno.phone || ''),
+      propietarioEmail: String(dueno.email || ''),
+      inquilino: { ...d, propietarioNombre: nombre },
+    };
+  });
 }
 
 /** 'YYYY-MM-DD' válido o ''. */
@@ -97,21 +133,21 @@ function fechaTexto(iso: string): string {
   return m ? `${m[3]}/${m[2]}/${m[1]}` : iso;
 }
 
-/** Mensaje para el arrendatario cuando no puede entrar (null si está activo). */
+/** Mensaje para el inquilino cuando no puede entrar (null si está activo). */
 export function mensajeAccesoInquilino(datos: DatosInquilino | null | undefined, hoy: string = hoyISO()): string | null {
   const estado = estadoInquilino(datos, hoy);
   if (estado === 'activo') return null;
   if (estado === 'programado') {
-    return `Tu acceso como arrendatario empieza el ${fechaTexto(normFecha(datos?.inicio))}.`;
+    return `Tu acceso como inquilino empieza el ${fechaTexto(normFecha(datos?.inicio))}.`;
   }
   if (estado === 'vencido') {
-    return `Tu acceso como arrendatario venció el ${fechaTexto(normFecha(datos?.fin))}. Pídele al propietario que lo renueve.`;
+    return `Tu acceso como inquilino venció el ${fechaTexto(normFecha(datos?.fin))}. Pídele al propietario que lo renueve.`;
   }
-  return 'Tu acceso como arrendatario fue retirado. Si es un error, habla con el propietario de la unidad.';
+  return 'Tu acceso como inquilino fue retirado. Si es un error, habla con el propietario de la unidad.';
 }
 
 /**
- * Segundos hasta el final del día `fin` (para que el JWT del arrendatario no
+ * Segundos hasta el final del día `fin` (para que el JWT del inquilino no
  * dure más que su arriendo). null si no tiene fin. Mínimo 60 s.
  */
 export function segundosHastaFin(fin: unknown, now: Date = new Date()): number | null {
@@ -173,7 +209,7 @@ export function resumenParaSesion(usuario: any): {
 }
 
 /**
- * ¿Este arrendatario (registro de mirror/usuarios) puede pagar hoy la
+ * ¿Este inquilino (registro de mirror/usuarios) puede pagar hoy la
  * administración de la cuenta `cuenta`? Solo si el arriendo está vigente, el
  * propietario se lo delegó y `cuenta` es la de ese propietario.
  */

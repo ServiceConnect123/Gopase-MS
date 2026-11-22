@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { FirebaseService } from '../firebase/firebase.service';
 import { recoverPassword } from '../auth/password.util';
+import { conPropietario } from '../tenants/tenant-rules';
 
 /**
  * CRUD de usuarios contra Firebase (RTDB mirror/usuarios + Firebase Auth).
@@ -101,6 +102,7 @@ export class UsersService {
     if (!this.firebase.isEnabled()) throw new Error('Servicio no disponible.');
     // Caché en vivo (listener RTDB); los elementos se copian abajo con spread.
     let users = await this.firebase.liveValues<any>(MIRROR_USERS);
+    users = conPropietario(users);
     if (conjunto) {
       const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
       users = users.filter((u) => norm(u.conjunto) === norm(conjunto));

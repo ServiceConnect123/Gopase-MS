@@ -42,7 +42,7 @@ export interface LoginResult {
      * usuario). Cualquier rol: puede ser propietario en uno y admin en otro.
      */
     accesos?: Array<{ conjunto: string; usuario: string; rol: string }>;
-    /** Solo arrendatarios: su arriendo (propietario, unidad, vigencia y permisos). */
+    /** Solo inquilinos: su arriendo (propietario, unidad, vigencia y permisos). */
     inquilino?: ReturnType<typeof resumenParaSesion>;
     mustChangePassword?: boolean;
     /** JWT de sesión que el frontend adjunta como Bearer en las demás llamadas. */
@@ -264,14 +264,14 @@ export class AuthLoginService {
       // cuenta, para el selector de "cambiar de conjunto". Cualquier rol (puede
       // ser propietario en uno y admin en otro). El correo real se lee del perfil
       // (en Auth el email es sintético).
-      // ----- Arrendatario (rol inquilino): solo entra con el arriendo vigente -----
+      // ----- Inquilino (rol inquilino): solo entra con el arriendo vigente -----
       let inquilino: ReturnType<typeof resumenParaSesion> | undefined;
       let segundosSesion: number | null = null;
       if (esInquilino(rol)) {
         const perfil = (await this.firebase.db().ref(`mirror/usuarios/${uid}`).get()).val() || {};
         const bloqueo = mensajeAccesoInquilino(perfil.inquilino);
         if (bloqueo) {
-          this.logger.warn(`[login] arrendatario sin acceso vigente: usuario=${uid}`);
+          this.logger.warn(`[login] inquilino sin acceso vigente: usuario=${uid}`);
           return { success: false, message: bloqueo };
         }
         const dueno = String(perfil.inquilino?.propietario || '').replace(/[.#$/\[\]]/g, '_');
