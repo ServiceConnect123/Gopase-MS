@@ -7,6 +7,7 @@ import {
 import makeWASocket, {
   DisconnectReason,
   WASocket,
+  downloadMediaMessage,
   isJidBroadcast,
   isJidGroup,
   isJidNewsletter,
@@ -158,8 +159,39 @@ export interface SendResult {
  * - Reconecta automáticamente salvo logout; permite relogin(conjunto).
  */
 @Injectable()
+/** Mensaje entrante permitido (grupo configurado o chat directo) para quien lo escucha. */
+export interface MensajeEntrante {
+  /** Nombre del conjunto dueño de la sesión. */
+  conjunto: string;
+  /** Clave de la sesión que lo recibió. */
+  sesion: string;
+  id: string;
+  /** Clave del mensaje (para reaccionar). */
+  clave: any;
+  esGrupo: boolean;
+  chatJid: string;
+  /** JID del remitente (respuesta privada). */
+  responderA: string;
+  /** Teléfono del remitente (dígitos), si WhatsApp lo expone. */
+  telefono: string;
+  texto: string;
+  /** Imagen adjunta (comprobante), si la hay. */
+  imagen: Buffer | null;
+}
+
 export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WhatsappService.name);
+
+  /**
+   * Lectura de mensajes (pagos por WhatsApp). Por defecto NADA se descifra (ver
+   * ackIncomingWithoutDecrypt). Solo los conjuntos que lo activan descifran su
+   * grupo configurado y/o sus chats directos, con un cortacircuitos por minuto.
+   */
+  private readonly lectura = new Map<string, { conjunto: string; grupos: Set<string>; chats: boolean }>();
+  private manejadorEntrantes: ((m: MensajeEntrante) => Promise<void>) | null = null;
+  private readonly contadorLectura = new Map<string, { inicio: number; n: number; pausaHasta: number }>();
+  private static readonly LECTURA_MAX_MIN = Math.max(5, Number(process.env.WSP_LECTURA_MAX_MIN) || 40);
+  private static readonly LECTURA_PAUSA_MS = 10 * 60_000;
 
   /** Clave de la sesión por defecto (número global histórico). */
   static readonly DEFAULT_KEY = '__default__';
@@ -626,8 +658,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       // dispara "Bad MAC" cuando la sender-key no coincide, provoca reintentos y
       // reescrituras de la sesión en RTDB, y bloquea el event loop que también
       // atiende la API (la app "se queda pensando").
+      // Los grupos se ignoran salvo el grupo de pagos configurado del conjunto.
       shouldIgnoreJid: (jid) =>
-        !!(isJidGroup(jid) || isJidBroadcast(jid) || isJidNewsletter(jid)),
+        !!((isJidGroup(jid) && !this.lectura.get(session.key)?.grupos.has(jid)) || isJidBroadcast(jid) || isJidNewsletter(jid)),
       // Nunca procesar historial (también genera descifrado y escrituras).
       shouldSyncHistoryMessage: () => false,
     });
@@ -644,6 +677,10 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         // copia al teléfono principal. Guardar los entrantes solo llenaba RAM.
         if (msg.key?.fromMe && msg.key?.id && msg.message) {
           this.store.remember(session.key, msg.key.id, msg.message);
+        } else if (!msg.key?.fromMe && msg.message && this.manejadorEntrantes && this.lectura.has(session.key)) {
+          this.entregarEntrante(session, msg).catch((e) =>
+            this.logger.warn(`[${session.key}] Mensaje entrante no procesado: ${e?.message}`),
+          );
         }
       }
     });
@@ -826,6 +863,18 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     let acked = 0;
     let timer: NodeJS.Timeout | null = null;
     ws.on('CB:message', (node: any) => {
+      // Excepción opt-in: grupo de pagos / chats directos de conjuntos que
+      // activaron "Pagos por WhatsApp" (con cortacircuitos por minuto).
+      if (this.debeDescifrar(session, node)) {
+        for (const h of original) {
+          try {
+            h(node);
+          } catch (e: any) {
+            this.logger.warn(`[${session.key}] Error descifrando mensaje: ${e?.message}`);
+          }
+        }
+        return;
+      }
       // Ningún mensaje entrante se descifra, ni siquiera los de control del
       // propio teléfono (category="peer"): con su sesión Signal dañada, cada
       // uno probaba ~40 sesiones viejas (miles de "Bad MAC") y congelaba el
@@ -842,6 +891,164 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       }
       sock.sendMessageAck(node).catch(() => undefined);
     });
+  }
+
+  // ------------------------------------------------------------------
+  // Lectura de mensajes (Pagos por WhatsApp)
+  // ------------------------------------------------------------------
+
+  /** Registra quién atiende los mensajes entrantes permitidos. */
+  alRecibirMensaje(fn: (m: MensajeEntrante) => Promise<void>): void {
+    this.manejadorEntrantes = fn;
+  }
+
+  /** Activa/desactiva la lectura del grupo y/o chats directos de un conjunto. */
+  configurarLectura(conjunto: string, op: { grupos: string[]; chats: boolean }): void {
+    const key = this.normalizeKey(conjunto);
+    const grupos = new Set((op.grupos || []).filter(Boolean));
+    if (!grupos.size && !op.chats) {
+      this.lectura.delete(key);
+      this.logger.log(`[${key}] Lectura de pagos por WhatsApp desactivada.`);
+      return;
+    }
+    this.lectura.set(key, { conjunto, grupos, chats: !!op.chats });
+    this.logger.log(`[${key}] Lectura de pagos por WhatsApp: ${grupos.size} grupo(s), chats ${op.chats ? 'sí' : 'no'}.`);
+  }
+
+  /** ¿Este nodo entrante se descifra? Solo lo permitido y sin pasar el límite por minuto. */
+  private debeDescifrar(session: WhatsappSession, node: any): boolean {
+    const cfg = this.lectura.get(session.key);
+    if (!cfg) return false;
+    const a = node?.attrs || {};
+    const from = String(a.from || '');
+    if (!from || a.category === 'peer' || a.recipient) return false;
+    let permitido = false;
+    if (isJidGroup(from)) permitido = cfg.grupos.has(from);
+    else if (/@(s\.whatsapp\.net|lid)$/.test(from)) permitido = cfg.chats;
+    if (!permitido) return false;
+    const ahora = Date.now();
+    const c = this.contadorLectura.get(session.key) || { inicio: ahora, n: 0, pausaHasta: 0 };
+    if (c.pausaHasta > ahora) return false;
+    if (ahora - c.inicio > 60_000) {
+      c.inicio = ahora;
+      c.n = 0;
+    }
+    c.n++;
+    if (c.n > WhatsappService.LECTURA_MAX_MIN) {
+      c.pausaHasta = ahora + WhatsappService.LECTURA_PAUSA_MS;
+      this.logger.warn(
+        `[${session.key}] Más de ${WhatsappService.LECTURA_MAX_MIN} mensajes/min para leer: lectura en pausa 10 min (se confirman sin descifrar).`,
+      );
+      this.contadorLectura.set(session.key, c);
+      return false;
+    }
+    this.contadorLectura.set(session.key, c);
+    return true;
+  }
+
+  /** Arma el MensajeEntrante (texto, remitente e imagen) y lo entrega al manejador. */
+  private async entregarEntrante(session: WhatsappSession, msg: any): Promise<void> {
+    const cfg = this.lectura.get(session.key);
+    const chatJid = String(msg.key?.remoteJid || '');
+    if (!cfg || !chatJid) return;
+    const esGrupo = isJidGroup(chatJid);
+    if (esGrupo ? !cfg.grupos.has(chatJid) : !cfg.chats) return;
+
+    // Quita envolturas (mensajes temporales / ver una vez).
+    let m = msg.message;
+    for (let i = 0; i < 3 && m; i++) {
+      const inner = m.ephemeralMessage?.message || m.viewOnceMessage?.message || m.viewOnceMessageV2?.message || m.documentWithCaptionMessage?.message;
+      if (!inner) break;
+      m = inner;
+    }
+    if (!m) return;
+    const imagen = m.imageMessage || (String(m.documentMessage?.mimetype || '').startsWith('image/') ? m.documentMessage : null);
+    const texto = String(imagen?.caption || m.conversation || m.extendedTextMessage?.text || '').trim();
+    if (!texto || !/#\s?pago\b/i.test(texto)) return; // solo #pago: lo demás no se descarga ni procesa
+
+    const remitente = String((esGrupo ? msg.key?.participant : chatJid) || '');
+    const pn = String((msg.key as any)?.participantPn || (msg.key as any)?.senderPn || '');
+    const telefono = (/@s\.whatsapp\.net$/.test(remitente) ? remitente : pn).split('@')[0].split(':')[0].replace(/\D/g, '');
+
+    let buffer: Buffer | null = null;
+    if (imagen) {
+      try {
+        buffer = (await downloadMediaMessage(
+          { ...msg, message: m },
+          'buffer',
+          {},
+          { logger: pino({ level: 'silent' }) as any, reuploadRequest: session.sock!.updateMediaMessage },
+        )) as Buffer;
+      } catch (e: any) {
+        this.logger.warn(`[${session.key}] No se pudo descargar el comprobante: ${e?.message}`);
+      }
+    }
+    await this.manejadorEntrantes!({
+      conjunto: cfg.conjunto,
+      sesion: session.key,
+      id: String(msg.key?.id || ''),
+      clave: msg.key,
+      esGrupo,
+      chatJid,
+      responderA: remitente || chatJid,
+      telefono,
+      texto,
+      imagen: buffer,
+    });
+  }
+
+  /** Sesión PROPIA del conjunto (sin caer en la por defecto) si está lista. */
+  private sesionPropia(conjunto: string): WhatsappSession | null {
+    const s = this.sessions.get(this.normalizeKey(conjunto));
+    return s && s.ready && s.sock ? s : null;
+  }
+
+  /** El número vinculado del conjunto se une a un grupo por su enlace de invitación. */
+  async unirseAGrupo(conjunto: string, enlace: string): Promise<{ ok: true; jid: string; nombre: string } | { ok: false; message: string }> {
+    const session = this.sesionPropia(conjunto);
+    if (!session) return { ok: false, message: 'Vincula primero el WhatsApp del conjunto (Configuración > WhatsApp).' };
+    const code = String(enlace || '').match(/chat\.whatsapp\.com\/(?:invite\/)?([A-Za-z0-9]{10,})/)?.[1];
+    if (!code) return { ok: false, message: 'El enlace no parece un enlace de invitación de grupo (https://chat.whatsapp.com/...).' };
+    const sock: any = session.sock;
+    try {
+      const info = await sock.groupGetInviteInfo(code);
+      const jid = String(info?.id || '');
+      const nombre = String(info?.subject || 'Grupo');
+      if (!jid) return { ok: false, message: 'El enlace del grupo no es válido o expiró.' };
+      // ¿Ya es miembro?
+      try {
+        await sock.groupMetadata(jid);
+        return { ok: true, jid, nombre };
+      } catch {
+        /* no es miembro todavía */
+      }
+      const unido = await sock.groupAcceptInvite(code);
+      if (!unido) return { ok: false, message: 'El grupo requiere aprobación: acepta la solicitud de unión en WhatsApp y vuelve a guardar.' };
+      return { ok: true, jid: String(unido || jid), nombre };
+    } catch (e: any) {
+      return { ok: false, message: `No se pudo unir al grupo: ${e?.message || 'enlace inválido o expirado'}.` };
+    }
+  }
+
+  /** Responde a un JID (chat privado del remitente) desde la sesión del conjunto. */
+  async responder(conjunto: string, jid: string, texto: string): Promise<boolean> {
+    const session = this.sesionPropia(conjunto);
+    if (!session || !jid || !String(texto || '').trim()) return false;
+    try {
+      const sent = await session.sock!.sendMessage(jid, { text: texto });
+      if (sent?.key?.id && sent.message) this.store.remember(session.key, sent.key.id, sent.message);
+      return true;
+    } catch (e: any) {
+      this.logger.warn(`[${session.key}] No se pudo responder a ${jid}: ${e?.message}`);
+      return false;
+    }
+  }
+
+  /** Reacciona a un mensaje (✅ en el grupo de pagos). */
+  async reaccionar(conjunto: string, clave: any, emoji: string): Promise<void> {
+    const session = this.sesionPropia(conjunto);
+    if (!session || !clave?.remoteJid) return;
+    await session.sock!.sendMessage(clave.remoteJid, { react: { text: emoji, key: clave } }).catch(() => undefined);
   }
 
   /**
