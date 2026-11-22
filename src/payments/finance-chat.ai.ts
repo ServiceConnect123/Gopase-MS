@@ -1,5 +1,6 @@
 import { genkit, z, type Genkit, type MessageData } from 'genkit';
 import { googleAI } from '@genkit-ai/google-genai';
+import { conCupo, hoyColombia } from '../ai/gemini';
 
 /**
  * Chat de finanzas con Genkit + Gemini (Google AI).
@@ -37,7 +38,13 @@ interface ChatContext {
 }
 
 /** Modelos en orden de preferencia (alias estable primero). */
-const MODELS = ['gemini-flash-latest', 'gemini-3.5-flash-lite'];
+const MODELS = (process.env.GEMINI_CHAT_MODELS || 'gemini-flash-latest,gemini-3.5-flash-lite')
+  .split(',')
+  .map((m) => m.trim())
+  .filter(Boolean);
+/** Esperas entre reintentos ante saturación (ms) y tiempo máximo de toda la respuesta. */
+const ESPERAS = [2000, 5000];
+const DEADLINE_MS = 45000;
 const MAX_HISTORY = 20;
 
 let instance: { ai: Genkit; ownersTool: any } | null = null;
@@ -124,43 +131,51 @@ export async function runFinanceChat(params: {
       'gastos a revisar y máximo 4 recomendaciones.';
 
   let lastError: any = null;
-  for (const model of MODELS) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const res = await ai.generate({
-          model: googleAI.model(model),
-          system: SYSTEM(params.context, params.year),
-          messages,
-          prompt: question,
-          tools: [ownersTool],
-          maxTurns: 3,
-          config: { apiKey: params.apiKey, temperature: 0.3 } as any,
-          context: { conjunto: params.conjunto, year: params.year, loadOwners: params.loadOwners } as any,
-        });
-        const text = (res.text || '').trim();
-        if (text) return { success: true, text };
-        lastError = new Error('Respuesta vacía');
-        break;
-      } catch (e: any) {
-        lastError = e;
-        const status = e?.status ?? e?.code ?? e?.detail?.status;
-        const msg = String(e?.message || '').toLowerCase();
-        const saturado = status === 429 || status === 503 || /resource_exhausted|unavailable|overloaded|429|503/.test(msg);
-        if (saturado && attempt === 0) {
-          await new Promise((r) => setTimeout(r, 1500));
-          continue;
+  const limite = Date.now() + DEADLINE_MS;
+  const sistema = `${SYSTEM(params.context, params.year)}\n\nFecha de hoy: ${hoyColombia()}.`;
+  const resultado = await conCupo(params.apiKey, async () => {
+    for (const model of MODELS) {
+      for (let attempt = 0; attempt <= ESPERAS.length; attempt++) {
+        if (Date.now() > limite - 3000) return null;
+        try {
+          const res = await ai.generate({
+            model: googleAI.model(model),
+            system: sistema,
+            messages,
+            prompt: question,
+            tools: [ownersTool],
+            maxTurns: 3,
+            config: { apiKey: params.apiKey, temperature: 0.3 } as any,
+            context: { conjunto: params.conjunto, year: params.year, loadOwners: params.loadOwners } as any,
+          });
+          const text = (res.text || '').trim();
+          if (text) return { success: true, text };
+          lastError = new Error('Respuesta vacía');
+          break;
+        } catch (e: any) {
+          lastError = e;
+          const status = e?.status ?? e?.code ?? e?.detail?.status;
+          const msg = String(e?.message || '').toLowerCase();
+          if (/api key|permission|unauthenticated|invalid_argument.*key/.test(msg)) {
+            return { success: false, message: 'La API key de Gemini del conjunto no es válida. Revísala en Conjuntos.' };
+          }
+          const saturado = status === 429 || status === 503 || status === 500 || /resource_exhausted|unavailable|overloaded|429|503|500/.test(msg);
+          const espera = ESPERAS[attempt];
+          if (saturado && espera !== undefined && Date.now() + espera < limite - 3000) {
+            await new Promise((r) => setTimeout(r, espera + Math.floor(Math.random() * 300)));
+            continue;
+          }
+          break; // probar el siguiente modelo
         }
-        if (/api key|permission|unauthenticated|invalid_argument.*key/.test(msg)) {
-          return { success: false, message: 'La API key de Gemini del conjunto no es válida. Revísala en Conjuntos.' };
-        }
-        break; // probar el siguiente modelo
       }
     }
-  }
+    return null;
+  });
+  if (resultado) return resultado;
 
   const msg = String(lastError?.message || '').toLowerCase();
   if (/429|503|resource_exhausted|unavailable|overloaded/.test(msg)) {
-    return { success: false, message: 'El servicio de IA está saturado. Inténtalo de nuevo en unos segundos.' };
+    return { success: false, message: 'El servicio de IA está saturado. Inténtalo de nuevo en un minuto.' };
   }
   return { success: false, message: 'No se pudo obtener respuesta de la IA.' };
 }
