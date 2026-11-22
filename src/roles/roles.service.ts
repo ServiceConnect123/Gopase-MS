@@ -1,15 +1,26 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
+import { VERSION_PERMISOS, esRolSistema, limpiarPermisos, rolEsDelSistema } from './roles-rules';
 
 /**
- * CRUD de roles (colección GLOBAL) contra Firebase (RTDB mirror/roles).
- * Reemplaza getRoles/addRole/updateRole/deleteRole del frontend (Sheets).
- *
- * El espejo (mapRol del SyncService) guarda { id, nombre, permisos } donde
- * `permisos` es el objeto/array ya parseado. Aquí exponemos el shape que el
- * frontend consume: { id, name, permissions }.
+ * Roles (RTDB mirror/roles). El espejo guarda { id, nombre, permisos } y aquí se
+ * expone { id, name, permissions } más:
+ *   - sistema: rol del sistema (admin, vigilante, propietario, inquilino, superAdmin).
+ *   - conjunto: '' = global; si no, el rol personalizado es de ese conjunto.
+ *   - v: 2 cuando el rol se guardó con el editor nuevo (sus permisos mandan en el menú).
  */
 const MIRROR_ROLES = 'mirror/roles';
+
+export interface RolDto {
+  id: string;
+  name: string;
+  permissions: any;
+  sistema: boolean;
+  conjunto: string;
+  v: number;
+}
+
+const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
 
 @Injectable()
 export class RolesService {
@@ -37,35 +48,70 @@ export class RolesService {
   }
 
   /** Convierte un registro del espejo al shape del frontend. */
-  private toDto(r: any): { id: string; name: string; permissions: any } {
+  toDto(r: any): RolDto {
+    const name = r.name ?? r.nombre ?? '';
     return {
       id: String(r.id ?? ''),
-      name: r.name ?? r.nombre ?? '',
+      name,
       permissions: this.normalizePermissions(r.permisos ?? r.permissions),
+      sistema: rolEsDelSistema({ id: r.id, name }),
+      conjunto: String(r.conjunto ?? ''),
+      v: Number(r.v) || 1,
     };
   }
 
-  /** Registro que se persiste en RTDB (conserva `permisos` como el espejo). */
   private buildRecord(dto: any): Record<string, any> {
     return {
       id: String(dto.id),
-      nombre: dto.name ?? dto.nombre ?? '',
-      permisos: this.normalizePermissions(dto.permissions ?? dto.permisos),
+      nombre: String(dto.name ?? dto.nombre ?? '').trim().slice(0, 40),
+      permisos: limpiarPermisos(this.normalizePermissions(dto.permissions ?? dto.permisos)),
+      conjunto: String(dto.conjunto ?? ''),
+      v: VERSION_PERMISOS,
       _fbWrite: true,
     };
   }
 
-  /** Lista global de roles. */
-  async list(): Promise<Array<{ id: string; name: string; permissions: any }>> {
+  async list(): Promise<RolDto[]> {
     if (!this.firebase.isEnabled()) throw new Error('Servicio no disponible.');
     const snap = await this.firebase.db().ref(MIRROR_ROLES).get();
     if (!snap.exists()) return [];
     return (Object.values(snap.val() || {}) as any[]).map((r) => this.toDto(r));
   }
 
-  async create(dto: any): Promise<{ success: boolean; message?: string; id?: string }> {
+  async getById(id: string): Promise<RolDto | null> {
+    const key = this.safeKey(id);
+    if (!key) return null;
+    const snap = await this.firebase.db().ref(`${MIRROR_ROLES}/${key}`).get();
+    return snap.exists() ? this.toDto(snap.val()) : null;
+  }
+
+  /** Ya existe un rol con ese nombre visible para el conjunto (sistema, global o del mismo conjunto). */
+  async nombreOcupado(nombre: string, conjunto: string, exceptoId = ''): Promise<boolean> {
+    const n = norm(nombre);
+    if (esRolSistema(n)) return true;
+    const todos = await this.list();
+    return todos.some((r) => r.id !== exceptoId && norm(r.name) === n && (!r.conjunto || !conjunto || norm(r.conjunto) === norm(conjunto)));
+  }
+
+  /**
+   * Crea un rol. `permitirSistema` (solo superAdmin): crea el registro de un rol del
+   * sistema que aún no existe en la base (p. ej. inquilino), con su nombre como id.
+   */
+  async create(dto: any, opts: { permitirSistema?: boolean } = {}): Promise<{ success: boolean; message?: string; id?: string }> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
-    const id = String(dto.id || Date.now().toString());
+    const nombre = String(dto?.name ?? '').trim();
+    if (!nombre) return { success: false, message: 'El nombre del rol es requerido.' };
+    let id = String(dto.id || Date.now().toString());
+    if (esRolSistema(nombre)) {
+      if (!opts.permitirSistema) return { success: false, message: `«${nombre}» es un rol del sistema.` };
+      if ((await this.list()).some((r) => r.sistema && norm(r.name) === norm(nombre))) {
+        return { success: false, message: `El rol «${nombre}» ya existe.` };
+      }
+      id = nombre;
+      dto = { ...dto, conjunto: '' };
+    } else if (await this.nombreOcupado(nombre, String(dto?.conjunto ?? ''))) {
+      return { success: false, message: `Ya existe un rol llamado «${nombre}».` };
+    }
     try {
       await this.firebase.db().ref(`${MIRROR_ROLES}/${this.safeKey(id)}`).set(this.buildRecord({ ...dto, id }));
       return { success: true, id, message: 'Rol creado.' };
@@ -75,32 +121,37 @@ export class RolesService {
     }
   }
 
+  /** Reescribe nombre y permisos. Un rol del sistema conserva su nombre; el conjunto no cambia. */
   async update(id: string, dto: any): Promise<{ success: boolean; message?: string }> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
-    const key = this.safeKey(id);
-    if (!key) return { success: false, message: 'ID requerido.' };
-    const ref = this.firebase.db().ref(`${MIRROR_ROLES}/${key}`);
-    const snap = await ref.get();
-    if (!snap.exists()) return { success: false, message: 'El rol no existe.' };
+    const prev = await this.getById(id);
+    if (!prev) return { success: false, message: 'El rol no existe.' };
+    const nombre = prev.sistema ? prev.name : String(dto?.name ?? prev.name).trim();
+    if (!nombre) return { success: false, message: 'El nombre del rol es requerido.' };
+    if (!prev.sistema && (await this.nombreOcupado(nombre, prev.conjunto, prev.id))) {
+      return { success: false, message: `Ya existe un rol llamado «${nombre}».` };
+    }
     try {
-      // Reescribe el rol completo (nombre + permisos).
-      await ref.set(this.buildRecord({ ...dto, id }));
+      await this.firebase.db().ref(`${MIRROR_ROLES}/${this.safeKey(id)}`).set(
+        this.buildRecord({ id: prev.id, name: nombre, permissions: dto?.permissions, conjunto: prev.conjunto }),
+      );
       return { success: true, message: 'Rol actualizado.' };
     } catch (err: any) {
-      this.logger.error(`[roles] update ${key} falló: ${err?.message}`);
+      this.logger.error(`[roles] update ${id} falló: ${err?.message}`);
       return { success: false, message: err?.message || 'No se pudo actualizar el rol.' };
     }
   }
 
   async remove(id: string): Promise<{ success: boolean; message?: string }> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
-    const key = this.safeKey(id);
-    if (!key) return { success: false, message: 'ID requerido.' };
+    const prev = await this.getById(id);
+    if (!prev) return { success: false, message: 'El rol no existe.' };
+    if (prev.sistema) return { success: false, message: 'Los roles del sistema no se pueden eliminar.' };
     try {
-      await this.firebase.db().ref(`${MIRROR_ROLES}/${key}`).remove();
+      await this.firebase.db().ref(`${MIRROR_ROLES}/${this.safeKey(id)}`).remove();
       return { success: true, message: 'Rol eliminado.' };
     } catch (err: any) {
-      this.logger.error(`[roles] delete ${key} falló: ${err?.message}`);
+      this.logger.error(`[roles] delete ${id} falló: ${err?.message}`);
       return { success: false, message: err?.message || 'No se pudo eliminar el rol.' };
     }
   }
