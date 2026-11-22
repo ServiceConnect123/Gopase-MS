@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, NotFoundException, Param, Post, Put, Req } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Query, ForbiddenException, Get, NotFoundException, Param, Post, Put, Req } from '@nestjs/common';
 import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { FirebaseService } from '../firebase/firebase.service';
 import { conjuntoPropioDelRequest } from '../auth/conjunto-scope';
@@ -52,6 +52,14 @@ export class RolesController {
       data = data.filter((r) => r.sistema || (!!propio && norm(r.conjunto) === propio));
     }
     return { success: true, data };
+  }
+
+  @ApiOperation({ summary: 'Vistas que el plan del conjunto permite asignar a un rol personalizado' })
+  @Get('vistas-permitidas')
+  async vistasPermitidas(@Req() req: any, @Query('conjunto') conjuntoQ?: string) {
+    const conjunto = req?.user && rolDe(req) !== 'superadmin' ? await this.conjuntoPropio(req) : String(conjuntoQ || '');
+    const vistas = await this.roles.vistasPermitidas(conjunto);
+    return { success: true, conjunto, vistas };
   }
 
   @ApiOperation({ summary: 'Crear rol personalizado (admin: de su conjunto)' })
