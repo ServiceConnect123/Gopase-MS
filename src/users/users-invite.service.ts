@@ -21,9 +21,16 @@ import { UsersService } from './users.service';
 import { WhatsappService } from '../whatsapp/whatsapp.service';
 import { ACTIVITY_LOGGER } from '../activity-audit/integrations/nest/activity-audit.tokens';
 import { ActivityLogger } from '../activity-audit/core/activity-logger';
+import {
+  Advertencia, DatosSolicitud, EstadoSolicitud, MAX_PENDIENTES, SolicitudRegistro,
+  advertencias, limpiarDatos, normTelefono, requiereAprobacion, solicitudRepetida,
+} from './registro-solicitudes.rules';
 
 const MIRROR_USERS = 'mirror/usuarios';
-const INVITE_TOKENS_PATH = 'mirror/inviteTokens'; // { conjunto_key: { token, createdAt, conjunto } }
+const INVITE_TOKENS_PATH = 'mirror/inviteTokens';
+const MIRROR_CONJUNTOS = 'mirror/conjuntos';
+// Solicitudes de registro por QR pendientes de aprobación: {conjuntoKey}/{id}.
+const SOLICITUDES_PATH = 'solicitudes_registro'; // { conjunto_key: { token, createdAt, conjunto } }
 
 // Tiempo de vida del token de invitación: 30 días.
 const INVITE_TOKEN_EXPIRY = '30d';
@@ -125,6 +132,7 @@ export class UsersInviteService {
     parcela?: string; // torre / apartamento / casa
   }): Promise<{
     success: boolean;
+    pendiente?: boolean;
     usuario?: string;
     password?: string;
     conjunto?: string;
@@ -136,51 +144,255 @@ export class UsersInviteService {
       return { success: false, message: validation.message || 'Token inválido.' };
     }
     const conjunto = validation.conjunto;
-    const nombre = String(data.nombre || '').trim();
-    if (!nombre) return { success: false, message: 'El nombre es obligatorio.' };
+    const datos = limpiarDatos(data);
+    if (!datos.nombre) return { success: false, message: 'El nombre es obligatorio.' };
 
+    // Con aprobación (por defecto): se guarda la solicitud y la cuenta se crea
+    // cuando la administración la apruebe.
+    const conj = await this.findConjunto(conjunto);
+    if (requiereAprobacion(conj?.value)) {
+      return this.crearSolicitud(conjunto, datos);
+    }
+
+    const r = await this.crearPropietario(conjunto, datos, 'Autoregistro');
+    if (!r.success) return { success: false, message: r.message };
+    return {
+      success: true,
+      usuario: r.usuario,
+      password: this.tempPassword,
+      conjunto,
+      message: 'Tu cuenta fue creada. Ingresa con las credenciales mostradas.',
+    };
+  }
+
+  /** Crea el propietario (username único, contraseña temporal) y lo deja en auditoría. */
+  private async crearPropietario(
+    conjunto: string,
+    datos: DatosSolicitud,
+    accion: string,
+    actor?: string,
+  ): Promise<{ success: boolean; usuario?: string; message?: string }> {
     // Generar username único (igual que onboarding: NFD + sufijo si hace falta).
-    const base = this.generarUsuarioBase(nombre);
+    const base = this.generarUsuarioBase(datos.nombre);
     if (!base) return { success: false, message: 'El nombre debe contener letras o números.' };
     const usuario = await this.usuarioDisponible(base, conjunto);
 
     try {
       const result = await this.users.create({
         usuario,
-        email: data.email || '',
-        nombre,
+        email: datos.email || '',
+        nombre: datos.nombre,
         rol: 'propietario',
-        phone: data.phone || '',
-        documentType: data.documentType || '',
-        documentNumber: data.documentNumber || '',
+        phone: datos.phone || '',
+        documentType: datos.documentType || '',
+        documentNumber: datos.documentNumber || '',
         conjunto,
-        parcela: data.parcela || '',
+        parcela: datos.parcela || '',
         authEmailSintetico: true,
         // Sin password → el servicio usará AUTH_TEMP_PASSWORD y marcará mustChangePassword.
       });
-
-      if (!result.success) {
-        return { success: false, message: result.message };
-      }
+      if (!result.success) return { success: false, message: result.message };
 
       this.activity?.log({
-        vista: 'Se registró por QR',
-        usuario,
+        vista: accion === 'Autoregistro' ? 'Se registró por QR' : 'Aprobó registro por QR',
+        usuario: actor || usuario,
         conjunto,
-        detalle: { accion: 'Autoregistro', recurso: 'Propietario', nombre },
+        detalle: { accion, recurso: 'Propietario', nombre: datos.nombre, usuario },
       });
-
-      return {
-        success: true,
-        usuario,
-        password: this.tempPassword,
-        conjunto,
-        message: 'Tu cuenta fue creada. Ingresa con las credenciales mostradas.',
-      };
+      return { success: true, usuario };
     } catch (err: any) {
-      this.logger.error(`[invite] selfRegister: ${err?.message}`);
+      this.logger.error(`[invite] crearPropietario: ${err?.message}`);
       return { success: false, message: err?.message || 'No se pudo crear la cuenta.' };
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 1b. Solicitudes de registro (aprobación del administrador)
+  // ---------------------------------------------------------------------------
+
+  private solicitudesRef(conjunto: string, id = '') {
+    return this.firebase.db().ref(`${SOLICITUDES_PATH}/${this.safeKey(conjunto.toLowerCase())}${id ? `/${id}` : ''}`);
+  }
+
+  private async todasSolicitudes(conjunto: string): Promise<SolicitudRegistro[]> {
+    const snap = await this.solicitudesRef(conjunto).get();
+    const v = snap.exists() ? (snap.val() as Record<string, SolicitudRegistro>) : {};
+    return Object.entries(v || {}).map(([id, s]) => ({ ...(s as any), id }));
+  }
+
+  private async crearSolicitud(conjunto: string, datos: DatosSolicitud): Promise<{
+    success: boolean; pendiente?: boolean; conjunto?: string; message?: string;
+  }> {
+    if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
+    try {
+      const todas = await this.todasSolicitudes(conjunto);
+      const pendientes = todas.filter((s) => s.estado === 'pendiente');
+      if (solicitudRepetida(datos, pendientes)) {
+        return {
+          success: true, pendiente: true, conjunto,
+          message: 'Ya tienes una solicitud enviada. La administración la revisará pronto.',
+        };
+      }
+      if (pendientes.length >= MAX_PENDIENTES) {
+        return { success: false, message: 'Hay demasiadas solicitudes pendientes. Comunícate con la administración.' };
+      }
+      const ref = this.solicitudesRef(conjunto).push();
+      const solicitud: Omit<SolicitudRegistro, 'id'> = {
+        ...datos,
+        conjunto,
+        estado: 'pendiente',
+        creadaEn: new Date().toISOString(),
+      };
+      await ref.set(solicitud);
+      this.activity?.log({
+        vista: 'Solicitó registro por QR',
+        usuario: datos.nombre,
+        conjunto,
+        detalle: { accion: 'Solicitud', recurso: 'Propietario', nombre: datos.nombre, unidad: datos.parcela },
+      });
+      return {
+        success: true, pendiente: true, conjunto,
+        message: 'Tu solicitud fue enviada. Cuando la administración la apruebe te llegarán tus datos de acceso.',
+      };
+    } catch (err: any) {
+      this.logger.error(`[invite] crearSolicitud: ${err?.message}`);
+      return { success: false, message: 'No se pudo enviar tu solicitud. Intenta de nuevo.' };
+    }
+  }
+
+  /** Solicitudes del conjunto (por defecto solo pendientes) con advertencias para revisar. */
+  async listarSolicitudes(conjunto: string, estado: EstadoSolicitud | 'todas' = 'pendiente'): Promise<{
+    success: boolean;
+    data: Array<SolicitudRegistro & { advertencias: Advertencia[] }>;
+    message?: string;
+  }> {
+    if (!this.firebase.isEnabled()) return { success: false, data: [], message: 'Servicio no disponible.' };
+    try {
+      const [todas, usuarios] = await Promise.all([this.todasSolicitudes(conjunto), this.users.list(conjunto)]);
+      const data = todas
+        .filter((s) => estado === 'todas' || s.estado === estado)
+        .sort((a, b) => String(b.creadaEn || '').localeCompare(String(a.creadaEn || '')))
+        .map((s) => ({ ...s, advertencias: s.estado === 'pendiente' ? advertencias(s, usuarios) : [] }));
+      return { success: true, data };
+    } catch (err: any) {
+      this.logger.error(`[invite] listarSolicitudes: ${err?.message}`);
+      return { success: false, data: [], message: err?.message };
+    }
+  }
+
+  /**
+   * Aprueba: crea la cuenta (con los cambios del admin, si los hay) y envía las
+   * credenciales por WhatsApp. Sin teléfono (o sin WhatsApp conectado) devuelve
+   * un acceso temporal para que el admin lo comunique.
+   */
+  async aprobarSolicitud(conjunto: string, id: string, cambios: Partial<DatosSolicitud> | undefined, actor: string): Promise<{
+    success: boolean;
+    usuario?: string;
+    enviadoPorWhatsapp?: boolean;
+    credenciales?: { usuario: string; password: string };
+    message?: string;
+  }> {
+    if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
+    const ref = this.solicitudesRef(conjunto, this.safeKey(id));
+    const snap = await ref.get();
+    if (!snap.exists()) return { success: false, message: 'La solicitud no existe.' };
+    const s = snap.val() as SolicitudRegistro;
+    if (s.estado !== 'pendiente') return { success: false, message: `La solicitud ya fue ${s.estado}.` };
+
+    const datos = limpiarDatos({ ...s, ...(cambios || {}) });
+    if (!datos.nombre) return { success: false, message: 'El nombre es obligatorio.' };
+
+    // Marca primero (evita que dos admins la aprueben a la vez y queden 2 cuentas).
+    const tx = await ref.child('estado').transaction((e: any) => (e === 'pendiente' || e === null ? 'aprobando' : undefined));
+    if (!tx.committed) return { success: false, message: 'Otra persona ya está resolviendo esta solicitud.' };
+
+    const r = await this.crearPropietario(conjunto, datos, 'Aprobó registro', actor);
+    if (!r.success || !r.usuario) {
+      await ref.update({ estado: 'pendiente' });
+      return { success: false, message: r.message || 'No se pudo crear la cuenta.' };
+    }
+    await ref.update({
+      ...datos,
+      estado: 'aprobada',
+      usuario: r.usuario,
+      resueltaPor: actor,
+      resueltaEn: new Date().toISOString(),
+    });
+
+    let enviado = false;
+    if (normTelefono(datos.phone).length >= 7) {
+      const env = await this.sendCredentials(r.usuario, conjunto).catch(() => ({ success: false }));
+      enviado = !!env.success;
+    }
+    if (enviado) {
+      return { success: true, usuario: r.usuario, enviadoPorWhatsapp: true, message: `Cuenta creada. Le enviamos sus datos de acceso por WhatsApp.` };
+    }
+    const temp = await this.generateTempAccess(r.usuario);
+    return {
+      success: true,
+      usuario: r.usuario,
+      enviadoPorWhatsapp: false,
+      credenciales: temp.success && temp.password ? { usuario: r.usuario, password: temp.password } : undefined,
+      message: 'Cuenta creada. Compártele sus datos de acceso.',
+    };
+  }
+
+  /** Rechaza la solicitud y, si dejó teléfono, le avisa por WhatsApp. */
+  async rechazarSolicitud(conjunto: string, id: string, motivo: string | undefined, actor: string): Promise<{ success: boolean; message?: string }> {
+    if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
+    const ref = this.solicitudesRef(conjunto, this.safeKey(id));
+    const snap = await ref.get();
+    if (!snap.exists()) return { success: false, message: 'La solicitud no existe.' };
+    const s = snap.val() as SolicitudRegistro;
+    if (s.estado !== 'pendiente') return { success: false, message: `La solicitud ya fue ${s.estado}.` };
+    const m = String(motivo || '').trim().slice(0, 300);
+    await ref.update({ estado: 'rechazada', motivo: m, resueltaPor: actor, resueltaEn: new Date().toISOString() });
+    this.activity?.log({
+      vista: 'Rechazó registro por QR',
+      usuario: actor,
+      conjunto,
+      detalle: { accion: 'Rechazó registro', recurso: 'Propietario', nombre: s.nombre, motivo: m },
+    });
+    const tel = String(s.phone || '').replace(/\D/g, '');
+    if (tel.length >= 7) {
+      const texto =
+        `Hola ${String(s.nombre || '').split(' ')[0]}, la administración de *${conjunto}* no aprobó tu registro en GoPase` +
+        (m ? `:\n\n_${m}_` : '.') +
+        `\n\nSi crees que es un error, comunícate con la administración.`;
+      await this.whatsapp.sendMessage(tel, texto, conjunto).catch(() => false);
+    }
+    return { success: true, message: 'Solicitud rechazada.' };
+  }
+
+  // --- Configuración: ¿los registros por QR requieren aprobación? ---
+
+  private async findConjunto(conjunto: string): Promise<{ key: string; value: any } | null> {
+    const t = String(conjunto || '').trim().toLowerCase();
+    if (!t || !this.firebase.isEnabled()) return null;
+    const all = (await this.firebase.liveVal<Record<string, any>>(MIRROR_CONJUNTOS)) || {};
+    for (const [key, value] of Object.entries(all)) {
+      const v = value as any;
+      if (String(v?.nombre ?? '').trim().toLowerCase() === t || String(v?.id ?? '').trim().toLowerCase() === t || key.toLowerCase() === t) {
+        return { key, value };
+      }
+    }
+    return null;
+  }
+
+  async getRegistroConfig(conjunto: string): Promise<{ requiereAprobacion: boolean }> {
+    const c = await this.findConjunto(conjunto);
+    return { requiereAprobacion: requiereAprobacion(c?.value) };
+  }
+
+  async setRegistroConfig(conjunto: string, requiere: boolean): Promise<{ success: boolean; requiereAprobacion?: boolean; message?: string }> {
+    const c = await this.findConjunto(conjunto);
+    if (!c) return { success: false, message: 'El conjunto no existe.' };
+    await this.firebase.db().ref(`${MIRROR_CONJUNTOS}/${c.key}`).update({ registroQr: { requiereAprobacion: !!requiere }, _fbWrite: true });
+    return {
+      success: true,
+      requiereAprobacion: !!requiere,
+      message: requiere ? 'Los registros por QR quedarán pendientes de tu aprobación.' : 'Los registros por QR crearán la cuenta de inmediato.',
+    };
   }
 
   // ---------------------------------------------------------------------------
