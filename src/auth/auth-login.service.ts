@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { conPropietario, esInquilino, mensajeAccesoInquilino, resumenParaSesion, segundosHastaFin } from '../tenants/tenant-rules';
 import { FirebaseService } from '../firebase/firebase.service';
+import { candidatosLogin } from '../users/login-acceso.rules';
 import { recoverPassword } from './password.util';
 import { validatePasswordPolicy } from './password-policy.util';
 import { SessionTracker } from '../activity-audit/core/session-tracker';
@@ -181,8 +182,38 @@ export class AuthLoginService {
 
     const email = this.usernameToEmail(user);
 
-    // 1. Validar la contraseña contra Firebase Auth (REST identitytoolkit).
-    let uid: string;
+    // 1. Validar la contraseña contra Firebase Auth (REST identitytoolkit) con el
+    //    usuario de la app (camino de siempre).
+    const primero = await this.signIn(email, password);
+    if (primero.error) {
+      this.logger.error(`Error validando login de ${user}: ${primero.error}`);
+      return { success: false, message: 'Error de conexión con el servicio de autenticación.' };
+    }
+    if (primero.uid) return this.buildUserResponse(primero.uid, email);
+
+    // 2. No entró con el usuario: puede haber escrito su cédula o su correo
+    //    (según lo que escogió la administración), o su cuenta tiene en Auth un
+    //    correo distinto al sintético. Se prueba la contraseña en cada cuenta
+    //    que coincide; la primera que la acepte es la suya.
+    const intentos = await this.cuentasAlternas(user, email);
+    for (const c of intentos) {
+      const r = await this.signIn(c.email, password);
+      if (r.uid) {
+        this.logger.log(`[login] acceso con ${c.motivo} → usuario=${r.uid}`);
+        return this.buildUserResponse(r.uid, c.email);
+      }
+    }
+
+    // Diagnóstico SIN exponer la contraseña: email construido, código de
+    // Firebase y longitud de la clave descifrada.
+    this.logger.warn(
+      `[login] rechazado email=${email} fbCode=${primero.code} passLen=${password.length} alternas=${intentos.length}`,
+    );
+    return { success: false, message: 'Credenciales incorrectas' };
+  }
+
+  /** signInWithPassword. uid si entra; code si Firebase lo rechaza; error si falla la red. */
+  private async signIn(email: string, password: string): Promise<{ uid?: string; code?: string; error?: string }> {
     try {
       const resp = await fetch(
         `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${this.webApiKey}`,
@@ -193,23 +224,49 @@ export class AuthLoginService {
         },
       );
       const data: any = await resp.json();
-      if (!resp.ok) {
-        // Errores típicos: EMAIL_NOT_FOUND, INVALID_PASSWORD, INVALID_LOGIN_CREDENTIALS.
-        const code = data?.error?.message || 'INVALID_CREDENTIALS';
-        // Diagnóstico SIN exponer la contraseña: email construido, código de
-        // Firebase y longitud de la clave descifrada.
-        this.logger.warn(
-          `[login] rechazado email=${email} fbCode=${code} passLen=${password.length}`,
-        );
-        return { success: false, message: 'Credenciales incorrectas' };
-      }
-      uid = data.localId;
+      // Errores típicos: EMAIL_NOT_FOUND, INVALID_PASSWORD, INVALID_LOGIN_CREDENTIALS.
+      if (!resp.ok) return { code: data?.error?.message || 'INVALID_CREDENTIALS' };
+      return { uid: data.localId };
     } catch (err: any) {
-      this.logger.error(`Error validando login de ${user}: ${err?.message}`);
-      return { success: false, message: 'Error de conexión con el servicio de autenticación.' };
+      return { error: err?.message || 'fetch' };
     }
+  }
 
-    return this.buildUserResponse(uid, email);
+  /**
+   * Cuentas a probar cuando el usuario escrito no entró:
+   *   - la misma cuenta, si en Auth quedó con su correo real (creada sin email sintético);
+   *   - las cuentas que inician sesión con esa cédula o ese correo.
+   */
+  private async cuentasAlternas(escrito: string, yaProbado: string): Promise<Array<{ email: string; motivo: string }>> {
+    const out: Array<{ email: string; motivo: string }> = [];
+    const vistos = new Set<string>([yaProbado.toLowerCase()]);
+    let usuarios: Record<string, any> = {};
+    try {
+      usuarios = (await this.firebase.liveVal<Record<string, any>>('mirror/usuarios')) || {};
+    } catch {
+      return out;
+    }
+    const clave = escrito.trim().replace(/[.#$/\[\]]/g, '_');
+    const uids: Array<{ uid: string; motivo: string }> = [];
+    for (const k of Array.from(new Set([clave, clave.toLowerCase()]))) {
+      if (usuarios[k]) uids.push({ uid: k, motivo: 'usuario' });
+    }
+    for (const uid of candidatosLogin(usuarios, escrito)) {
+      if (!uids.some((x) => x.uid === uid)) uids.push({ uid, motivo: escrito.includes('@') ? 'correo' : 'cédula' });
+    }
+    for (const { uid, motivo } of uids.slice(0, 10)) {
+      try {
+        const rec = await this.firebase.auth().getUser(uid);
+        const e = String(rec.email || '').toLowerCase();
+        if (e && !vistos.has(e)) {
+          vistos.add(e);
+          out.push({ email: e, motivo });
+        }
+      } catch {
+        // la cuenta no está en Auth: se ignora
+      }
+    }
+    return out;
   }
 
   /**
