@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { FirebaseService } from '../firebase/firebase.service';
 import { recoverPassword } from '../auth/password.util';
 import { conPropietario } from '../tenants/tenant-rules';
+import { conflictoLogin, normLoginCon, validarLoginCon } from './login-acceso.rules';
 
 /**
  * CRUD de usuarios contra Firebase (RTDB mirror/usuarios + Firebase Auth).
@@ -49,6 +50,8 @@ export interface UserDTO {
    * administra varios conjuntos, cada uno con su propio usuario/contraseña).
    */
   authEmailSintetico?: boolean;
+  /** Con qué inicia sesión: documento | correo | usuario (ver login-acceso.rules). */
+  loginCon?: string;
 }
 
 const MIRROR_USERS = 'mirror/usuarios';
@@ -149,6 +152,7 @@ export class UsersService {
       placa2: dto.placa2 || '',
       fechaIngreso: dto.fechaIngreso || '',
       etiquetas: Array.isArray(dto.etiquetas) ? dto.etiquetas : [],
+      ...(normLoginCon(dto.loginCon) ? { loginCon: normLoginCon(dto.loginCon) } : {}),
       // Fecha de creación (ISO). Solo se escribe al crear; update() no la toca.
       createdAt: new Date().toISOString(),
       _fbWrite: true,
@@ -180,6 +184,20 @@ export class UsersService {
   }
 
   /**
+   * Revisa el método de inicio de sesión del perfil: que tenga el dato que
+   * necesita y que nadie más del conjunto entre con la misma cédula o correo.
+   */
+  private async validarAcceso(perfil: any): Promise<string | null> {
+    const lc = normLoginCon(perfil?.loginCon);
+    if (!lc || lc === 'usuario') return null;
+    const falta = validarLoginCon(lc, perfil);
+    if (falta) return falta;
+    const todos = (await this.firebase.liveVal<Record<string, any>>(MIRROR_USERS)) || {};
+    const lista = Object.entries(todos).map(([k, u]) => ({ ...(u as any), usuario: (u as any)?.usuario ?? k }));
+    return conflictoLogin(lista, { ...perfil, usuario: String(perfil.usuario || ''), loginCon: lc });
+  }
+
+  /**
    * Crea un usuario: perfil en RTDB + cuenta en Firebase Auth.
    * La contraseña llega cifrada; si no sirve (<6), se usa la temporal y se marca
    * mustChangePassword.
@@ -197,6 +215,8 @@ export class UsersService {
 
     const conjuntoId = await this.resolveConjuntoId(dto.conjunto || dto.complex || '');
     const profile = this.buildProfile(dto, conjuntoId);
+    const errLogin = await this.validarAcceso(profile);
+    if (errLogin) return { success: false, message: errLogin };
 
     // Contraseña: descifrar la que llega (XOR). Si no sirve, temporal.
     const recovered = recoverPassword(String(dto.password || ''));
@@ -275,6 +295,16 @@ export class UsersService {
       setIf('fechaIngreso', dto.fechaIngreso);
       // Etiquetas (array de ids). Solo se tocan si el DTO las incluye.
       if (Array.isArray(dto.etiquetas)) patch.etiquetas = dto.etiquetas;
+      if (dto.loginCon !== undefined) {
+        const lc = normLoginCon(dto.loginCon);
+        if (!lc) return { success: false, message: 'Método de inicio de sesión no válido (cédula, correo o usuario).' };
+        patch.loginCon = lc;
+      }
+
+      // Con qué entra: valida con los datos resultantes (cambiar la cédula o el
+      // correo también puede chocar con otra persona del conjunto).
+      const errLogin = await this.validarAcceso({ ...prev, ...patch, usuario: prev.usuario || key });
+      if (errLogin) return { success: false, message: errLogin };
 
       await ref.update(patch);
 

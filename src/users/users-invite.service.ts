@@ -25,6 +25,7 @@ import {
   Advertencia, DatosSolicitud, EstadoSolicitud, MAX_PENDIENTES, SolicitudRegistro,
   advertencias, limpiarDatos, normTelefono, requiereAprobacion, solicitudRepetida,
 } from './registro-solicitudes.rules';
+import { LoginCon, loginConPorDefecto, normLoginCon, textoAcceso, validarLoginCon } from './login-acceso.rules';
 
 const MIRROR_USERS = 'mirror/usuarios';
 const INVITE_TOKENS_PATH = 'mirror/inviteTokens';
@@ -135,6 +136,7 @@ export class UsersInviteService {
     pendiente?: boolean;
     usuario?: string;
     password?: string;
+    acceso?: { etiqueta: string; valor: string };
     conjunto?: string;
     message?: string;
   }> {
@@ -154,11 +156,18 @@ export class UsersInviteService {
       return this.crearSolicitud(conjunto, datos);
     }
 
-    const r = await this.crearPropietario(conjunto, datos, 'Autoregistro');
+    // Entra con su cédula (o correo); si otra persona del conjunto ya usa ese
+    // dato, con el usuario generado (la administración lo puede cambiar luego).
+    let r = await this.crearPropietario(conjunto, datos, 'Autoregistro');
+    if (!r.success && /ya inicia sesión con/.test(String(r.message))) {
+      r = await this.crearPropietario(conjunto, datos, 'Autoregistro', undefined, 'usuario');
+    }
     if (!r.success) return { success: false, message: r.message };
+    const creado = (await this.firebase.db().ref(`${MIRROR_USERS}/${this.safeKey(r.usuario || '')}`).get()).val() || {};
     return {
       success: true,
       usuario: r.usuario,
+      acceso: textoAcceso({ ...creado, usuario: r.usuario }),
       password: this.tempPassword,
       conjunto,
       message: 'Tu cuenta fue creada. Ingresa con las credenciales mostradas.',
@@ -171,6 +180,7 @@ export class UsersInviteService {
     datos: DatosSolicitud,
     accion: string,
     actor?: string,
+    loginCon: LoginCon = loginConPorDefecto(datos),
   ): Promise<{ success: boolean; usuario?: string; message?: string }> {
     // Generar username único (igual que onboarding: NFD + sufijo si hace falta).
     const base = this.generarUsuarioBase(datos.nombre);
@@ -189,6 +199,7 @@ export class UsersInviteService {
         conjunto,
         parcela: datos.parcela || '',
         authEmailSintetico: true,
+        loginCon,
         // Sin password → el servicio usará AUTH_TEMP_PASSWORD y marcará mustChangePassword.
       });
       if (!result.success) return { success: false, message: result.message };
@@ -289,7 +300,7 @@ export class UsersInviteService {
     success: boolean;
     usuario?: string;
     enviadoPorWhatsapp?: boolean;
-    credenciales?: { usuario: string; password: string };
+    credenciales?: { usuario: string; password: string; acceso?: { etiqueta: string; valor: string } };
     message?: string;
   }> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
@@ -301,12 +312,15 @@ export class UsersInviteService {
 
     const datos = limpiarDatos({ ...s, ...(cambios || {}) });
     if (!datos.nombre) return { success: false, message: 'El nombre es obligatorio.' };
+    const loginCon = normLoginCon((cambios as any)?.loginCon) || loginConPorDefecto(datos);
+    const falta = validarLoginCon(loginCon, datos);
+    if (falta) return { success: false, message: falta };
 
     // Marca primero (evita que dos admins la aprueben a la vez y queden 2 cuentas).
     const tx = await ref.child('estado').transaction((e: any) => (e === 'pendiente' || e === null ? 'aprobando' : undefined));
     if (!tx.committed) return { success: false, message: 'Otra persona ya está resolviendo esta solicitud.' };
 
-    const r = await this.crearPropietario(conjunto, datos, 'Aprobó registro', actor);
+    const r = await this.crearPropietario(conjunto, datos, 'Aprobó registro', actor, loginCon);
     if (!r.success || !r.usuario) {
       await ref.update({ estado: 'pendiente' });
       return { success: false, message: r.message || 'No se pudo crear la cuenta.' };
@@ -332,7 +346,7 @@ export class UsersInviteService {
       success: true,
       usuario: r.usuario,
       enviadoPorWhatsapp: false,
-      credenciales: temp.success && temp.password ? { usuario: r.usuario, password: temp.password } : undefined,
+      credenciales: temp.success && temp.password ? { usuario: r.usuario, password: temp.password, acceso: temp.acceso } : undefined,
       message: 'Cuenta creada. Compártele sus datos de acceso.',
     };
   }
@@ -490,10 +504,12 @@ export class UsersInviteService {
     // 2. Envía por WhatsApp con la contraseña recién generada.
     const nombre = String(user.nombre || username);
     const appUrl = this.frontendUrl;
+    // Con qué entra (cédula, correo o usuario, según lo que escogió la administración).
+    const acceso = textoAcceso({ ...user, usuario: username });
     const mensaje =
       `¡Hola ${nombre}! 👋\n\n` +
       `Te compartimos tus datos de acceso a *GoPase* para el conjunto *${conjunto}*:\n\n` +
-      `👤 *Usuario:* ${username}\n` +
+      `👤 *${acceso.etiqueta}:* ${acceso.valor}\n` +
       `🔑 *Contraseña temporal:* ${password}\n\n` +
       `Ingresa aquí: ${appUrl}\n\n` +
       `_Al entrar por primera vez se te pedirá crear una contraseña nueva._`;
@@ -533,6 +549,8 @@ export class UsersInviteService {
     success: boolean;
     usuario?: string;
     password?: string;
+    /** Con qué debe entrar: { etiqueta: 'Cédula', valor: '1020304' }. */
+    acceso?: { etiqueta: string; valor: string };
     message?: string;
   }> {
     if (!this.firebase.isEnabled()) return { success: false, message: 'Servicio no disponible.' };
@@ -562,7 +580,7 @@ export class UsersInviteService {
         detalle: { accion: 'Reseteo', recurso: 'Contraseña temporal', porAdmin: true },
       });
 
-      return { success: true, usuario: username, password };
+      return { success: true, usuario: username, password, acceso: textoAcceso({ ...snap.val(), usuario: username }) };
     } catch (err: any) {
       this.logger.error(`[invite] generateTempAccess ${key}: ${err?.message}`);
       return { success: false, message: err?.message || 'No se pudo generar el acceso.' };

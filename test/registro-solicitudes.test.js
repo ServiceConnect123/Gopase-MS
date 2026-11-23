@@ -100,7 +100,7 @@ function escenario({ requiere } = {}) {
     list: async (c) => Object.values(fb.data.mirror.usuarios).filter((u) => u.conjunto === c),
     create: async (dto) => {
       if (fb.data.mirror.usuarios[dto.usuario]) return { success: false, message: 'El usuario ya existe.' };
-      fb.data.mirror.usuarios[dto.usuario] = { usuario: dto.usuario, nombre: dto.nombre, rol: dto.rol, conjunto: dto.conjunto, parcela: dto.parcela, phone: dto.phone };
+      fb.data.mirror.usuarios[dto.usuario] = { usuario: dto.usuario, nombre: dto.nombre, rol: dto.rol, conjunto: dto.conjunto, parcela: dto.parcela, phone: dto.phone, loginCon: dto.loginCon, docNum: dto.documentNumber, email: dto.email };
       creados.push(dto);
       return { success: true };
     },
@@ -163,7 +163,30 @@ test('aprobar sin teléfono devuelve credenciales para el admin', async () => {
   const r = await svc.aprobarSolicitud('Villa Sol', id, undefined, 'admin1');
   assert.strictEqual(r.success, true);
   assert.strictEqual(r.enviadoPorWhatsapp, false);
-  assert.deepStrictEqual(r.credenciales, { usuario: r.usuario, password: 'Tmp-123' });
+  assert.strictEqual(r.credenciales.usuario, r.usuario);
+  assert.strictEqual(r.credenciales.password, 'Tmp-123');
+});
+
+test('aprobar respeta el método de inicio de sesión escogido y por defecto usa la cédula', async () => {
+  const { fb, svc, creados } = escenario();
+  await svc.selfRegister('ok', { nombre: 'Lia Mar', documentNumber: '44556677', email: 'lia@x.co', phone: '3001110000' });
+  await svc.selfRegister('ok', { nombre: 'Teo Paz', documentNumber: '88990011', email: 'teo@x.co', phone: '3002220000' });
+  const [id1, id2] = Object.keys(fb.data.solicitudes_registro['villa sol']);
+  assert.strictEqual((await svc.aprobarSolicitud('Villa Sol', id1, undefined, 'a')).success, true);
+  assert.strictEqual(creados[0].loginCon, 'documento');
+  assert.strictEqual((await svc.aprobarSolicitud('Villa Sol', id2, { loginCon: 'correo' }, 'a')).success, true);
+  assert.strictEqual(creados[1].loginCon, 'correo');
+});
+
+test('aprobar con correo pero sin correo registrado no crea nada', async () => {
+  const { fb, svc, creados } = escenario();
+  await svc.selfRegister('ok', { nombre: 'Sin Correo', documentNumber: '12121212' });
+  const id = Object.keys(fb.data.solicitudes_registro['villa sol'])[0];
+  const r = await svc.aprobarSolicitud('Villa Sol', id, { loginCon: 'correo' }, 'a');
+  assert.strictEqual(r.success, false);
+  assert.match(r.message, /correo válido/);
+  assert.strictEqual(creados.length, 0);
+  assert.strictEqual(fb.data.solicitudes_registro['villa sol'][id].estado, 'pendiente');
 });
 
 test('rechazar avisa por WhatsApp y deja la solicitud cerrada', async () => {
