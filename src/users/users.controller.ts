@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, Query, Req } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Param, Post, Put, Query, Req } from '@nestjs/common';
 import { ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { UsersService, UserDTO } from './users.service';
 import { UsersImportService } from './users-import.service';
@@ -169,6 +169,66 @@ export class UsersController {
   }) {
     const { token, ...data } = body || {};
     return this.usersInvite.selfRegister(token || '', data);
+  }
+
+  // ==========================================================================
+  // Solicitudes de registro por QR (aprobación del administrador)
+  // ==========================================================================
+
+  /** Conjunto que gestiona el admin (el suyo); el superAdmin lo indica. */
+  private async conjuntoAdmin(req: any, pedido?: string): Promise<string> {
+    if (req?.user) {
+      const rol = String(req.user.rol || '').toLowerCase();
+      if (rol !== 'admin' && rol !== 'superadmin') throw new ForbiddenException('Solo la administración gestiona las solicitudes de registro.');
+      if (rol === 'admin') {
+        const propio = String((await conjuntoPropioDelRequest(req, this.firebase)) || '');
+        if (!propio) throw new ForbiddenException('Tu usuario no tiene conjunto.');
+        return propio;
+      }
+    }
+    const c = String(pedido || '').trim();
+    if (!c) throw new BadRequestException('Indica el conjunto.');
+    return c;
+  }
+
+  private actor(req: any): string {
+    return String(req?.user?.sub || req?.user?.usuario || 'admin');
+  }
+
+  @ApiOperation({ summary: 'Solicitudes de registro por QR del conjunto (admin). estado=pendiente|aprobada|rechazada|todas' })
+  @Get('solicitudes')
+  async solicitudes(@Req() req: any, @Query('conjunto') conjunto?: string, @Query('estado') estado?: string) {
+    const c = await this.conjuntoAdmin(req, conjunto);
+    const e = ['pendiente', 'aprobada', 'rechazada', 'todas'].includes(String(estado)) ? (estado as any) : 'pendiente';
+    return this.usersInvite.listarSolicitudes(c, e);
+  }
+
+  @ApiOperation({ summary: 'Aprobar una solicitud (opcionalmente con datos corregidos). Crea la cuenta y envía credenciales.' })
+  @Post('solicitudes/:id/aprobar')
+  async aprobarSolicitud(@Req() req: any, @Param('id') id: string, @Body() body: any) {
+    const c = await this.conjuntoAdmin(req, body?.conjunto);
+    return this.usersInvite.aprobarSolicitud(c, id, body?.cambios, this.actor(req));
+  }
+
+  @ApiOperation({ summary: 'Rechazar una solicitud (motivo opcional; se avisa por WhatsApp).' })
+  @Post('solicitudes/:id/rechazar')
+  async rechazarSolicitud(@Req() req: any, @Param('id') id: string, @Body() body: any) {
+    const c = await this.conjuntoAdmin(req, body?.conjunto);
+    return this.usersInvite.rechazarSolicitud(c, id, body?.motivo, this.actor(req));
+  }
+
+  @ApiOperation({ summary: '¿Los registros por QR requieren aprobación? (admin)' })
+  @Get('registro-config')
+  async registroConfig(@Req() req: any, @Query('conjunto') conjunto?: string) {
+    const c = await this.conjuntoAdmin(req, conjunto);
+    return { success: true, conjunto: c, ...(await this.usersInvite.getRegistroConfig(c)) };
+  }
+
+  @ApiOperation({ summary: 'Activar/desactivar la aprobación de registros por QR (admin).' })
+  @Post('registro-config')
+  async guardarRegistroConfig(@Req() req: any, @Body() body: any) {
+    const c = await this.conjuntoAdmin(req, body?.conjunto);
+    return this.usersInvite.setRegistroConfig(c, body?.requiereAprobacion !== false);
   }
 
   @ApiOperation({
