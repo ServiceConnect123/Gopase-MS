@@ -42,9 +42,16 @@ const MODELS = (process.env.GEMINI_CHAT_MODELS || 'gemini-flash-latest,gemini-3.
   .split(',')
   .map((m) => m.trim())
   .filter(Boolean);
-/** Esperas entre reintentos ante saturación (ms) y tiempo máximo de toda la respuesta. */
-const ESPERAS = [2000, 5000];
-const DEADLINE_MS = 45000;
+/**
+ * Tiempos. El navegador del iPhone corta la petición si no hay respuesta en
+ * ~60 s ("Load failed"), así que TODO (reintentos incluidos) debe terminar antes:
+ *  - cada llamada a Gemini tiene su propio tope (cuando está saturado puede
+ *    tardar 25 s solo en devolver el 503);
+ *  - ante saturación se prueba enseguida el otro modelo y solo después se espera.
+ */
+const ESPERAS = [1500, 4000];
+const DEADLINE_MS = 40000;
+const TOPE_LLAMADA_MS = 18000;
 const MAX_HISTORY = 20;
 
 let instance: { ai: Genkit; ownersTool: any } | null = null;
@@ -134,24 +141,38 @@ export async function runFinanceChat(params: {
   const limite = Date.now() + DEADLINE_MS;
   const sistema = `${SYSTEM(params.context, params.year)}\n\nFecha de hoy: ${hoyColombia()}.`;
   const resultado = await conCupo(params.apiKey, async () => {
-    for (const model of MODELS) {
-      for (let attempt = 0; attempt <= ESPERAS.length; attempt++) {
-        if (Date.now() > limite - 3000) return null;
+    // Rondas: en cada una se prueban todos los modelos; entre rondas se espera.
+    for (let ronda = 0; ronda <= ESPERAS.length; ronda++) {
+      let reintentar = false;
+      for (const model of MODELS) {
+        const restante = limite - Date.now() - 1000;
+        if (restante < 4000) return null;
+        const corte = new AbortController();
+        const tope = Math.min(TOPE_LLAMADA_MS, restante);
+        let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-          const res = await ai.generate({
-            model: googleAI.model(model),
-            system: sistema,
-            messages,
-            prompt: question,
-            tools: [ownersTool],
-            maxTurns: 3,
-            config: { apiKey: params.apiKey, temperature: 0.3 } as any,
-            context: { conjunto: params.conjunto, year: params.year, loadOwners: params.loadOwners } as any,
-          });
-          const text = (res.text || '').trim();
+          const res: any = await Promise.race([
+            ai.generate({
+              model: googleAI.model(model),
+              system: sistema,
+              messages,
+              prompt: question,
+              tools: [ownersTool],
+              maxTurns: 3,
+              abortSignal: corte.signal,
+              config: { apiKey: params.apiKey, temperature: 0.3 } as any,
+              context: { conjunto: params.conjunto, year: params.year, loadOwners: params.loadOwners } as any,
+            } as any),
+            new Promise((_, rej) => {
+              timer = setTimeout(() => {
+                corte.abort();
+                rej(Object.assign(new Error(`timeout ${model}`), { timeout: true }));
+              }, tope);
+            }),
+          ]);
+          const text = String(res?.text || '').trim();
           if (text) return { success: true, text };
           lastError = new Error('Respuesta vacía');
-          break;
         } catch (e: any) {
           lastError = e;
           const status = e?.status ?? e?.code ?? e?.detail?.status;
@@ -159,22 +180,28 @@ export async function runFinanceChat(params: {
           if (/api key|permission|unauthenticated|invalid_argument.*key/.test(msg)) {
             return { success: false, message: 'La API key de Gemini del conjunto no es válida. Revísala en Conjuntos.' };
           }
-          const saturado = status === 429 || status === 503 || status === 500 || /resource_exhausted|unavailable|overloaded|429|503|500/.test(msg);
-          const espera = ESPERAS[attempt];
-          if (saturado && espera !== undefined && Date.now() + espera < limite - 3000) {
-            await new Promise((r) => setTimeout(r, espera + Math.floor(Math.random() * 300)));
-            continue;
+          // Saturado, lento o falla de red: vale la pena reintentar más adelante.
+          if (
+            e?.timeout ||
+            status === 429 || status === 503 || status === 500 ||
+            /resource_exhausted|unavailable|overloaded|high demand|429|503|500|fetch failed|timeout|aborted/.test(msg)
+          ) {
+            reintentar = true;
           }
-          break; // probar el siguiente modelo
+        } finally {
+          if (timer) clearTimeout(timer);
         }
       }
+      const espera = ESPERAS[ronda];
+      if (!reintentar || espera === undefined || Date.now() + espera > limite - 5000) break;
+      await new Promise((r) => setTimeout(r, espera + Math.floor(Math.random() * 300)));
     }
     return null;
   });
   if (resultado) return resultado;
 
   const msg = String(lastError?.message || '').toLowerCase();
-  if (/429|503|resource_exhausted|unavailable|overloaded/.test(msg)) {
+  if (lastError?.timeout || /429|503|resource_exhausted|unavailable|overloaded|high demand|timeout|aborted|fetch failed/.test(msg)) {
     return { success: false, message: 'El servicio de IA está saturado. Inténtalo de nuevo en un minuto.' };
   }
   return { success: false, message: 'No se pudo obtener respuesta de la IA.' };
