@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import * as ExcelJS from 'exceljs';
 import { FirebaseService } from '../firebase/firebase.service';
 import { UsersService } from './users.service';
+import { LoginCon, conflictoLogin, loginConPorDefecto, normLoginCon, validarLoginCon } from './login-acceso.rules';
 
 /**
  * Import/export MASIVO de PROPIETARIOS vía Excel (.xlsx). El backend genera la
@@ -26,12 +27,15 @@ import { UsersService } from './users.service';
  *   placa1
  *   placa2
  *   fechaIngreso (YYYY-MM-DD)
+ *   iniciaSesionCon (Cédula | Correo | Usuario). Vacío al crear: cédula si la
+ *                tiene, si no correo, si no el usuario. Vacío al editar: no cambia.
  *   eliminar     ("x"/"si"/"true" para borrar esa fila; requiere usuario)
  */
 const HEADERS = [
   'usuario', 'nombre', 'email', 'documentType', 'documentNumber',
-  'phone', 'conjunto', 'parcela', 'placa1', 'placa2', 'fechaIngreso', 'eliminar',
+  'phone', 'conjunto', 'parcela', 'placa1', 'placa2', 'fechaIngreso', 'iniciaSesionCon', 'eliminar',
 ];
+const ETIQUETA_LOGIN: Record<LoginCon, string> = { documento: 'Cédula', correo: 'Correo', usuario: 'Usuario' };
 
 export interface UsersImportRowResult {
   fila: number;
@@ -84,6 +88,14 @@ export class UsersImportService {
       .filter((u) => !conjunto || this.norm(u.conjunto) === this.norm(conjunto));
   }
 
+  /** Todos los usuarios (para validar cédula/correo de acceso repetidos). */
+  private async getTodos(): Promise<any[]> {
+    if (!this.firebase.isEnabled()) return [];
+    const snap = await this.firebase.db().ref(MIRROR_USERS).get();
+    if (!snap.exists()) return [];
+    return Object.entries(snap.val() || {}).map(([k, u]: [string, any]) => ({ ...(u || {}), usuario: u?.usuario ?? k }));
+  }
+
   /** Mapa username -> rol (para validar que no se toque un superAdmin). */
   private async getRolesByUsername(): Promise<Map<string, string>> {
     const map = new Map<string, string>();
@@ -110,7 +122,7 @@ export class UsersImportService {
     ws.columns = HEADERS.map((h) => ({
       header: h,
       key: h,
-      width: h === 'nombre' || h === 'email' ? 28 : h === 'usuario' ? 22 : 16,
+      width: h === 'nombre' || h === 'email' ? 28 : h === 'usuario' || h === 'iniciaSesionCon' ? 22 : 16,
     }));
     ws.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
     ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A8A' } };
@@ -130,6 +142,7 @@ export class UsersImportService {
           placa1: u.placa1 ?? '',
           placa2: u.placa2 ?? '',
           fechaIngreso: (u.fechaIngreso ?? '').toString().split('T')[0],
+          iniciaSesionCon: ETIQUETA_LOGIN[normLoginCon(u.loginCon) || 'usuario'],
           eliminar: '',
         });
       }
@@ -146,8 +159,22 @@ export class UsersImportService {
         placa1: '',
         placa2: '',
         fechaIngreso: new Date().toISOString().split('T')[0],
+        iniciaSesionCon: 'Cédula',
         eliminar: '',
       });
+    }
+
+    // Lista desplegable para "iniciaSesionCon" (filas 2..1000).
+    const colLogin = HEADERS.indexOf('iniciaSesionCon') + 1;
+    for (let r = 2; r <= 1000; r++) {
+      ws.getRow(r).getCell(colLogin).dataValidation = {
+        type: 'list',
+        allowBlank: true,
+        formulae: ['"Cédula,Correo,Usuario"'],
+        showErrorMessage: true,
+        errorTitle: 'Inicia sesión con',
+        error: 'Escoge Cédula, Correo o Usuario.',
+      };
     }
 
     const arrayBuffer = await wb.xlsx.writeBuffer();
@@ -191,8 +218,11 @@ export class UsersImportService {
     const headerRow = ws.getRow(1);
     const colIndex: Record<string, number> = {};
     headerRow.eachCell((cell, col) => {
+      // Sin distinguir mayúsculas: antes "documentType", "documentNumber" y
+      // "fechaIngreso" no coincidían (se comparaban en minúscula) y se ignoraban.
       const name = this.norm(cell.value);
-      if (HEADERS.includes(name)) colIndex[name] = col;
+      const h = HEADERS.find((x) => x.toLowerCase() === name);
+      if (h) colIndex[h] = col;
     });
     if (colIndex['nombre'] == null && colIndex['usuario'] == null) {
       summary.errores = 1;
@@ -213,6 +243,9 @@ export class UsersImportService {
     };
 
     const rolesByUsername = await this.getRolesByUsername();
+    // Usuarios actuales + los que va dejando el archivo, para validar que dos
+    // personas del conjunto no entren con la misma cédula o correo.
+    const usuariosAcceso: any[] = await this.getTodos();
     const usernamesEnArchivo = new Set<string>();
     const ops: Array<() => Promise<void>> = [];
 
@@ -230,6 +263,7 @@ export class UsersImportService {
       const placa2 = cellStr(row, colIndex['placa2']);
       const fechaIngreso = cellStr(row, colIndex['fechaIngreso']).split('T')[0];
       const eliminar = this.norm(cellStr(row, colIndex['eliminar']));
+      const loginRaw = cellStr(row, colIndex['iniciaSesionCon']);
 
       // Fila totalmente vacía: se omite.
       if (!usuario && !nombre && !email && !documentNumber) continue;
@@ -264,11 +298,47 @@ export class UsersImportService {
         continue;
       }
 
+      // Con qué inicia sesión.
+      const loginElegido = normLoginCon(loginRaw);
+      if (loginRaw && !loginElegido) {
+        summary.errores++;
+        summary.resultados.push({ fila: i, accion: 'error', detalle: `"iniciaSesionCon" debe ser Cédula, Correo o Usuario (llegó "${loginRaw}").` });
+        continue;
+      }
+      const loginCon: LoginCon | undefined = loginElegido || (usuario ? undefined : loginConPorDefecto({ documentNumber, email }));
+      if (loginCon) {
+        const falta = validarLoginCon(loginCon, { documentNumber, email });
+        if (falta) {
+          summary.errores++;
+          summary.resultados.push({ fila: i, accion: 'error', detalle: falta });
+          continue;
+        }
+      }
+
       // DTO común. rol SIEMPRE "propietario" (no se permite cambiarlo por Excel).
       const dto = {
         email, nombre, rol: 'propietario',
         documentType, documentNumber, phone,
         conjunto, parcela, placa1, placa2, fechaIngreso,
+        ...(loginCon ? { loginCon } : {}),
+      };
+
+      // Cédula/correo de acceso repetidos (contra el conjunto y contra el archivo).
+      const chequearAcceso = (uname: string): string | null => {
+        const previo = usuariosAcceso.find((u) => this.norm(u.usuario) === this.norm(uname)) || {};
+        const efectivo = { ...previo, ...dto, usuario: uname, docNum: documentNumber, conjunto };
+        const lc = normLoginCon(efectivo.loginCon);
+        if (!lc || lc === 'usuario') return null;
+        // Quien ya entra con cédula/correo no puede quedar sin ese dato.
+        const falta = validarLoginCon(lc, efectivo);
+        if (falta) return falta;
+        const choque = conflictoLogin(usuariosAcceso, { ...efectivo, loginCon: lc });
+        if (choque) return choque;
+        // Deja la fila registrada para las siguientes.
+        const idx = usuariosAcceso.indexOf(previo);
+        if (idx >= 0) usuariosAcceso.splice(idx, 1);
+        usuariosAcceso.push(efectivo);
+        return null;
       };
 
       if (usuario) {
@@ -280,9 +350,18 @@ export class UsersImportService {
           continue;
         }
         usernamesEnArchivo.add(dup);
+        const choque = chequearAcceso(usuario);
+        if (choque) {
+          summary.errores++;
+          summary.resultados.push({ fila: i, accion: 'error', detalle: choque });
+          continue;
+        }
         summary.actualizar++;
         summary.resultados.push({ fila: i, accion: 'actualizar', detalle: `Actualizar ${usuario}: ${nombre || '(sin nombre)'}.` });
-        ops.push(async () => { await this.users.update(usuario, dto); });
+        ops.push(async () => {
+          const res = await this.users.update(usuario, dto);
+          if (!res.success) throw new Error(`Fila ${i} (${usuario}): ${res.message || 'no se pudo actualizar'}`);
+        });
       } else {
         // Crear: genera username desde el nombre.
         const nuevoUsuario = this.generarUsuario(nombre);
@@ -298,9 +377,21 @@ export class UsersImportService {
           continue;
         }
         usernamesEnArchivo.add(dup);
+        const choque = chequearAcceso(nuevoUsuario);
+        if (choque) {
+          summary.errores++;
+          summary.resultados.push({ fila: i, accion: 'error', detalle: choque });
+          continue;
+        }
         summary.crear++;
-        summary.resultados.push({ fila: i, accion: 'crear', detalle: `Crear ${nuevoUsuario}: ${nombre}.` });
-        ops.push(async () => { await this.users.create({ ...dto, usuario: nuevoUsuario }); });
+        summary.resultados.push({
+          fila: i, accion: 'crear',
+          detalle: `Crear ${nuevoUsuario}: ${nombre}. Inicia sesión con ${ETIQUETA_LOGIN[loginCon || 'usuario'].toLowerCase()}.`,
+        });
+        ops.push(async () => {
+          const res = await this.users.create({ ...dto, usuario: nuevoUsuario });
+          if (!res.success) throw new Error(`Fila ${i} (${nombre}): ${res.message || 'no se pudo crear'}`);
+        });
       }
     }
 
