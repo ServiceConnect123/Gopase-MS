@@ -6,6 +6,8 @@ import { UsersInviteService } from './users-invite.service';
 import { Public } from '../auth/public.decorator';
 import { FirebaseService } from '../firebase/firebase.service';
 import { conjuntoPropioDelRequest } from '../auth/conjunto-scope';
+import { assertPuedeGestionar } from '../auth/user-admin.guard-helper';
+import { esPersonal, esSuperAdmin } from '../auth/user-admin.rules';
 
 /**
  * CRUD de usuarios contra Firebase (RTDB + Auth). Reemplaza las llamadas del
@@ -68,7 +70,11 @@ export class UsersController {
     },
   })
   @Post('import')
-  async importFile(@Body() body: { conjunto: string; fileBase64: string; dryRun?: boolean }) {
+  async importFile(@Req() req: any, @Body() body: { conjunto: string; fileBase64: string; dryRun?: boolean }) {
+    // La carga masiva crea y edita usuarios: solo personal del conjunto o superAdmin.
+    if (req?.user && !esSuperAdmin(req.user.rol) && !esPersonal(req.user.rol)) {
+      throw new ForbiddenException('Solo la administración puede cargar usuarios.');
+    }
     const summary = await this.usersImport.processImport({
       conjunto: body.conjunto || '',
       fileBase64: body.fileBase64 || '',
@@ -113,19 +119,32 @@ export class UsersController {
     },
   })
   @Post()
-  async create(@Body() body: UserDTO) {
+  async create(@Req() req: any, @Body() body: UserDTO) {
+    await assertPuedeGestionar(req, this.firebase, String((body as any)?.usuario || ''), {
+      permitirPropio: false,
+      nuevoRol: (body as any)?.rol ?? (body as any)?.role,
+      nuevoConjunto: (body as any)?.conjunto,
+    });
     return this.users.create(body);
   }
 
   @ApiOperation({ summary: 'Editar usuario' })
   @Put(':username')
-  async update(@Param('username') username: string, @Body() body: UserDTO) {
+  async update(@Req() req: any, @Param('username') username: string, @Body() body: UserDTO) {
+    // Solo uno mismo (sin cambiar rol/conjunto), la administración de su
+    // conjunto o el superAdmin. Antes cualquiera podía subirse a superAdmin.
+    await assertPuedeGestionar(req, this.firebase, username, {
+      permitirPropio: true,
+      nuevoRol: (body as any)?.rol ?? (body as any)?.role,
+      nuevoConjunto: (body as any)?.conjunto,
+    });
     return this.users.update(username, body);
   }
 
   @ApiOperation({ summary: 'Eliminar usuario (RTDB + Auth)' })
   @Delete(':username')
-  async remove(@Param('username') username: string) {
+  async remove(@Req() req: any, @Param('username') username: string) {
+    await assertPuedeGestionar(req, this.firebase, username, { permitirPropio: false });
     return this.users.remove(username);
   }
 
@@ -245,7 +264,9 @@ export class UsersController {
     description: 'No expone la contraseña actual. Siempre es un reset a una clave aleatoria segura con mustChangePassword=true.',
   })
   @Post(':username/temp-access')
-  async generateTempAccess(@Param('username') username: string) {
+  async generateTempAccess(@Req() req: any, @Param('username') username: string) {
+    // Resetea la clave y la devuelve: solo la administración del conjunto.
+    await assertPuedeGestionar(req, this.firebase, username || '', { permitirPropio: false });
     return this.usersInvite.generateTempAccess(username || '');
   }
 
@@ -255,9 +276,11 @@ export class UsersController {
   })
   @Post(':username/send-credentials')
   async sendCredentials(
+    @Req() req: any,
     @Param('username') username: string,
     @Query('conjunto') conjunto: string,
   ) {
+    await assertPuedeGestionar(req, this.firebase, username || '', { permitirPropio: false });
     return this.usersInvite.sendCredentials(username || '', conjunto || '');
   }
 }
