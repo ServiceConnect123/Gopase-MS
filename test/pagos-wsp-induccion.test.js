@@ -12,7 +12,7 @@ test('textos que hablan de un pago (sin #pago)', () => {
 });
 
 test('textos normales o con #pago no disparan la inducción', () => {
-  for (const t of ['Buenos días vecinos', 'alguien tiene el número del portero?', '', '#pago Tel: 3001234567 nov', 'Duval de la rosa Villa Maira 2 parcela #4'])
+  for (const t of ['Buenos días vecinos', 'alguien tiene el número del portero?', '', '#pago Tel: 3001234567 nov', 'Ana Pérez, casa #4'])
     assert.strictEqual(D.pareceAvisoDePago(t), false, t);
 });
 
@@ -26,19 +26,19 @@ test('máximo una inducción por periodo', () => {
 });
 
 test('mensaje personalizado con el formato #pago', () => {
-  const t = D.mensajeInduccion({ tipo: 'imagen', telefono: '3102172008', mes: 'Noviembre', valor: 60000, nombre: 'Duval D.', grupoNombre: 'Villa Mayra' });
-  assert.match(t, /Hola, Duval D\./);
-  assert.match(t, /enviaste un comprobante en el grupo «Villa Mayra»/);
-  assert.match(t, /#pago\nTel: 3102172008\nMes: Noviembre\nValor: 60000/);
+  const t = D.mensajeInduccion({ tipo: 'imagen', telefono: '3009998877', mes: 'Noviembre', valor: 60000, nombre: 'Ana P.', grupoNombre: 'Los Pinos' });
+  assert.match(t, /Hola, Ana P\./);
+  assert.match(t, /enviaste un comprobante en el grupo «Los Pinos»/);
+  assert.match(t, /#pago\nTel: 3009998877\nMes: Noviembre\nValor: 60000/);
   assert.match(t, /responde a la foto/);
 });
 
 test('la plantilla del mensaje la entiende el parser de #pago', () => {
-  const t = D.mensajeInduccion({ tipo: 'imagen', telefono: '3102172008', mes: 'Noviembre', valor: 60000 });
+  const t = D.mensajeInduccion({ tipo: 'imagen', telefono: '3009998877', mes: 'Noviembre', valor: 60000 });
   const bloque = t.slice(t.indexOf('#pago'), t.indexOf('\n\n', t.indexOf('#pago')));
   const r = P.parsearMensajePago(bloque);
   assert.strictEqual(r.esPago, true);
-  assert.deepStrictEqual(r.identificador, { tipo: 'telefono', valor: '3102172008' });
+  assert.deepStrictEqual(r.identificador, { tipo: 'telefono', valor: '3009998877' });
   assert.deepStrictEqual(r.meses.map((m) => m.mes), ['Noviembre']);
   assert.strictEqual(r.valor, 60000);
   assert.deepStrictEqual(r.desconocidos, []);

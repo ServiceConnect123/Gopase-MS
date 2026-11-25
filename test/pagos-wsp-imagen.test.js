@@ -23,7 +23,7 @@ test('texto e imagen del mensaje, con envolturas', () => {
 test('respuesta (cita) a la foto del comprobante', () => {
   const m = {
     extendedTextMessage: {
-      text: '#pago Duval nov',
+      text: '#pago ana97 nov',
       contextInfo: { stanzaId: 'ABC123', participant: ANA, quotedMessage: foto(undefined) },
     },
   };
