@@ -215,7 +215,7 @@ export class PagosWspService implements OnModuleInit {
       await this.firebase
         .db()
         .ref(`wsp_pagos/registros/${conj}/${this.safe(m.id)}`)
-        .set({ fecha: new Date().toISOString(), origen, estado, remitente: normTelefono(m.telefono), ...extra })
+        .set({ fecha: new Date().toISOString(), origen, estado, remitente: normTelefono(m.telefono), imagenOrigen: m.imagenOrigen || null, ...extra })
         .catch(() => undefined);
     };
 
@@ -224,7 +224,8 @@ export class PagosWspService implements OnModuleInit {
     if (ya) return { estado: 'duplicado' };
 
     if (!m.imagen?.length) {
-      const respuesta = 'Para registrar el pago envía la *foto del comprobante* con el texto #pago en el pie de foto.';
+      const respuesta =
+        'Para registrar el pago envía la *foto del comprobante* con el texto #pago en el pie de foto, o *responde a la foto* del comprobante escribiendo #pago.';
       await registrar('rechazado', { motivo: 'sin_imagen' });
       return { estado: 'rechazado', respuesta };
     }
@@ -285,7 +286,8 @@ export class PagosWspService implements OnModuleInit {
     const secrets = await this.properties.getSecretsByConjunto(m.conjunto).catch(() => null);
     const nombreArchivo = `comprobante_${cuenta}_${per.periodos.map((p) => p.mes).join('-')}_${per.periodos[0].anio}_wsp_${Date.now()}.jpg`;
     const subida = await this.drive.uploadImage(base64, nombreArchivo, secrets?.driveFolderId || '').catch(() => ({ success: false }) as any);
-    const nota = `WhatsApp ${origen} desde +57${normTelefono(m.telefono) || '?'}`;
+    const viaFoto = m.imagenOrigen === 'citada' ? ' (respuesta a la foto)' : m.imagenOrigen === 'anterior' ? ' (foto enviada antes)' : '';
+    const nota = `WhatsApp ${origen} desde +57${normTelefono(m.telefono) || '?'}${viaFoto}`;
     const referencia = `${subida?.success && subida.directLink ? `IMG:${subida.directLink} | ` : ''}${nota}${flags.length ? ` [AI:${flags.join(',')}]` : ''}`;
     const porMes = valor ? Math.round(valor / per.periodos.length) : pagables.cuota || 0;
 
