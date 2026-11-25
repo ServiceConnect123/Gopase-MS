@@ -93,6 +93,15 @@ export function resolverPeriodos(
   return { ok: true, periodos };
 }
 
+/**
+ * Firma con las redes de GoPase al final de la confirmación de pago. Solo en
+ * chat privado (en el grupo del conjunto sería ruido para todos). Se puede
+ * cambiar o apagar con la variable de entorno GOPASE_FIRMA_REDES ('' = sin firma).
+ */
+export const FIRMA_REDES =
+  process.env.GOPASE_FIRMA_REDES !== undefined
+    ? process.env.GOPASE_FIRMA_REDES.trim() ? `\n\n${process.env.GOPASE_FIRMA_REDES.trim()}` : ''
+    : '\n\n📲 Síguenos en TikTok: @somosgopase';
 const pesos = (n: number) => `$${Math.round(n).toLocaleString('es-CO')}`;
 const listaMeses = (p: Periodo[]) =>
   p.length === 1 ? `${p[0].mes.toLowerCase()} ${p[0].anio}` : `${p[0].mes.toLowerCase()} a ${p[p.length - 1].mes.toLowerCase()} ${p[p.length - 1].anio}`;
@@ -355,7 +364,8 @@ export class PagosWspService implements OnModuleInit {
         ? `\n⚠️ El valor escrito no coincide con el del comprobante (${pesos(detectado)}).`
         : '';
     const sugerencia = m.esGrupo && match.via === 'documento' ? '\n\nPor privacidad, en el grupo usa tu usuario o teléfono en vez del documento.' : '';
-    const respuesta = `✅ Recibimos tu pago de ${listaMeses(per.periodos)} por ${pesos(total)} (${quien}). Queda en revisión de la administración.${avisos}${sugerencia}`;
+    const firma = m.esGrupo ? '' : FIRMA_REDES;
+    const respuesta = `✅ Recibimos tu pago de ${listaMeses(per.periodos)} por ${pesos(total)} (${quien}). Queda en revisión de la administración.${avisos}${sugerencia}${firma}`;
 
     const telTitular = normTelefono(match.cuenta.phone || match.cuenta.telefono);
     const aviso =
