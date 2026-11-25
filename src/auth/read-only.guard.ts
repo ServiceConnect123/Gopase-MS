@@ -23,8 +23,9 @@ import { IS_PUBLIC_KEY } from './public.decorator';
  */
 @Injectable()
 export class ReadOnlyGuard implements CanActivate {
-  // Prefijos que un conjunto suspendido SÍ puede escribir (pagar y gestionar su cuenta).
-  private static readonly ESCRITURA_PERMITIDA = ['/billing', '/auth', '/profile'];
+  // Prefijos que un conjunto suspendido SÍ puede escribir (pagar y gestionar su cuenta;
+  // /anuncios solo registra que vio un anuncio, la gestión es del superAdmin).
+  private static readonly ESCRITURA_PERMITIDA = ['/billing', '/auth', '/profile', '/anuncios'];
 
   constructor(private readonly reflector: Reflector) {}
 
