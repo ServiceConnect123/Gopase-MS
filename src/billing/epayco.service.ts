@@ -26,6 +26,11 @@ import { BillingService } from './billing.service';
 import { PlansService } from '../plans/plans.service';
 import { montoPorCiclo } from '../plans/pricing';
 import { AppConfigService } from './app-config.service';
+import { FirebaseService } from '../firebase/firebase.service';
+import { firmaWebhookValida, refKey, transaccionCorresponde } from './epayco-rules';
+
+/** Referencias de ePayco ya usadas (global): una referencia activa UNA factura. */
+const REFS_USADAS = 'mirror/billing_epayco_refs';
 
 const APIFY_BASE = 'https://apify.epayco.co';
 
@@ -37,6 +42,7 @@ export class EpaycoService {
     private readonly billing: BillingService,
     private readonly plans: PlansService,
     private readonly appConfig: AppConfigService,
+    private readonly firebase: FirebaseService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -218,16 +224,26 @@ export class EpaycoService {
 
     // En producción exigimos verificación. En modo prueba lo dejamos pasar
     // (la API de validación a veces tarda en actualizar el estado en pruebas).
-    if (!verified.accepted && !cfg.test) {
-      this.logger.warn(`[epayco] confirmFromFrontend: ref=${refPayco} no verificada (${verified.message}), prod → rechazado.`);
-      return { success: false, message: `El pago no pudo verificarse: ${verified.message}` };
+    const cicloNorm: 'mensual' | 'anual' = opts.ciclo === 'anual' ? 'anual' : 'mensual';
+    if (!cfg.test) {
+      // La referencia debe ser de ESTE conjunto y plan, por el monto del plan.
+      const esperado = await this.montoEsperado(conjunto, planId, cicloNorm);
+      const d = transaccionCorresponde(verified, { conjunto, planId, montoEsperado: esperado });
+      if (!d.ok) {
+        this.logger.warn(`[epayco] confirmFromFrontend: ref=${refPayco} rechazada (${d.motivo}).`);
+        return { success: false, message: `El pago no pudo verificarse: ${d.motivo}` };
+      }
+      if (!(await this.reservarReferencia(refPayco, conjunto))) {
+        this.logger.warn(`[epayco] confirmFromFrontend: ref=${refPayco} ya usada por otro conjunto.`);
+        return { success: false, message: 'Esa referencia de pago ya se usó en otro conjunto.' };
+      }
     }
 
     const ahora = new Date();
     const id = opts.facturaId || `epayco_${conjunto.replace(/\s+/g, '_').toLowerCase()}_${Date.now()}`;
     const periodoStr = opts.periodo || `${ahora.getFullYear()}-${String(ahora.getMonth() + 1).padStart(2, '0')}`;
-    const cicloNorm: 'mensual' | 'anual' = opts.ciclo === 'anual' ? 'anual' : 'mensual';
-    const montoFinal = opts.monto || verified.monto;
+    // En producción manda el monto que ePayco confirmó, no el que envía el cliente.
+    const montoFinal = cfg.test ? opts.monto || verified.monto : verified.monto;
 
     try {
       // Idempotencia: si la factura ya existe y está confirmada, no duplicar.
@@ -305,25 +321,26 @@ export class EpaycoService {
       return { success: false, message: 'Sin referencia de transacción.' };
     }
 
-    // Validar firma SHA256 si tenemos customerId y pKey configurados.
+    // Firma SHA256 OBLIGATORIA fuera del modo prueba. Antes solo se validaba si
+    // venía x_signature: omitiéndola se activaba cualquier plan.
     const cfg = await this.appConfig.getEpaycoConfig();
-    if (cfg.customerId && cfg.pKey && body.x_signature) {
-      const valid = this.validateSignature({
+    const configurada = !!(cfg.customerId && cfg.pKey);
+    const firmaRecibida = String(body.x_signature || '');
+    const firmaValida =
+      configurada && !!firmaRecibida &&
+      this.validateSignature({
         customerId: cfg.customerId,
         pKey: cfg.pKey,
         xRefPayco: String(body.x_ref_payco || ''),
         xTransactionId: String(body.x_transaction_id || ''),
         xAmount: String(body.x_amount || ''),
         xCurrencyCode: String(body.x_currency_code || ''),
-        xSignature: String(body.x_signature || ''),
+        xSignature: firmaRecibida,
       });
-      if (!valid) {
-        this.logger.warn(`[epayco] webhook: firma inválida para ref=${ref}. Posible fraude o prueba manual.`);
-        // En modo prueba dejamos pasar (ePayco puede no incluir firma correcta en test).
-        if (!cfg.test) {
-          return { success: false, message: 'Firma de seguridad inválida.' };
-        }
-      }
+    const firma = firmaWebhookValida({ test: !!cfg.test, configurada, firmaRecibida, firmaValida });
+    if (!firma.ok) {
+      this.logger.warn(`[epayco] webhook rechazado ref=${ref}: ${firma.motivo}`);
+      return { success: false, message: firma.motivo };
     }
 
     // Solo procesar transacciones aceptadas. ePayco envía "Aceptada" con mayúscula.
@@ -337,6 +354,24 @@ export class EpaycoService {
       this.logger.warn(`[epayco] webhook sin conjunto/planId en extras (ref=${ref}).`);
       // Intenta procesar igual si hay suficiente info en la referencia.
       return { success: false, message: 'Faltan datos del conjunto en el webhook (extras vacíos).' };
+    }
+
+    // Doble verificación contra la API de ePayco (además de la firma) y que la
+    // referencia no se haya usado en otro conjunto.
+    let montoVerificado = monto;
+    if (!cfg.test) {
+      const verified = await this.verifyTransaction(ref);
+      const esperado = await this.montoEsperado(conjunto, planId, ciclo === 'anual' ? 'anual' : 'mensual');
+      const d = transaccionCorresponde(verified, { conjunto, planId, montoEsperado: esperado });
+      if (!d.ok) {
+        this.logger.warn(`[epayco] webhook ref=${ref} rechazado: ${d.motivo}`);
+        return { success: false, message: d.motivo };
+      }
+      if (!(await this.reservarReferencia(ref, conjunto))) {
+        this.logger.warn(`[epayco] webhook ref=${ref} ya usada por otro conjunto.`);
+        return { success: false, message: 'Referencia ya usada.' };
+      }
+      montoVerificado = verified.monto;
     }
 
     // Idempotencia: si ya fue confirmada por el frontend (confirm), no duplicar.
@@ -357,9 +392,9 @@ export class EpaycoService {
 
       const created = await this.billing.create({
         id, conjunto,
-        monto: monto || 0,
-        montoObjetivo: monto || 0,
-        montoPagado: monto || 0,
+        monto: montoVerificado || 0,
+        montoObjetivo: montoVerificado || 0,
+        montoPagado: montoVerificado || 0,
         planIdSolicitado: planId,
         ciclo: cicloNorm, moneda: 'COP', periodo: periodoStr,
         concepto: `Pago electrónico ePayco webhook (${ref})`,
@@ -401,6 +436,40 @@ export class EpaycoService {
   }
 
   // ---------------------------------------------------------------------------
+  // Anti-fraude: monto esperado y referencias ya usadas
+  // ---------------------------------------------------------------------------
+
+  /** Monto que debería cobrarse para ese conjunto/plan/ciclo (0 si no se sabe). */
+  private async montoEsperado(conjunto: string, planId: string, ciclo: string): Promise<number> {
+    try {
+      const precio = await this.plans.precioDeConjunto(conjunto, planId);
+      if (!precio?.plan || precio.aLaMedida || !precio.precioMensual) return 0;
+      return montoPorCiclo(precio.precioMensual, ciclo, precio.plan.descuentoAnual ?? 0.1);
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Reserva la referencia para `conjunto` (transacción en RTDB). Devuelve false si
+   * ya la usó OTRO conjunto: una referencia de pago no activa dos suscripciones.
+   */
+  private async reservarReferencia(ref: string, conjunto: string): Promise<boolean> {
+    if (!this.firebase.isEnabled()) return true;
+    const key = refKey(ref);
+    if (!key) return false;
+    const destino = String(conjunto || '').trim().toLowerCase();
+    const res = await this.firebase
+      .db()
+      .ref(`${REFS_USADAS}/${key}`)
+      .transaction((actual: any) => {
+        if (actual && String(actual.conjunto || '').toLowerCase() !== destino) return undefined; // aborta
+        return actual || { conjunto: destino, at: new Date().toISOString() };
+      });
+    return !!res.committed;
+  }
+
+  // ---------------------------------------------------------------------------
   // Verificar transacción (evita webhooks falsos)
   // ---------------------------------------------------------------------------
 
@@ -409,7 +478,9 @@ export class EpaycoService {
    * fue aceptada. Usa GET https://secure.epayco.co/validation/v1/reference/{ref}.
    * No requiere autenticación: es un endpoint público de consulta.
    */
-  async verifyTransaction(ref: string): Promise<{ accepted: boolean; monto: number; message: string }> {
+  async verifyTransaction(
+    ref: string,
+  ): Promise<{ accepted: boolean; monto: number; message: string; conjunto?: string; planId?: string }> {
     try {
       const res = await fetch(`https://secure.epayco.co/validation/v1/reference/${encodeURIComponent(ref)}`);
       if (!res.ok) {
@@ -419,7 +490,9 @@ export class EpaycoService {
       const status = String(data?.data?.x_response || data?.x_response || '').trim().toLowerCase();
       const monto = Number(data?.data?.x_amount || data?.x_amount || 0);
       const accepted = ['aceptada', 'accepted'].includes(status);
-      return { accepted, monto, message: status || 'desconocido' };
+      const conjunto = String(data?.data?.x_extra1 ?? data?.x_extra1 ?? '').trim() || undefined;
+      const planId = String(data?.data?.x_extra2 ?? data?.x_extra2 ?? '').trim() || undefined;
+      return { accepted, monto, message: status || 'desconocido', conjunto, planId };
     } catch (err: any) {
       return { accepted: false, monto: 0, message: err?.message || 'Error al verificar.' };
     }
