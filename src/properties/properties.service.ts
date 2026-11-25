@@ -1,3 +1,4 @@
+import { listaMetodos, metodosPublicos } from '../cuota/cuota.rules';
 import { Injectable, Logger } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
 import { SheetsService } from '../sheets/sheets.service';
@@ -34,6 +35,7 @@ export interface PropertyPublic {
   cuotaMonto?: string;
   moneda?: string;
   driveFolderId?: string;
+  metodosRecaudo?: any[];
   llaveBreB?: string; // visible por diseño (para transferir)
   hasMercadoPago: boolean;
   hasBreB: boolean;
@@ -131,6 +133,8 @@ export class PropertiesService {
         moneda: c.moneda ?? 'COP',
         driveFolderId: c.driveFolderId ?? '',
         llaveBreB: c.llaveBreB ?? '',
+        // Métodos de recaudo activos (Bre-B y cuentas): los propietarios los ven al pagar.
+        metodosRecaudo: metodosPublicos(listaMetodos(c)),
         hasMercadoPago: !!secrets.mercadoPagoKey,
         hasBreB: !!c.llaveBreB,
         hasGemini: !!secrets.geminiKey,
@@ -276,6 +280,8 @@ export class PropertiesService {
       this.ADMIN_FIELDS.forEach((f) => {
         if (dto[f] !== undefined) patch[f] = dto[f];
       });
+      // Con métodos de recaudo configurados, la llave la administra el módulo de cuota.
+      if (found.value?.metodosRecaudo && Object.keys(found.value.metodosRecaudo).length) delete patch.llaveBreB;
       await this.firebase.db().ref(`${MIRROR_CONJUNTOS}/${found.key}`).update(patch);
       return { success: true, message: 'Configuración del conjunto actualizada.' };
     } catch (err: any) {
@@ -361,6 +367,8 @@ export class PropertiesService {
       BASIC_FIELDS.forEach((f) => {
         if (dto[f] !== undefined) patch[f] = dto[f];
       });
+      const actual = snap.val() || {};
+      if (actual.metodosRecaudo && Object.keys(actual.metodosRecaudo).length) delete patch.llaveBreB;
 
       // Secretos: solo se tocan si vienen en el DTO (permite no reenviarlos).
       const prevSecrets = snap.val()._secrets || {};
