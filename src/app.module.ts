@@ -23,6 +23,7 @@ import { PqrsModule } from './pqrs/pqrs.module';
 import { CommunityReportsModule } from './community-reports/community-reports.module';
 import { NoticiasModule } from './noticias/noticias.module';
 import { AvisosModule } from './avisos/avisos.module';
+import { AnunciosModule } from './anuncios/anuncios.module';
 import { PagosWspModule } from './pagos-whatsapp/pagos-wsp.module';
 import { BillingModule } from './billing/billing.module';
 import { PlansModule } from './plans/plans.module';
@@ -116,6 +117,7 @@ import { PayloadCryptoInterceptor } from './common/payload-crypto.interceptor';
     CommunityReportsModule,
     NoticiasModule,
     AvisosModule,
+    AnunciosModule,
     PagosWspModule,
     BillingModule,
     PlansModule,
