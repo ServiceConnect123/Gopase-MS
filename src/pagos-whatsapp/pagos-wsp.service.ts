@@ -4,7 +4,8 @@ import { FirebaseService } from '../firebase/firebase.service';
 import { PaymentsService } from '../payments/payments.service';
 import { DriveService } from '../drive/drive.service';
 import { PropertiesService } from '../properties/properties.service';
-import { WhatsappService, MensajeEntrante } from '../whatsapp/whatsapp.service';
+import { WhatsappService, MensajeEntrante, MensajeSinPago } from '../whatsapp/whatsapp.service';
+import { debeInducir, mensajeInduccion } from './pagos-wsp.induccion';
 import { conPropietario } from '../tenants/tenant-rules';
 import { MESES, PagoWspParseado, normTelefono, parsearMensajePago } from './pagos-wsp.parser';
 import { MENSAJE_MATCH, identificarPagador, nombreCorto } from './pagos-wsp.matcher';
@@ -30,11 +31,16 @@ export interface ConfigPagosWsp {
   grupoNombre: string;
   /** Fondo por defecto. */
   fondo: string;
+  /**
+   * Inducción: si alguien envía un comprobante (o escribe sobre un pago) sin
+   * #pago, GoPase le escribe al privado explicando el formato.
+   */
+  induccion: boolean;
   actualizadoPor?: string;
   actualizadoEn?: string;
 }
 
-export const CONFIG_VACIA: ConfigPagosWsp = { grupo: false, chat: false, grupoEnlace: '', grupoJid: '', grupoNombre: '', fondo: 'Administración' };
+export const CONFIG_VACIA: ConfigPagosWsp = { grupo: false, chat: false, grupoEnlace: '', grupoJid: '', grupoNombre: '', fondo: 'Administración', induccion: false };
 
 /** Lo que hay que hacer en WhatsApp tras procesar un mensaje. */
 export interface Salida {
@@ -96,6 +102,14 @@ export class PagosWspService implements OnModuleInit {
   private readonly logger = new Logger(PagosWspService.name);
   /** Cola por conjunto: los mensajes se procesan de a uno (evita duplicados en carrera). */
   private colas = new Map<string, Promise<unknown>>();
+  /** Último #pago recibido por remitente (conj|jid): si llega, no se envía la inducción. */
+  private ultimoPago = new Map<string, number>();
+  /** Inducciones en espera (conj|jid), para no programar dos veces. */
+  private induccionesEnEspera = new Set<string>();
+  /** Espera antes de la inducción, por si el #pago llega enseguida (respuesta a la foto). */
+  private static readonly INDUCCION_ESPERA_MS = Math.max(15_000, Number(process.env.WSP_INDUCCION_ESPERA_MS) || 2 * 60_000);
+  /** Máximo una inducción por persona en este periodo. */
+  private static readonly INDUCCION_PERIODO_MS = Math.max(60 * 60_000, Number(process.env.WSP_INDUCCION_PERIODO_MS) || 24 * 3600_000);
 
   constructor(
     private readonly firebase: FirebaseService,
@@ -107,6 +121,7 @@ export class PagosWspService implements OnModuleInit {
 
   async onModuleInit() {
     this.whatsapp.alRecibirMensaje((m) => this.atender(m));
+    this.whatsapp.alRecibirSinPago((m) => this.programarInduccion(m));
     try {
       await this.aplicarConfiguraciones();
     } catch (e: any) {
@@ -137,6 +152,7 @@ export class PagosWspService implements OnModuleInit {
       grupo: cambios.grupo ?? prev.grupo,
       chat: cambios.chat ?? prev.chat,
       fondo: String(cambios.fondo ?? prev.fondo ?? 'Administración').trim() || 'Administración',
+      induccion: cambios.induccion ?? !!prev.induccion,
       actualizadoPor: autor,
       actualizadoEn: new Date().toISOString(),
     };
@@ -191,6 +207,9 @@ export class PagosWspService implements OnModuleInit {
   private async atender(m: MensajeEntrante): Promise<void> {
     if (!m.texto || !/#\s?pago\b/i.test(m.texto)) return; // el resto se ignora sin costo
     const clave = this.claveConj(m.conjunto);
+    const ahora = Date.now();
+    this.ultimoPago.set(`${clave}|${m.responderA}`, ahora);
+    if (this.ultimoPago.size > 2000) for (const [k, t] of this.ultimoPago) if (ahora - t > 3600_000) this.ultimoPago.delete(k);
     const previa = this.colas.get(clave) || Promise.resolve();
     const tarea = previa
       .catch(() => undefined)
@@ -215,7 +234,7 @@ export class PagosWspService implements OnModuleInit {
       await this.firebase
         .db()
         .ref(`wsp_pagos/registros/${conj}/${this.safe(m.id)}`)
-        .set({ fecha: new Date().toISOString(), origen, estado, remitente: normTelefono(m.telefono), ...extra })
+        .set({ fecha: new Date().toISOString(), origen, estado, remitente: normTelefono(m.telefono), imagenOrigen: m.imagenOrigen || null, ...extra })
         .catch(() => undefined);
     };
 
@@ -224,7 +243,8 @@ export class PagosWspService implements OnModuleInit {
     if (ya) return { estado: 'duplicado' };
 
     if (!m.imagen?.length) {
-      const respuesta = 'Para registrar el pago envía la *foto del comprobante* con el texto #pago en el pie de foto.';
+      const respuesta =
+        'Para registrar el pago envía la *foto del comprobante* con el texto #pago en el pie de foto, o *responde a la foto* del comprobante escribiendo #pago.';
       await registrar('rechazado', { motivo: 'sin_imagen' });
       return { estado: 'rechazado', respuesta };
     }
@@ -263,6 +283,16 @@ export class PagosWspService implements OnModuleInit {
     const ia = await this.payments
       .analyzeReceipt({ conjunto: m.conjunto, imageBase64: base64, validarDestino: true, tipoRecaudo: fondo })
       .catch(() => ({ success: false }) as any);
+    const an = ia?.success ? ia.analysis : null;
+    // La IA dice que la foto no es un comprobante (selfie, paisaje, documento…): no se crea el pago.
+    if (an && an.esComprobante === false) {
+      await registrar('rechazado', { motivo: `no_es_comprobante${an.motivo ? `: ${String(an.motivo).slice(0, 120)}` : ''}`, hash });
+      return {
+        estado: 'rechazado',
+        respuesta: 'La imagen no parece un comprobante de pago. Envía la *captura de la transferencia* con #pago en el pie de foto (o responde a esa captura con #pago).',
+        reaccion: m.esGrupo ? '❓' : undefined,
+      };
+    }
     const detectado = ia?.success ? Number(ia.monto) || 0 : 0;
     const valor = parseado.valor || detectado || undefined;
 
@@ -276,7 +306,8 @@ export class PagosWspService implements OnModuleInit {
 
     // Marcas para la revisión del admin (mismas que usa la app).
     const flags: string[] = [];
-    const an = ia?.analysis;
+    // Sin lectura de la IA (sin Gemini configurado o falló): el admin debe revisarlo a mano.
+    if (!an) flags.push('SIN_VALIDAR');
     if (an && an.esAutentico === false) flags.push('MANIPULACION');
     if (an?.checkedDestinatario && !an.destinatarioCorrecto) flags.push('DESTINATARIO');
     if (parseado.valor && detectado && Math.abs(parseado.valor - detectado) > Math.max(1000, detectado * 0.02)) flags.push('MONTO');
@@ -285,7 +316,8 @@ export class PagosWspService implements OnModuleInit {
     const secrets = await this.properties.getSecretsByConjunto(m.conjunto).catch(() => null);
     const nombreArchivo = `comprobante_${cuenta}_${per.periodos.map((p) => p.mes).join('-')}_${per.periodos[0].anio}_wsp_${Date.now()}.jpg`;
     const subida = await this.drive.uploadImage(base64, nombreArchivo, secrets?.driveFolderId || '').catch(() => ({ success: false }) as any);
-    const nota = `WhatsApp ${origen} desde +57${normTelefono(m.telefono) || '?'}`;
+    const viaFoto = m.imagenOrigen === 'citada' ? ' (respuesta a la foto)' : m.imagenOrigen === 'anterior' ? ' (foto enviada antes)' : '';
+    const nota = `WhatsApp ${origen} desde +57${normTelefono(m.telefono) || '?'}${viaFoto}`;
     const referencia = `${subida?.success && subida.directLink ? `IMG:${subida.directLink} | ` : ''}${nota}${flags.length ? ` [AI:${flags.join(',')}]` : ''}`;
     const porMes = valor ? Math.round(valor / per.periodos.length) : pagables.cuota || 0;
 
@@ -331,6 +363,62 @@ export class PagosWspService implements OnModuleInit {
         ? { telefono: telTitular, texto: `ℹ️ Se registró un pago de ${listaMeses(per.periodos)} por ${pesos(total)} a tu nombre, enviado desde otro número. Queda en revisión. Si no lo reconoces, avisa a la administración.` }
         : undefined;
     return { estado: 'registrado', respuesta, reaccion: m.esGrupo ? '✅' : undefined, aviso, ids: res.ids };
+  }
+
+  // ------------------------------------------------------------ inducción
+  /** Foto/texto sin #pago: si el conjunto tiene la inducción activa, se programa el mensaje privado. */
+  private async programarInduccion(s: MensajeSinPago): Promise<void> {
+    const conj = this.claveConj(s.conjunto);
+    const quien = `${conj}|${s.responderA}`;
+    if (!s.responderA || this.induccionesEnEspera.has(quien)) return;
+    const cfg = await this.getConfig(s.conjunto);
+    if (!cfg.induccion) return;
+    const desde = Date.now();
+    this.induccionesEnEspera.add(quien);
+    const t = setTimeout(() => {
+      this.enviarInduccion(s, cfg, desde)
+        .catch((e) => this.logger.warn(`[pagos-wsp] inducción ${s.conjunto}: ${e?.message}`))
+        .finally(() => this.induccionesEnEspera.delete(quien));
+    }, PagosWspService.INDUCCION_ESPERA_MS);
+    t.unref?.();
+  }
+
+  private async enviarInduccion(s: MensajeSinPago, cfg: ConfigPagosWsp, desde: number): Promise<void> {
+    const conj = this.claveConj(s.conjunto);
+    // Mandó el #pago mientras tanto (p. ej. respondiendo a la foto): nada que explicar.
+    if ((this.ultimoPago.get(`${conj}|${s.responderA}`) || 0) >= desde) return;
+    const tel = normTelefono(s.telefono);
+    const ruta = `wsp_pagos/induccion/${conj}/${this.safe(tel || s.responderA)}`;
+    const previa = await this.firebase.liveVal<any>(ruta).catch(() => null);
+    if (!debeInducir(previa?.fecha, Date.now(), PagosWspService.INDUCCION_PERIODO_MS)) return;
+
+    // Personaliza con el residente del celular (mes pendiente y cuota), si se identifica.
+    let mes: string | undefined;
+    let valor: number | undefined;
+    let nombre: string | undefined;
+    if (tel) {
+      try {
+        const usuarios = conPropietario(((await this.firebase.liveValues<any>('mirror/usuarios')) || []) as any[]);
+        const match = identificarPagador({ usuarios, conjunto: s.conjunto, parseado: { esPago: true, meses: [], desconocidos: [] }, telefonoRemitente: tel });
+        if (match.ok) {
+          nombre = nombreCorto(match.persona.nombre);
+          const pagables = await this.payments.getPayableMonths(match.cuenta.usuario, cfg.fondo || 'Administración');
+          mes = pagables.primeroPagable?.mes;
+          valor = pagables.cuota || undefined;
+        }
+      } catch {
+        /* sin personalizar */
+      }
+    }
+    const texto = mensajeInduccion({ tipo: s.tipo, telefono: tel, mes, valor, nombre, grupoNombre: s.esGrupo ? cfg.grupoNombre : undefined });
+    const ok = await this.whatsapp.responder(s.conjunto, s.responderA, texto);
+    if (ok) {
+      await this.firebase
+        .db()
+        .ref(ruta)
+        .set({ fecha: new Date().toISOString(), origen: s.esGrupo ? 'grupo' : 'chat', tipo: s.tipo })
+        .catch(() => undefined);
+    }
   }
 
   /**

@@ -27,6 +27,16 @@ import {
 } from './firebase-auth-state';
 import { Entrega, SentMessageStore } from './sent-message.store';
 import { SessionLock } from './session-lock';
+import {
+  FotosRecientes,
+  MensajeConImagen,
+  OrigenImagen,
+  desenvolver,
+  imagenCitada,
+  imagenDe,
+  textoDe,
+} from '../pagos-whatsapp/pagos-wsp.imagen';
+import { pareceAvisoDePago } from '../pagos-whatsapp/pagos-wsp.induccion';
 
 /**
  * libsignal (dependencia de Baileys) imprime con console.error un stack completo
@@ -165,6 +175,20 @@ export interface MensajeEntrante {
   texto: string;
   /** Imagen adjunta (comprobante), si la hay. */
   imagen: Buffer | null;
+  /** De dónde salió la imagen: pie de foto, mensaje citado o foto anterior. */
+  imagenOrigen?: OrigenImagen;
+}
+
+/** Mensaje sin #pago que parece un pago (foto o texto): solo metadatos, nada descargado. */
+export interface MensajeSinPago {
+  conjunto: string;
+  esGrupo: boolean;
+  chatJid: string;
+  /** JID del remitente (respuesta privada). */
+  responderA: string;
+  /** Teléfono del remitente (dígitos), si WhatsApp lo expone. */
+  telefono: string;
+  tipo: 'imagen' | 'texto';
 }
 
 /**
@@ -189,6 +213,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
    */
   private readonly lectura = new Map<string, { conjunto: string; grupos: Set<string>; chats: boolean }>();
   private manejadorEntrantes: ((m: MensajeEntrante) => Promise<void>) | null = null;
+  private manejadorSinPago: ((m: MensajeSinPago) => Promise<void>) | null = null;
+  /** Fotos sin #pago recientes (solo referencia, en memoria, 5 min) por si el #pago llega aparte. */
+  private readonly fotosRecientes = new FotosRecientes(Math.max(60_000, Number(process.env.WSP_FOTO_VENTANA_MS) || 5 * 60_000));
   private readonly contadorLectura = new Map<string, { inicio: number; n: number }>();
   /** Exceso de mensajes: se encolan y se leen a ritmo limitado (no se descartan). */
   private readonly colasLectura = new Map<string, { nodos: any[]; timer: NodeJS.Timeout | null }>();
@@ -906,6 +933,11 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     this.manejadorEntrantes = fn;
   }
 
+  /** Mensajes sin #pago que parecen un pago (para la inducción del formato). */
+  alRecibirSinPago(fn: (m: MensajeSinPago) => Promise<void>): void {
+    this.manejadorSinPago = fn;
+  }
+
   /** Activa/desactiva la lectura del grupo y/o chats directos de un conjunto. */
   configurarLectura(conjunto: string, op: { grupos: string[]; chats: boolean }): void {
     const key = this.normalizeKey(conjunto);
@@ -1021,33 +1053,55 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     const esGrupo = !!isJidGroup(chatJid);
     if (esGrupo ? !cfg.grupos.has(chatJid) : !cfg.chats) return;
 
-    // Quita envolturas (mensajes temporales / ver una vez).
-    let m = msg.message;
-    for (let i = 0; i < 3 && m; i++) {
-      const inner = m.ephemeralMessage?.message || m.viewOnceMessage?.message || m.viewOnceMessageV2?.message || m.documentWithCaptionMessage?.message;
-      if (!inner) break;
-      m = inner;
-    }
+    const m = desenvolver(msg.message);
     if (!m) return;
-    const imagen = m.imageMessage || (String(m.documentMessage?.mimetype || '').startsWith('image/') ? m.documentMessage : null);
-    const texto = String(imagen?.caption || m.conversation || m.extendedTextMessage?.text || '').trim();
-    if (!texto || !/#\s?pago\b/i.test(texto)) return; // solo #pago: lo demás no se descarga ni procesa
-
+    const imagen = imagenDe(m);
+    const texto = textoDe(m);
     const remitente = String((esGrupo ? msg.key?.participant : chatJid) || '');
+
     const pn = String((msg.key as any)?.participantPn || (msg.key as any)?.senderPn || '');
     const telefono = (/@s\.whatsapp\.net$/.test(remitente) ? remitente : pn).split('@')[0].split(':')[0].replace(/\D/g, '');
 
-    let buffer: Buffer | null = null;
+    if (!texto || !/#\s?pago\b/i.test(texto)) {
+      // Sin #pago no se descarga ni se procesa nada. De una foto solo se
+      // recuerda la referencia unos minutos, por si el #pago llega enseguida
+      // como texto aparte ("anterior").
+      if (imagen) this.fotosRecientes.recordar(session.key, chatJid, remitente, { ...msg, message: m });
+      // Inducción (si el conjunto la activó): foto o texto sobre un pago sin #pago.
+      const tipo = imagen ? 'imagen' : pareceAvisoDePago(texto) ? 'texto' : null;
+      if (tipo && this.manejadorSinPago) {
+        this.manejadorSinPago({ conjunto: cfg.conjunto, esGrupo, chatJid, responderA: remitente || chatJid, telefono, tipo }).catch((e) =>
+          this.logger.warn(`[${session.key}] Inducción no enviada: ${e?.message}`),
+        );
+      }
+      return;
+    }
+
+    // Foto del comprobante: adjunta al #pago, citada por el #pago (respuesta) o
+    // la que el mismo remitente acaba de enviar en el chat.
+    let fuente: MensajeConImagen | null = null;
+    let imagenOrigen: OrigenImagen | undefined;
     if (imagen) {
+      fuente = { ...msg, message: m };
+      imagenOrigen = 'adjunta';
+      this.fotosRecientes.tomar(session.key, chatJid, remitente); // ya no aplica
+    } else if ((fuente = imagenCitada(m, chatJid))) {
+      imagenOrigen = 'citada';
+    } else if ((fuente = this.fotosRecientes.tomar(session.key, chatJid, remitente))) {
+      imagenOrigen = 'anterior';
+    }
+
+    let buffer: Buffer | null = null;
+    if (fuente) {
       try {
         buffer = (await downloadMediaMessage(
-          { ...msg, message: m },
+          fuente as any,
           'buffer',
           {},
           { logger: pino({ level: 'silent' }) as any, reuploadRequest: session.sock!.updateMediaMessage },
         )) as Buffer;
       } catch (e: any) {
-        this.logger.warn(`[${session.key}] No se pudo descargar el comprobante: ${e?.message}`);
+        this.logger.warn(`[${session.key}] No se pudo descargar el comprobante (${imagenOrigen}): ${e?.message}`);
       }
     }
     await this.manejadorEntrantes!({
@@ -1061,6 +1115,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       telefono,
       texto,
       imagen: buffer,
+      imagenOrigen: buffer ? imagenOrigen : undefined,
     });
   }
 

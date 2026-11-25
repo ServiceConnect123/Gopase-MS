@@ -51,6 +51,7 @@ export class PagosWspController {
         chat: { type: 'boolean' },
         grupoEnlace: { type: 'string', description: 'https://chat.whatsapp.com/…' },
         fondo: { type: 'string' },
+        induccion: { type: 'boolean', description: 'Escribir al privado explicando el formato a quien envíe un pago sin #pago' },
         conjunto: { type: 'string', description: 'Solo superAdmin' },
       },
     },
@@ -65,6 +66,7 @@ export class PagosWspController {
         chat: typeof body?.chat === 'boolean' ? body.chat : undefined,
         grupoEnlace: typeof body?.grupoEnlace === 'string' ? body.grupoEnlace : undefined,
         fondo: typeof body?.fondo === 'string' ? body.fondo : undefined,
+        induccion: typeof body?.induccion === 'boolean' ? body.induccion : undefined,
       },
       String(req?.user?.sub || 'admin'),
     );
