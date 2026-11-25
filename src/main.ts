@@ -71,6 +71,10 @@ async function bootstrap() {
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     // sentry-trace / baggage: propagación de trazas app -> API (Sentry).
     allowedHeaders: ['Content-Type', 'x-api-key', 'x-sync-token', 'accept', 'Authorization', 'X-Enc', 'sentry-trace', 'baggage'],
+    // Cachea el preflight 24 h en el navegador (Chrome topa en 2 h). Sin esto
+    // cada llamada de la app hacía DOS viajes (OPTIONS + la petición): ~50 % del
+    // tráfico en Render eran respuestas 204 de preflight.
+    maxAge: 86400,
   });
 
   // Swagger / OpenAPI en /docs (y el JSON en /docs-json).
