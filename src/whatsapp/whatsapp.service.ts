@@ -36,6 +36,7 @@ import {
   imagenDe,
   textoDe,
 } from '../pagos-whatsapp/pagos-wsp.imagen';
+import { pareceAvisoDePago } from '../pagos-whatsapp/pagos-wsp.induccion';
 
 /**
  * libsignal (dependencia de Baileys) imprime con console.error un stack completo
@@ -178,6 +179,18 @@ export interface MensajeEntrante {
   imagenOrigen?: OrigenImagen;
 }
 
+/** Mensaje sin #pago que parece un pago (foto o texto): solo metadatos, nada descargado. */
+export interface MensajeSinPago {
+  conjunto: string;
+  esGrupo: boolean;
+  chatJid: string;
+  /** JID del remitente (respuesta privada). */
+  responderA: string;
+  /** Teléfono del remitente (dígitos), si WhatsApp lo expone. */
+  telefono: string;
+  tipo: 'imagen' | 'texto';
+}
+
 /**
  * Maneja la conexión con WhatsApp usando Baileys, con MULTI-SESIÓN por conjunto.
  *
@@ -200,6 +213,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
    */
   private readonly lectura = new Map<string, { conjunto: string; grupos: Set<string>; chats: boolean }>();
   private manejadorEntrantes: ((m: MensajeEntrante) => Promise<void>) | null = null;
+  private manejadorSinPago: ((m: MensajeSinPago) => Promise<void>) | null = null;
   /** Fotos sin #pago recientes (solo referencia, en memoria, 5 min) por si el #pago llega aparte. */
   private readonly fotosRecientes = new FotosRecientes(Math.max(60_000, Number(process.env.WSP_FOTO_VENTANA_MS) || 5 * 60_000));
   private readonly contadorLectura = new Map<string, { inicio: number; n: number }>();
@@ -919,6 +933,11 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     this.manejadorEntrantes = fn;
   }
 
+  /** Mensajes sin #pago que parecen un pago (para la inducción del formato). */
+  alRecibirSinPago(fn: (m: MensajeSinPago) => Promise<void>): void {
+    this.manejadorSinPago = fn;
+  }
+
   /** Activa/desactiva la lectura del grupo y/o chats directos de un conjunto. */
   configurarLectura(conjunto: string, op: { grupos: string[]; chats: boolean }): void {
     const key = this.normalizeKey(conjunto);
@@ -1040,16 +1059,23 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     const texto = textoDe(m);
     const remitente = String((esGrupo ? msg.key?.participant : chatJid) || '');
 
+    const pn = String((msg.key as any)?.participantPn || (msg.key as any)?.senderPn || '');
+    const telefono = (/@s\.whatsapp\.net$/.test(remitente) ? remitente : pn).split('@')[0].split(':')[0].replace(/\D/g, '');
+
     if (!texto || !/#\s?pago\b/i.test(texto)) {
       // Sin #pago no se descarga ni se procesa nada. De una foto solo se
       // recuerda la referencia unos minutos, por si el #pago llega enseguida
       // como texto aparte ("anterior").
       if (imagen) this.fotosRecientes.recordar(session.key, chatJid, remitente, { ...msg, message: m });
+      // Inducción (si el conjunto la activó): foto o texto sobre un pago sin #pago.
+      const tipo = imagen ? 'imagen' : pareceAvisoDePago(texto) ? 'texto' : null;
+      if (tipo && this.manejadorSinPago) {
+        this.manejadorSinPago({ conjunto: cfg.conjunto, esGrupo, chatJid, responderA: remitente || chatJid, telefono, tipo }).catch((e) =>
+          this.logger.warn(`[${session.key}] Inducción no enviada: ${e?.message}`),
+        );
+      }
       return;
     }
-
-    const pn = String((msg.key as any)?.participantPn || (msg.key as any)?.senderPn || '');
-    const telefono = (/@s\.whatsapp\.net$/.test(remitente) ? remitente : pn).split('@')[0].split(':')[0].replace(/\D/g, '');
 
     // Foto del comprobante: adjunta al #pago, citada por el #pago (respuesta) o
     // la que el mismo remitente acaba de enviar en el chat.
