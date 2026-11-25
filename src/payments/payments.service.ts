@@ -1,3 +1,4 @@
+import { destinosValidos, listaMetodos, tarifaDeUsuario } from '../cuota/cuota.rules';
 import { runFinanceChat, type ChatTurn, type OwnerRow } from './finance-chat.ai';
 import { claveCache, generarConIA, guardarCache, hoyColombia, leerCache, parsearJsonIA, reducirImagen } from '../ai/gemini';
 import { tieneCartera } from '../tenants/tenant-rules';
@@ -1234,7 +1235,8 @@ export class PaymentsService {
       const conjuntos = await this.firebase.liveValues<any>('mirror/conjuntos');
       const conj = String(u?.conjunto || '').trim().toLowerCase();
       const c = conjuntos.find((x) => String(x?.nombre || '').trim().toLowerCase() === conj || String(x?.id || '').trim().toLowerCase() === conj);
-      cuota = Number(String(c?.cuotaMonto ?? 0).replace(/[^\d.]/g, '')) || 0;
+      // La tarifa de la unidad (o la base si no tiene / está inactiva).
+      cuota = c ? tarifaDeUsuario(c, u).valor : 0;
     } catch {
       /* sin cuota configurada */
     }
@@ -2118,7 +2120,15 @@ export class PaymentsService {
 
     // Cuenta de destino esperada: la del FONDO (cuentaRecaudo) si tiene una
     // propia; si no, la llave Bre-B del conjunto.
+    // Todos los métodos de recaudo activos del conjunto (llaves Bre-B y cuentas).
     let cuentaEsperada = llaveBreB;
+    try {
+      const conjuntos = await this.firebase.liveValues<any>('mirror/conjuntos');
+      const n = String(input.conjunto || '').trim().toLowerCase();
+      const conj = conjuntos.find((x) => String(x?.nombre || '').trim().toLowerCase() === n || String(x?.id || '').trim().toLowerCase() === n);
+      const destinos = conj ? destinosValidos(listaMetodos(conj)) : [];
+      if (destinos.length) cuentaEsperada = destinos.join(' o ');
+    } catch { /* se usa la llave del conjunto */ }
     if (String(input.tipoRecaudo || '').trim()) {
       try {
         const fondos = await this.funds.list(input.conjunto || '');
@@ -2184,7 +2194,7 @@ Definiciones:
 
 4. nivelRiesgo: "alto" si estás bastante seguro de edición o generación por IA; "medio" si hay indicios claros pero no concluyentes; "bajo" si parece auténtico.
 
-5. destinatarioCorrecto: ${cuentaEsperada ? `true si la cuenta/llave/número de DESTINO del comprobante (a quién se transfirió) contiene o coincide con "${cuentaEsperada}". Compara ignorando espacios y guiones. false si es claramente diferente o no se puede verificar.` : 'true (no hay cuenta configurada para verificar).'}
+5. destinatarioCorrecto: ${cuentaEsperada ? `true si la cuenta/llave/número de DESTINO del comprobante (a quién se transfirió) contiene o coincide con "${cuentaEsperada}". Si hay varias separadas por " o ", basta con que coincida una. Compara ignorando espacios y guiones. false si es claramente diferente o no se puede verificar.` : 'true (no hay cuenta configurada para verificar).'}
 
 6. monto: valor entero total pagado en pesos colombianos. En Colombia el punto es separador de miles y la coma decimales. Ej: "60.000,00"=60000, "$120.000"=120000, "1.200.000"=1200000. Solo el número entero sin puntos ni comas. Si no lo identificas, 0.
 
