@@ -235,6 +235,21 @@ test('sin valor escrito usa el leído por la IA; si la IA falla usa la cuota', a
   assert.deepStrictEqual([b.creados[0].montoPerMonth, b.creados[0].periodos.length], ['60000', 1]);
 });
 
+test('la IA dice que no es un comprobante: no crea el pago y explica', async () => {
+  const { svc, creados, fb } = armar({ ia: { success: true, monto: 0, analysis: { esComprobante: false, esAutentico: true, motivo: 'selfie' } } });
+  const s = await svc.procesar(msg());
+  assert.deepStrictEqual([s.estado, s.reaccion, creados.length], ['rechazado', '❓', 0]);
+  assert.match(s.respuesta, /no parece un comprobante/);
+  assert.match(fb.data.wsp_pagos.registros['villa mayra'].M1.motivo, /^no_es_comprobante/);
+});
+
+test('sin lectura de la IA: el pago queda marcado SIN_VALIDAR', async () => {
+  const { svc, creados } = armar({ ia: { success: false, iaNoDisponible: true } });
+  const s = await svc.procesar(msg());
+  assert.strictEqual(s.estado, 'registrado');
+  assert.match(creados[0].referencia, /\[AI:SIN_VALIDAR\]$/);
+});
+
 test('documento en el grupo: registra pero sugiere usar usuario o teléfono', async () => {
   const { svc } = armar();
   const s = await svc.procesar(msg({ texto: '#pago Documento: 1020304050 nov' }));

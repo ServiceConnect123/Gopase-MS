@@ -283,6 +283,16 @@ export class PagosWspService implements OnModuleInit {
     const ia = await this.payments
       .analyzeReceipt({ conjunto: m.conjunto, imageBase64: base64, validarDestino: true, tipoRecaudo: fondo })
       .catch(() => ({ success: false }) as any);
+    const an = ia?.success ? ia.analysis : null;
+    // La IA dice que la foto no es un comprobante (selfie, paisaje, documento…): no se crea el pago.
+    if (an && an.esComprobante === false) {
+      await registrar('rechazado', { motivo: `no_es_comprobante${an.motivo ? `: ${String(an.motivo).slice(0, 120)}` : ''}`, hash });
+      return {
+        estado: 'rechazado',
+        respuesta: 'La imagen no parece un comprobante de pago. Envía la *captura de la transferencia* con #pago en el pie de foto (o responde a esa captura con #pago).',
+        reaccion: m.esGrupo ? '❓' : undefined,
+      };
+    }
     const detectado = ia?.success ? Number(ia.monto) || 0 : 0;
     const valor = parseado.valor || detectado || undefined;
 
@@ -296,7 +306,8 @@ export class PagosWspService implements OnModuleInit {
 
     // Marcas para la revisión del admin (mismas que usa la app).
     const flags: string[] = [];
-    const an = ia?.analysis;
+    // Sin lectura de la IA (sin Gemini configurado o falló): el admin debe revisarlo a mano.
+    if (!an) flags.push('SIN_VALIDAR');
     if (an && an.esAutentico === false) flags.push('MANIPULACION');
     if (an?.checkedDestinatario && !an.destinatarioCorrecto) flags.push('DESTINATARIO');
     if (parseado.valor && detectado && Math.abs(parseado.valor - detectado) > Math.max(1000, detectado * 0.02)) flags.push('MONTO');
