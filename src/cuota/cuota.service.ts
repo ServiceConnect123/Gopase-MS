@@ -1,8 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
 import {
-  BANCOS, MetodoRecaudo, TIPOS_LLAVE, ajustarPrincipal, listaMetodos, listaTarifas, llaveCompat,
-  normalizarMetodo, num, resumenTarifas, tarifaDeUsuario, validarMetodo, validarTarifa,
+  BANCOS, MetodoRecaudo, TIPOS_LLAVE, listaMetodos, listaTarifas, llaveCompat, metodosAObjeto,
+  num, opCambiarMetodo, opEliminarMetodo, opGuardarMetodo, resumenTarifas, tarifaDeUsuario, validarTarifa,
 } from './cuota.rules';
 
 const MIRROR_CONJUNTOS = 'mirror/conjuntos';
@@ -152,13 +152,8 @@ export class CuotaService {
   // ---------------------------------------------------------------------------
 
   private async guardarMetodos(key: string, lista: MetodoRecaudo[]) {
-    const obj: Record<string, any> = {};
-    lista.forEach((m) => {
-      const { id, ...rest } = m;
-      obj[id] = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined));
-    });
     await this.firebase.db().ref(`${MIRROR_CONJUNTOS}/${key}`).update({
-      metodosRecaudo: obj,
+      metodosRecaudo: metodosAObjeto(lista),
       llaveBreB: llaveCompat(lista),
       _fbWrite: true,
     });
@@ -168,64 +163,28 @@ export class CuotaService {
   async guardarMetodo(conjunto: string, dto: any, id?: string): Promise<Res<{ id: string; metodos: MetodoRecaudo[] }>> {
     const found = await this.findConjunto(conjunto);
     if (!found) return { success: false, message: 'El conjunto no existe.' };
-    let lista = listaMetodos(found.value);
-    const previo = id ? lista.find((m) => m.id === id) : undefined;
-    if (id && !previo) return { success: false, message: 'El método no existe.' };
-
-    const mid = id || `m${Date.now().toString(36)}`;
-    const m = normalizarMetodo({ ...(previo || {}), ...dto, id: mid, activo: previo ? previo.activo : true, principal: previo?.principal });
-    const err = validarMetodo(m);
-    if (err) return { success: false, message: err };
-    const dup = lista.find((x) => x.id !== mid && x.tipo === m.tipo && (m.tipo === 'breb' ? this.norm(x.llave) === this.norm(m.llave) : x.banco === m.banco && x.numero === m.numero));
-    if (dup) return { success: false, message: 'Ese método ya está registrado.' };
-
-    lista = previo ? lista.map((x) => (x.id === mid ? m : x)) : lista.concat([m]);
-    lista = ajustarPrincipal(lista, dto?.principal === true ? mid : undefined);
-    await this.guardarMetodos(found.key, lista);
-    return { success: true, id: mid, metodos: lista };
+    const r = opGuardarMetodo(listaMetodos(found.value), dto, id);
+    if (!r.ok) return { success: false, message: r.message };
+    await this.guardarMetodos(found.key, r.lista);
+    return { success: true, id: r.id, metodos: r.lista };
   }
 
   /** Activa/desactiva o marca como principal. */
   async cambiarMetodo(conjunto: string, id: string, patch: { activo?: boolean; principal?: boolean }): Promise<Res<{ metodos: MetodoRecaudo[]; aviso?: string }>> {
     const found = await this.findConjunto(conjunto);
     if (!found) return { success: false, message: 'El conjunto no existe.' };
-    let lista = listaMetodos(found.value);
-    const m = lista.find((x) => x.id === id);
-    if (!m) return { success: false, message: 'El método no existe.' };
-    let aviso: string | undefined;
-
-    if (patch.activo === false && m.activo) {
-      const otros = lista.filter((x) => x.id !== id && x.activo);
-      if (!otros.length) return { success: false, message: 'No puedes desactivar el único método activo: los propietarios no tendrían a dónde pagar.' };
-      lista = lista.map((x) => (x.id === id ? { ...x, activo: false, principal: false } : x));
-      if (m.principal) {
-        lista = ajustarPrincipal(lista);
-        const nuevo = lista.find((x) => x.principal);
-        aviso = `${nuevo?.tipo === 'breb' ? 'La llave Bre-B' : BANCOS[nuevo?.banco || ''] || 'Otro método'} es ahora el método principal.`;
-      }
-    } else if (patch.activo === true && !m.activo) {
-      lista = ajustarPrincipal(lista.map((x) => (x.id === id ? { ...x, activo: true } : x)));
-    }
-    if (patch.principal === true) {
-      const actual = lista.find((x) => x.id === id)!;
-      if (!actual.activo) return { success: false, message: 'Activa el método antes de hacerlo principal.' };
-      lista = ajustarPrincipal(lista, id);
-    }
-    await this.guardarMetodos(found.key, lista);
-    return { success: true, metodos: lista, aviso };
+    const r = opCambiarMetodo(listaMetodos(found.value), id, patch);
+    if (!r.ok) return { success: false, message: r.message };
+    await this.guardarMetodos(found.key, r.lista);
+    return { success: true, metodos: r.lista, aviso: r.aviso };
   }
 
   async eliminarMetodo(conjunto: string, id: string): Promise<Res<{ metodos: MetodoRecaudo[] }>> {
     const found = await this.findConjunto(conjunto);
     if (!found) return { success: false, message: 'El conjunto no existe.' };
-    let lista = listaMetodos(found.value);
-    const m = lista.find((x) => x.id === id);
-    if (!m) return { success: false, message: 'El método no existe.' };
-    if (m.activo && !lista.some((x) => x.id !== id && x.activo)) {
-      return { success: false, message: 'No puedes eliminar el único método activo.' };
-    }
-    lista = ajustarPrincipal(lista.filter((x) => x.id !== id));
-    await this.guardarMetodos(found.key, lista);
-    return { success: true, metodos: lista };
+    const r = opEliminarMetodo(listaMetodos(found.value), id);
+    if (!r.ok) return { success: false, message: r.message };
+    await this.guardarMetodos(found.key, r.lista);
+    return { success: true, metodos: r.lista };
   }
 }

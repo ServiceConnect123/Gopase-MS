@@ -112,9 +112,7 @@ export function listaMetodos(conj: any): MetodoRecaudo[] {
       titular: txt(conj?.nombre, 120), activo: true, principal: true,
     }];
   }
-  const lista = Object.entries(raw).map(([id, m]: [string, any]) => normalizarMetodo({ ...m, id }));
-  // Orden: principal, activos, inactivos.
-  return lista.sort((a, b) => Number(b.principal) - Number(a.principal) || Number(b.activo) - Number(a.activo));
+  return metodosDeObjeto(raw);
 }
 
 function tipoLlaveDe(llave: string): string {
@@ -196,6 +194,89 @@ export function metodosPublicos(lista: MetodoRecaudo[]) {
         ? { tipoLlave: m.tipoLlave, llave: m.llave }
         : { banco: m.banco, bancoNombre: BANCOS[m.banco || ''] || '', tipoCuenta: m.tipoCuenta, numero: m.numero, nit: m.nit }),
     }));
+}
+
+// ---------------------------------------------------------------------------
+// Operaciones sobre una lista de métodos (puras). Las usan los métodos de
+// recaudo del conjunto y las cuentas de GoPase (cobro de suscripciones).
+// ---------------------------------------------------------------------------
+
+type Op<T = {}> = ({ ok: true; lista: MetodoRecaudo[] } & T) | { ok: false; message: string };
+const normLlave = (s: unknown) => String(s ?? '').trim().toLowerCase().replace(/\s+/g, '');
+
+/** Crea (sin id) o edita un método. `dto.principal === true` lo vuelve el principal. */
+export function opGuardarMetodo(lista: MetodoRecaudo[], dto: any, id?: string, nuevoId?: string): Op<{ id: string }> {
+  const previo = id ? lista.find((m) => m.id === id) : undefined;
+  if (id && !previo) return { ok: false, message: 'El método no existe.' };
+  const mid = id || nuevoId || `m${Date.now().toString(36)}`;
+  const m = normalizarMetodo({ ...(previo || {}), ...dto, id: mid, activo: previo ? previo.activo : true, principal: previo?.principal });
+  const err = validarMetodo(m);
+  if (err) return { ok: false, message: err };
+  const dup = lista.find((x) => x.id !== mid && x.tipo === m.tipo && (m.tipo === 'breb' ? normLlave(x.llave) === normLlave(m.llave) : x.banco === m.banco && x.numero === m.numero));
+  if (dup) return { ok: false, message: 'Ese método ya está registrado.' };
+  let nueva = previo ? lista.map((x) => (x.id === mid ? m : x)) : lista.concat([m]);
+  nueva = ajustarPrincipal(nueva, dto?.principal === true ? mid : undefined);
+  return { ok: true, lista: nueva, id: mid };
+}
+
+/** Activa/desactiva o marca como principal. `quien` nombra a los que pagan (para el mensaje). */
+export function opCambiarMetodo(lista: MetodoRecaudo[], id: string, patch: { activo?: boolean; principal?: boolean }, quien = 'los propietarios'): Op<{ aviso?: string }> {
+  const m = lista.find((x) => x.id === id);
+  if (!m) return { ok: false, message: 'El método no existe.' };
+  let nueva = lista;
+  let aviso: string | undefined;
+  if (patch.activo === false && m.activo) {
+    if (!nueva.some((x) => x.id !== id && x.activo)) {
+      return { ok: false, message: `No puedes desactivar el único método activo: ${quien} no tendrían a dónde pagar.` };
+    }
+    nueva = nueva.map((x) => (x.id === id ? { ...x, activo: false, principal: false } : x));
+    if (m.principal) {
+      nueva = ajustarPrincipal(nueva);
+      const p = nueva.find((x) => x.principal);
+      aviso = `${p?.tipo === 'breb' ? 'La llave Bre-B' : BANCOS[p?.banco || ''] || 'Otro método'} es ahora el método principal.`;
+    }
+  } else if (patch.activo === true && !m.activo) {
+    nueva = ajustarPrincipal(nueva.map((x) => (x.id === id ? { ...x, activo: true } : x)));
+  }
+  if (patch.principal === true) {
+    if (!nueva.find((x) => x.id === id)!.activo) return { ok: false, message: 'Activa el método antes de hacerlo principal.' };
+    nueva = ajustarPrincipal(nueva, id);
+  }
+  return { ok: true, lista: nueva, aviso };
+}
+
+export function opEliminarMetodo(lista: MetodoRecaudo[], id: string): Op {
+  const m = lista.find((x) => x.id === id);
+  if (!m) return { ok: false, message: 'El método no existe.' };
+  if (m.activo && !lista.some((x) => x.id !== id && x.activo)) return { ok: false, message: 'No puedes eliminar el único método activo.' };
+  return { ok: true, lista: ajustarPrincipal(lista.filter((x) => x.id !== id)) };
+}
+
+/** Lista → objeto para RTDB (clave = id, sin campos undefined). */
+export function metodosAObjeto(lista: MetodoRecaudo[]): Record<string, any> {
+  const obj: Record<string, any> = {};
+  lista.forEach(({ id, ...rest }) => { obj[id] = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined)); });
+  return obj;
+}
+
+/** Objeto de RTDB → lista ordenada (principal, activos, inactivos). */
+export function metodosDeObjeto(raw: any): MetodoRecaudo[] {
+  if (!raw || typeof raw !== 'object') return [];
+  return Object.entries(raw)
+    .map(([id, m]: [string, any]) => normalizarMetodo({ ...m, id }))
+    .sort((a, b) => Number(b.principal) - Number(a.principal) || Number(b.activo) - Number(a.activo));
+}
+
+/** Id de banco a partir de un nombre libre ("Bancolombia", "banco de bogotá"…). */
+export function bancoPorNombre(nombre: unknown): string {
+  const n = String(nombre ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/^banco\s+(de\s+)?/, '').trim();
+  if (!n) return '';
+  if (BANCOS[n]) return n;
+  const hit = Object.entries(BANCOS).find(([, v]) => {
+    const vv = v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/^banco\s+(de\s+)?/, '');
+    return vv === n || vv.includes(n) || n.includes(vv);
+  });
+  return hit ? hit[0] : '';
 }
 
 /**

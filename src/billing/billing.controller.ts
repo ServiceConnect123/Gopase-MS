@@ -133,8 +133,10 @@ export class BillingController {
   @Public()
   @Get('epayco/status')
   async epaycoStatus() {
-    const cfg = await this.appConfig.getEpaycoConfigForUI();
-    return { success: true, configured: cfg.configured };
+    const [cfg, medios] = await Promise.all([this.appConfig.getEpaycoConfigForUI(), this.appConfig.getMediosPago()]);
+    // Pago electrónico disponible: ePayco configurado y algún medio electrónico habilitado.
+    const electronico = medios.tarjeta || medios.pse || medios.nequi;
+    return { success: true, configured: cfg.configured && electronico, epaycoConfigurado: cfg.configured, medios };
   }
 
   // ===========================================================================
@@ -147,8 +149,9 @@ export class BillingController {
   @Public()
   @Get('payment-info')
   async getPaymentInfo() {
-    const data = await this.appConfig.getDatosPago();
-    return { success: true, data: data ?? null };
+    // Forma antigua (tipo/llave/banco… de la cuenta principal) + cuentas activas + medios.
+    const data = await this.appConfig.getInfoPagoPublica();
+    return { success: true, data };
   }
 
   @ApiOperation({
@@ -179,6 +182,58 @@ export class BillingController {
       tipoCuenta:   body?.tipoCuenta === 'corriente' ? 'corriente' : 'ahorro',
       titular:      String(body?.titular      ?? '').trim(),
     });
+  }
+
+  // ===========================================================================
+  // Cobros: cuentas de GoPase y medios de pago habilitados (solo superAdmin)
+  // ===========================================================================
+
+  @ApiOperation({ summary: 'Cuentas de GoPase para transferencias y medios habilitados (superAdmin).' })
+  @UseGuards(SuperAdminGuard)
+  @Get('cobros')
+  async getCobros() {
+    const [cuentas, medios] = await Promise.all([this.appConfig.getCuentasGopase(), this.appConfig.getMediosPago()]);
+    return { success: true, data: { cuentas, medios } };
+  }
+
+  @ApiOperation({ summary: 'Agrega una cuenta de GoPase (Bre-B o banco).' })
+  @UseGuards(SuperAdminGuard)
+  @Post('cuentas')
+  async crearCuenta(@Body() body: any) {
+    return this.appConfig.guardarCuentaGopase(body || {});
+  }
+
+  @ApiOperation({ summary: 'Edita una cuenta de GoPase.' })
+  @UseGuards(SuperAdminGuard)
+  @Put('cuentas/:id')
+  async editarCuenta(@Param('id') id: string, @Body() body: any) {
+    return this.appConfig.guardarCuentaGopase(body || {}, id);
+  }
+
+  @ApiOperation({ summary: 'Activa/desactiva o marca como principal una cuenta de GoPase.' })
+  @UseGuards(SuperAdminGuard)
+  @Put('cuentas/:id/estado')
+  async estadoCuenta(@Param('id') id: string, @Body() body: any) {
+    const patch: { activo?: boolean; principal?: boolean } = {};
+    if (typeof body?.activo === 'boolean') patch.activo = body.activo;
+    if (body?.principal === true) patch.principal = true;
+    return this.appConfig.cambiarCuentaGopase(id, patch);
+  }
+
+  @ApiOperation({ summary: 'Elimina una cuenta de GoPase.' })
+  @UseGuards(SuperAdminGuard)
+  @Delete('cuentas/:id')
+  async eliminarCuenta(@Param('id') id: string) {
+    return this.appConfig.eliminarCuentaGopase(id);
+  }
+
+  @ApiOperation({ summary: 'Medios con los que los conjuntos pueden pagar su plan (tarjeta, PSE, Nequi, transferencia).' })
+  @UseGuards(SuperAdminGuard)
+  @Put('medios')
+  async guardarMedios(@Body() body: any) {
+    const dto: Record<string, boolean> = {};
+    for (const k of ['tarjeta', 'pse', 'nequi', 'transferencia']) if (typeof body?.[k] === 'boolean') dto[k] = body[k];
+    return this.appConfig.saveMediosPago(dto);
   }
 
   // ===========================================================================
@@ -242,6 +297,10 @@ export class BillingController {
     const { conjunto, planId, ciclo, adminEmail, adminNombre, adminTelefono } = body || {};
     if (!conjunto || !planId || !ciclo) {
       return { success: false, message: 'conjunto, planId y ciclo son requeridos.' };
+    }
+    const medios = await this.appConfig.getMediosPago();
+    if (!medios.tarjeta && !medios.pse && !medios.nequi) {
+      return { success: false, message: 'El pago electrónico no está habilitado. Paga con transferencia y sube el comprobante.' };
     }
     return this.epayco.createSession({ conjunto, planId, ciclo, adminEmail, adminNombre, adminTelefono });
   }
