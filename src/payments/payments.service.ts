@@ -1236,7 +1236,12 @@ export class PaymentsService {
       const conj = String(u?.conjunto || '').trim().toLowerCase();
       const c = conjuntos.find((x) => String(x?.nombre || '').trim().toLowerCase() === conj || String(x?.id || '').trim().toLowerCase() === conj);
       // La tarifa de la unidad (o la base si no tiene / está inactiva).
-      cuota = c ? tarifaDeUsuario(c, u).valor : 0;
+      // Inquilino: la tarifa es la de la unidad (su propietario).
+      const dueno = String((u as any)?.inquilino?.propietario || '').trim();
+      const perfil = dueno && String((u as any)?.rol || '').toLowerCase() === 'inquilino'
+        ? usuarios.find((x) => String(x.usuario).toLowerCase() === dueno.toLowerCase()) || u
+        : u;
+      cuota = c ? tarifaDeUsuario(c, perfil).valor : 0;
     } catch {
       /* sin cuota configurada */
     }
